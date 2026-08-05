@@ -1,0 +1,23 @@
+services:
+  dockerls:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dockerls:latest
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+    volumes:
+      - cache-data:/home/dockerls/.cache/dockerls
+    environment:
+      - DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME:-}
+      - DOCKERHUB_TOKEN=${DOCKERHUB_TOKEN:-}
+    entrypoint: ["dockerls"]
+    command: ["--help"]
+
+volumes:
+  cache-data:

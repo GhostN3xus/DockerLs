@@ -1,0 +1,86 @@
+import json
+import pytest
+
+from dockerls.application.dto.analysis import AnalysisResult, ImageAnalysis
+from dockerls.domain.entities.image import DockerImage
+from dockerls.domain.entities.scan_result import ScanResult
+from dockerls.exporters.factory import ExporterFactory
+from dockerls.exporters.json_exporter import JSONExporter
+from dockerls.exporters.csv_exporter import CSVExporter
+from dockerls.exporters.html_exporter import HTMLExporter
+from dockerls.exporters.markdown_exporter import MarkdownExporter
+
+
+@pytest.fixture
+def analysis_result():
+    img = DockerImage(name="node", tag="22-alpine", is_official=True)
+    scan = ScanResult(image_reference="node:22-alpine")
+    analysis = ImageAnalysis(
+        image=img, scan=scan, security_score=98.0,
+        tier="S", remediation_score=100,
+    )
+    return AnalysisResult(
+        query="node", total_tags_scanned=50,
+        baseline_met=True, recommendations=[analysis],
+    )
+
+
+class TestJSONExporter:
+    def test_export_string(self, analysis_result):
+        exporter = JSONExporter()
+        output = exporter.export_string(analysis_result)
+        data = json.loads(output)
+        assert data["query"] == "node"
+        assert data["baseline_met"] is True
+
+
+class TestCSVExporter:
+    def test_export_string(self, analysis_result):
+        exporter = CSVExporter()
+        output = exporter.export_string(analysis_result)
+        assert "node" in output
+        assert "22-alpine" in output
+        assert "Image,Tag,Score" in output
+
+
+class TestHTMLExporter:
+    def test_export_string(self, analysis_result):
+        exporter = HTMLExporter()
+        output = exporter.export_string(analysis_result)
+        assert "<html" in output
+        assert "node:22-alpine" in output
+        assert "DockerLs" in output
+
+
+class TestMarkdownExporter:
+    def test_export_string(self, analysis_result):
+        exporter = MarkdownExporter()
+        output = exporter.export_string(analysis_result)
+        assert "# DockerLs" in output
+        assert "node:22-alpine" in output
+
+
+class TestExporterFactory:
+    def test_create_json(self):
+        e = ExporterFactory.create("json")
+        assert isinstance(e, JSONExporter)
+
+    def test_create_csv(self):
+        e = ExporterFactory.create("csv")
+        assert isinstance(e, CSVExporter)
+
+    def test_create_html(self):
+        e = ExporterFactory.create("html")
+        assert isinstance(e, HTMLExporter)
+
+    def test_create_markdown(self):
+        e = ExporterFactory.create("markdown")
+        assert isinstance(e, MarkdownExporter)
+
+    def test_create_md(self):
+        e = ExporterFactory.create("md")
+        assert isinstance(e, MarkdownExporter)
+
+    def test_unsupported(self):
+        with pytest.raises(ValueError, match="Unsupported format"):
+            ExporterFactory.create("xml")
