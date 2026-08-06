@@ -4,23 +4,45 @@ import asyncio
 import json
 import shutil
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
 from dockerls.domain.entities.scan_result import ScanResult, ScanStatus
 from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.scanner import ScannerInterface
+from dockerls.integrations.trivy.cache_pool import TrivyCachePool, default_trivy_cache_dir
 from dockerls.utils.validation import sanitize_image_name
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from dockerls.infrastructure.evidence import EvidenceStore
 
 
 class TrivyScanner(ScannerInterface):
-    def __init__(self, timeout: int = 300, skip_db_update: bool = False):
+    def __init__(
+        self,
+        timeout: int = 300,
+        skip_db_update: bool = False,
+        cache_dir: Path | None = None,
+        workers: int = 1,
+        evidence: EvidenceStore | None = None,
+    ):
         self._timeout = timeout
         self._skip_db_update = skip_db_update
+        self._cache_pool = TrivyCachePool(cache_dir or default_trivy_cache_dir(), workers)
+        self._evidence = evidence
+
+    @property
+    def cache_pool(self) -> TrivyCachePool:
+        return self._cache_pool
 
     async def is_available(self) -> bool:
         return shutil.which("trivy") is not None
+
+    def _cache_args(self, cache_dir: Path) -> list[str]:
+        return ["--cache-dir", str(cache_dir)]
 
     async def generate_sbom(self, image_reference: str, fmt: str = "cyclonedx") -> str | None:
         """Generate an SBOM for `image_reference` using Trivy's built-in
@@ -29,34 +51,44 @@ class TrivyScanner(ScannerInterface):
             raise ValueError(f"Unsupported SBOM format: {fmt}")
 
         safe_ref = sanitize_image_name(image_reference)
-        cmd = ["trivy", "image", "--format", fmt, "--quiet"]
-        if self._skip_db_update:
-            cmd.append("--skip-db-update")
-        cmd.append(safe_ref)
 
-        try:
-            proc = await asyncio.create_subprocess_exec(  # noqa: S603
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
-            if proc.returncode != 0 or not stdout:
-                logger.error(f"SBOM generation failed for {safe_ref}: {stderr.decode()[:300]}")
+        async with self._cache_pool.acquire() as cache_dir:
+            cmd = ["trivy", "image", "--format", fmt, "--quiet", *self._cache_args(cache_dir)]
+            if self._skip_db_update:
+                cmd.append("--skip-db-update")
+            cmd.append(safe_ref)
+
+            try:
+                proc = await asyncio.create_subprocess_exec(  # noqa: S603
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
+                if proc.returncode != 0 or not stdout:
+                    logger.error(f"SBOM generation failed for {safe_ref}: {stderr.decode()[:300]}")
+                    return None
+                return stdout.decode()
+            except (TimeoutError, OSError) as e:
+                logger.error(f"SBOM generation failed for {safe_ref}: {e}")
                 return None
-            return stdout.decode()
-        except (TimeoutError, OSError) as e:
-            logger.error(f"SBOM generation failed for {safe_ref}: {e}")
-            return None
 
     async def refresh_db(self) -> bool:
-        """Download/refresh the Trivy vulnerability DB once, up front."""
+        """Download the vulnerability DB once, up front, then build the
+        per-worker cache dir pool.
+
+        Doing the download here (rather than letting the first scan trigger
+        it) is what makes `--skip-db-update` safe for every subsequent scan,
+        and it removes the single biggest source of cache lock contention.
+        """
+        base = self._cache_pool.base_dir
         try:
             proc = await asyncio.create_subprocess_exec(
                 "trivy",
                 "image",
                 "--download-db-only",
                 "--quiet",
+                *self._cache_args(base),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -64,79 +96,97 @@ class TrivyScanner(ScannerInterface):
             if proc.returncode != 0:
                 logger.warning(f"Trivy DB refresh failed: {stderr.decode()[:200]}")
                 return False
-            self._skip_db_update = True
-            return True
         except (TimeoutError, OSError) as e:
             logger.warning(f"Trivy DB refresh failed: {e}")
             return False
+
+        self._skip_db_update = True
+        isolated = await self._cache_pool.prepare()
+        logger.info(
+            f"Trivy DB ready at {base}; "
+            f"cache isolation {'enabled' if isolated else 'unavailable (scans serialized)'}"
+        )
+        return True
+
+    async def close(self) -> None:
+        await self._cache_pool.cleanup()
 
     async def scan(self, image_reference: str) -> ScanResult:
         safe_ref = sanitize_image_name(image_reference)
         logger.info(f"Scanning {safe_ref} with Trivy")
         timestamp = datetime.now(tz=UTC).isoformat()
 
-        cmd = [
-            "trivy",
-            "image",
-            "--format",
-            "json",
-            "--severity",
-            "CRITICAL,HIGH,MEDIUM,LOW",
-            "--quiet",
-        ]
-        if self._skip_db_update:
-            cmd.append("--skip-db-update")
-        cmd.append(safe_ref)
+        async with self._cache_pool.acquire() as cache_dir:
+            cmd = [
+                "trivy",
+                "image",
+                "--format",
+                "json",
+                "--severity",
+                "CRITICAL,HIGH,MEDIUM,LOW",
+                "--quiet",
+                *self._cache_args(cache_dir),
+            ]
+            if self._skip_db_update:
+                cmd.append("--skip-db-update")
+            cmd.append(safe_ref)
 
-        try:
-            proc = await asyncio.create_subprocess_exec(  # noqa: S603
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
+            try:
+                proc = await asyncio.create_subprocess_exec(  # noqa: S603
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
 
-            if proc.returncode != 0:
-                err = stderr.decode(errors="replace")[:500]
-                logger.error(f"Trivy returned code {proc.returncode} for {safe_ref}: {err}")
+                if proc.returncode != 0:
+                    # Trivy writes its own diagnostics to stderr; they are
+                    # captured into the log file and folded into the run
+                    # summary rather than dumped raw onto the terminal.
+                    err = stderr.decode(errors="replace")[:500]
+                    logger.error(f"Trivy returned code {proc.returncode} for {safe_ref}: {err}")
+                    return ScanResult(
+                        image_reference=safe_ref,
+                        scanner="trivy",
+                        scan_timestamp=timestamp,
+                        status=ScanStatus.ERROR,
+                        error_message=err,
+                    )
+
+                if not stdout:
+                    return ScanResult(
+                        image_reference=safe_ref,
+                        scanner="trivy",
+                        scan_timestamp=timestamp,
+                        status=ScanStatus.ERROR,
+                        error_message="Trivy produced no output",
+                    )
+
+                raw = stdout.decode()
+                data = json.loads(raw)
+                result = self._parse_results(safe_ref, data)
+                if self._evidence is not None:
+                    result.evidence_path = await self._evidence.record_scan(safe_ref, "trivy", raw)
+                return result
+
+            except TimeoutError:
+                logger.error(f"Trivy scan timed out for {safe_ref}")
+                return ScanResult(
+                    image_reference=safe_ref,
+                    scanner="trivy",
+                    scan_timestamp=timestamp,
+                    status=ScanStatus.TIMEOUT,
+                    error_message=f"Scan exceeded {self._timeout}s timeout",
+                )
+            except (json.JSONDecodeError, OSError) as e:
+                logger.error(f"Trivy scan failed for {safe_ref}: {e}")
                 return ScanResult(
                     image_reference=safe_ref,
                     scanner="trivy",
                     scan_timestamp=timestamp,
                     status=ScanStatus.ERROR,
-                    error_message=err,
+                    error_message=str(e),
                 )
-
-            if not stdout:
-                return ScanResult(
-                    image_reference=safe_ref,
-                    scanner="trivy",
-                    scan_timestamp=timestamp,
-                    status=ScanStatus.ERROR,
-                    error_message="Trivy produced no output",
-                )
-
-            data = json.loads(stdout.decode())
-            return self._parse_results(safe_ref, data)
-
-        except TimeoutError:
-            logger.error(f"Trivy scan timed out for {safe_ref}")
-            return ScanResult(
-                image_reference=safe_ref,
-                scanner="trivy",
-                scan_timestamp=timestamp,
-                status=ScanStatus.TIMEOUT,
-                error_message=f"Scan exceeded {self._timeout}s timeout",
-            )
-        except (json.JSONDecodeError, OSError) as e:
-            logger.error(f"Trivy scan failed for {safe_ref}: {e}")
-            return ScanResult(
-                image_reference=safe_ref,
-                scanner="trivy",
-                scan_timestamp=timestamp,
-                status=ScanStatus.ERROR,
-                error_message=str(e),
-            )
 
     def _parse_results(self, image_ref: str, data: dict[str, Any]) -> ScanResult:
         vulns: list[Vulnerability] = []

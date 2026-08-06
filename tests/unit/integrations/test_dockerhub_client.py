@@ -99,3 +99,91 @@ class TestRetryAfter:
 
         retry_after_calls = [c for c in mock_sleep.await_args_list if c.args == (3.0,)]
         assert len(retry_after_calls) >= 1
+
+
+class _RecordingCache:
+    def __init__(self):
+        self.store: dict = {}
+        self.gets: list[str] = []
+
+    async def get(self, key):
+        self.gets.append(key)
+        return self.store.get(key)
+
+    async def set(self, key, value, ttl_seconds=86400):
+        self.store[key] = value
+
+    async def delete(self, key):
+        self.store.pop(key, None)
+
+    async def clear(self):
+        self.store.clear()
+
+
+class TestTagExists:
+    @pytest.mark.asyncio
+    async def test_present_tag_returns_true(self):
+        client = DockerHubClient()
+        with patch.object(
+            DockerHubClient, "_get_json", AsyncMock(return_value=_response(200, {"name": "22"}))
+        ):
+            assert await client.tag_exists("node", "22") is True
+
+    @pytest.mark.asyncio
+    async def test_missing_tag_returns_false(self):
+        client = DockerHubClient()
+        with patch.object(DockerHubClient, "_get_json", AsyncMock(return_value=_response(404))):
+            assert await client.tag_exists("node", "does-not-exist") is False
+
+    @pytest.mark.asyncio
+    async def test_network_failure_returns_none_not_false(self):
+        """`None` means "unverified"; reporting it as False would drop a
+        perfectly good image because the network hiccuped."""
+        client = DockerHubClient()
+        with patch.object(
+            DockerHubClient, "_get_json", AsyncMock(side_effect=httpx.ConnectError("boom"))
+        ):
+            assert await client.tag_exists("node", "22") is None
+
+    @pytest.mark.asyncio
+    async def test_unexpected_status_returns_none(self):
+        client = DockerHubClient()
+        with patch.object(DockerHubClient, "_get_json", AsyncMock(return_value=_response(500))):
+            assert await client.tag_exists("node", "22") is None
+
+    @pytest.mark.asyncio
+    async def test_non_dockerhub_image_is_not_queried(self):
+        client = DockerHubClient()
+        get_json = AsyncMock()
+        with patch.object(DockerHubClient, "_get_json", get_json):
+            assert await client.tag_exists("ghcr.io/org/app", "v1") is None
+        get_json.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_result_is_cached_so_hub_is_hit_once(self):
+        cache = _RecordingCache()
+        client = DockerHubClient(cache=cache)
+        get_json = AsyncMock(return_value=_response(200, {"name": "22"}))
+        with patch.object(DockerHubClient, "_get_json", get_json):
+            assert await client.tag_exists("node", "22") is True
+            assert await client.tag_exists("node", "22") is True
+        assert get_json.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_unknown_results_are_not_cached(self):
+        cache = _RecordingCache()
+        client = DockerHubClient(cache=cache)
+        with patch.object(
+            DockerHubClient, "_get_json", AsyncMock(side_effect=httpx.ConnectError("boom"))
+        ):
+            await client.tag_exists("node", "22")
+        assert cache.store == {}
+
+    @pytest.mark.asyncio
+    async def test_uses_library_namespace_for_official_images(self):
+        client = DockerHubClient()
+        get_json = AsyncMock(return_value=_response(200, {"name": "22"}))
+        with patch.object(DockerHubClient, "_get_json", get_json):
+            await client.tag_exists("node", "22")
+        url = get_json.await_args.args[-1]
+        assert url == "https://hub.docker.com/v2/repositories/library/node/tags/22"

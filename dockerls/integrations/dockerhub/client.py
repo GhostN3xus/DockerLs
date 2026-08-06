@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from loguru import logger
@@ -11,17 +11,33 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from dockerls.domain.entities.image import DockerImage
 from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
+from dockerls.integrations.dockerhub.urls import build_tag_api_url
 from dockerls.utils.validation import sanitize_image_name
+
+if TYPE_CHECKING:
+    from dockerls.domain.interfaces.cache_store import CacheStoreInterface
+
+# Anonymous Docker Hub requests are rate limited, and a `recommend` run
+# checks one tag per candidate. Existence of a tag changes rarely, so a
+# local TTL cache keeps repeated runs well under the limit.
+TAG_EXISTS_TTL_SECONDS = 6 * 3600
 
 
 class DockerHubClient(ImageRepositoryInterface):
     BASE_URL = "https://hub.docker.com/v2"
 
-    def __init__(self, username: str = "", token: str = "", timeout: int = 30):
+    def __init__(
+        self,
+        username: str = "",
+        token: str = "",
+        timeout: int = 30,
+        cache: CacheStoreInterface | None = None,
+    ):
         self._username = username
         self._token = token
         self._timeout = timeout
         self._auth_token: str = ""
+        self._cache = cache
 
     async def _get_client(self) -> httpx.AsyncClient:
         headers = {"Accept": "application/json"}
@@ -137,6 +153,45 @@ class DockerHubClient(ImageRepositoryInterface):
                     break
 
         return tags[:limit]
+
+    async def tag_exists(self, image_name: str, tag: str) -> bool | None:
+        """Confirm `tag` really exists on Docker Hub.
+
+        Returns True/False on a definitive API answer, and None when the
+        answer is unknown -- the image is not hosted on Docker Hub, or the
+        network call failed. `None` must not be reported to the user as
+        "tag missing"; it means "not verified".
+        """
+        url = build_tag_api_url(image_name, tag)
+        if not url:
+            return None
+
+        cache_key = f"hubtag:{image_name}:{tag}"
+        if self._cache:
+            cached = await self._cache.get(cache_key)
+            if isinstance(cached, bool):
+                return cached
+
+        try:
+            async with await self._get_client() as client:
+                resp = await self._get_json(client, url)
+        except httpx.HTTPError as e:
+            logger.warning(f"Could not verify tag {image_name}:{tag} on Docker Hub: {e}")
+            return None
+
+        if resp.status_code == 404:
+            exists = False
+        elif resp.is_success:
+            exists = True
+        else:
+            logger.warning(
+                f"Unexpected status {resp.status_code} verifying {image_name}:{tag} on Docker Hub"
+            )
+            return None
+
+        if self._cache:
+            await self._cache.set(cache_key, exists, ttl_seconds=TAG_EXISTS_TTL_SECONDS)
+        return exists
 
     async def get_image_metadata(self, image_name: str, tag: str) -> DockerImage | None:
         safe_name = sanitize_image_name(image_name)

@@ -119,6 +119,58 @@ still carries vulnerabilities at or above that severity, even in fallback
 mode -- useful for failing a CI job on a fallback recommendation you don't
 consider acceptable.
 
+#### What a recommendation guarantees
+
+Every row in the **Recommended Images** table has cleared three gates. If a
+tag cannot clear all three, it is reported separately and never scored:
+
+1. **Proven scan.** The scanner process exited cleanly and its JSON was
+   parsed. A failed, timed-out or partial scan sends the tag to the
+   `Unverified (technical error)` section -- it gets no score and no tier.
+2. **Undisputed score.** The top candidates are re-scanned with the second
+   scanner (Grype when Trivy is primary, and vice versa). If the two
+   disagree materially on CRITICAL/HIGH counts, the score is shown as
+   `!disputed` instead of a number, with the discrepancy printed below.
+3. **Tag confirmed on Docker Hub.** Each tag is checked against the Hub API
+   before it is offered, and the table carries a direct link to it.
+
+The run opens with a one-line summary of how many tags were analyzed versus
+skipped, plus the path to that run's log file:
+
+```
+OK 12/24 analyzed | X 12 skipped (technical error)
+log: logs/dockerls_2026-08-06_13-36-15.log
+```
+
+#### Output, logs and evidence
+
+The terminal shows only a progress spinner and the results. All diagnostics
+-- including scanner stderr -- go to `logs/dockerls_<timestamp>.log`; pass
+`--verbose` to mirror them to stderr as well. Set `DOCKERLS_LOG_DIR` to move
+the log directory.
+
+The raw JSON from every scan is written to `.dockerls/scans/`, alongside a
+per-run manifest linking each displayed score to the exact scanner output it
+came from. Set `DOCKERLS_EVIDENCE_DIR` to relocate it.
+
+| Flag | Effect |
+|------|--------|
+| `--verbose` / `-v` | Also print logs to stderr |
+| `--no-progress` | Disable the progress spinner |
+| `--no-cross-validate` | Skip second-scanner validation (faster) |
+| `--no-hub-check` | Skip Docker Hub tag verification (offline use) |
+
+#### Scan concurrency
+
+Trivy takes an exclusive lock on its cache directory, so parallel scans
+sharing one cache dir fail with `cache may be in use by another process:
+timeout`. DockerLs downloads the vulnerability DB once up front, then gives
+each concurrent worker its own cache directory with the DB hard-linked in,
+and removes those directories when the run ends. If hard-linking is not
+possible, it falls back to a single shared cache dir and serializes scans --
+slower, but never lock-contended. `DOCKERLS_TRIVY_CACHE_DIR` overrides the
+cache root.
+
 ### advisor
 
 Full security advisor with remediation steps.

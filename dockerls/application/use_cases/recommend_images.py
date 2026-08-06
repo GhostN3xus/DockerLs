@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 from pydantic import ValidationError
 
-from dockerls.application.dto.analysis import AnalysisResult, ImageAnalysis
+from dockerls.application.dto.analysis import AnalysisResult, ImageAnalysis, UnverifiedImage
+from dockerls.application.services.progress import NullObserver
 from dockerls.domain.entities.recommendation import (
     ActionType,
     Recommendation,
@@ -16,17 +17,30 @@ from dockerls.domain.entities.recommendation import (
 from dockerls.domain.value_objects.remediation_score import RemediationScore
 from dockerls.domain.value_objects.security_score import SecurityScore
 from dockerls.domain.value_objects.security_tier import SecurityTier
+from dockerls.integrations.dockerhub.urls import build_dockerhub_url
 from dockerls.utils.ignore_file import active_ignored_cve_ids, load_ignore_rules
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from dockerls.application.services.cross_validation import CrossValidator
+    from dockerls.application.services.progress import ScanObserver
     from dockerls.domain.entities.image import DockerImage
     from dockerls.domain.interfaces.cache_store import CacheStoreInterface
     from dockerls.domain.interfaces.eol_checker import EOLCheckerInterface
     from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
     from dockerls.domain.interfaces.scanner import ScannerInterface
+    from dockerls.infrastructure.evidence import EvidenceStore
     from dockerls.integrations.threat_intel.client import ThreatIntelClient
+
+# How many ranked candidates are surfaced to the user.
+TOP_N = 5
+
+
+class UnverifiedRecommendationError(RuntimeError):
+    """Raised when an image without a proven successful scan would have been
+    presented as a recommendation. This is a programming error, not a user
+    error: it means a code path bypassed the verification gate."""
 
 
 class RecommendImagesUseCase:
@@ -42,6 +56,11 @@ class RecommendImagesUseCase:
         workers: int = 10,
         ignore_path: Path | None = None,
         threat_intel: ThreatIntelClient | None = None,
+        observer: ScanObserver | None = None,
+        cross_validator: CrossValidator | None = None,
+        evidence: EvidenceStore | None = None,
+        verify_hub_tags: bool = True,
+        log_file: Path | None = None,
     ):
         self._repository = repository
         self._scanner = scanner
@@ -53,12 +72,25 @@ class RecommendImagesUseCase:
         self._workers = workers
         self._ignored_cves = active_ignored_cve_ids(load_ignore_rules(ignore_path))
         self._threat_intel = threat_intel
+        self._observer: ScanObserver = observer or NullObserver()
+        self._cross_validator = cross_validator
+        self._evidence = evidence
+        self._verify_hub_tags = verify_hub_tags
+        self._log_file = log_file
 
     async def execute(self, image_name: str, limit: int = 100) -> AnalysisResult:
+        try:
+            return await self._execute(image_name, limit)
+        finally:
+            await self._close_scanners()
+
+    async def _execute(self, image_name: str, limit: int = 100) -> AnalysisResult:
+        self._observer.phase("Preparing vulnerability database")
         refresh_db = getattr(self._scanner, "refresh_db", None)
         if callable(refresh_db):
             await refresh_db()
 
+        self._observer.phase(f"Fetching tags for {image_name}")
         tags = await self._repository.search_tags(image_name, limit=limit)
         if not tags:
             return AnalysisResult(
@@ -66,10 +98,51 @@ class RecommendImagesUseCase:
                 total_tags_scanned=0,
                 baseline_met=False,
                 errors=["No tags found for image"],
+                log_file=str(self._log_file or ""),
             )
 
+        analyses, unverified, errors = await self._scan_all(tags)
+        analyses.sort(key=lambda a: a.security_score, reverse=True)
+
+        baseline_images = [
+            a
+            for a in analyses
+            if a.scan.critical_count <= self._max_critical
+            and a.scan.high_count <= self._max_high
+            and a.scan.medium_count <= self._max_medium
+            and not a.is_eol
+        ]
+
+        if baseline_images:
+            baseline_met = True
+            pool = baseline_images
+        else:
+            baseline_met = False
+            pool = [a for a in analyses if a.scan.critical_count == 0 and not a.is_eol]
+            pool.sort(key=lambda a: (a.scan.high_count, -a.remediation_score))
+
+        selected = await self._finalize(pool, unverified)
+
+        result = AnalysisResult(
+            query=image_name,
+            total_tags_scanned=len(tags),
+            total_tags_analyzed=len(analyses),
+            baseline_met=baseline_met and bool(selected),
+            recommendations=selected if baseline_met else [],
+            alternatives=[] if baseline_met else selected,
+            errors=errors,
+            unverified=unverified,
+            log_file=str(self._log_file or ""),
+        )
+        result.evidence_manifest = await self._write_manifest(image_name, selected)
+        return result
+
+    async def _scan_all(
+        self, tags: list[DockerImage]
+    ) -> tuple[list[ImageAnalysis], list[UnverifiedImage], list[str]]:
         semaphore = asyncio.Semaphore(self._workers)
         errors: list[str] = []
+        unverified: list[UnverifiedImage] = []
 
         # P0-3: dedupe scans by digest so tags sharing the same manifest
         # digest are only scanned once and share the result.
@@ -90,22 +163,31 @@ class RecommendImagesUseCase:
                 scan_cache[key] = scan
                 return scan
 
+        def _skip(image: DockerImage, status: str, reason: str) -> None:
+            logger.warning(f"Skipping {image.full_reference}: {status} ({reason})")
+            unverified.append(
+                UnverifiedImage(
+                    image_reference=image.full_reference,
+                    status=status,
+                    reason=reason or "no details",
+                )
+            )
+            errors.append(f"{image.full_reference}: {status} ({reason or 'no details'})")
+
         async def analyze_tag(image: DockerImage) -> ImageAnalysis | None:
+            self._observer.scanning(image.full_reference)
+            analysis: ImageAnalysis | None = None
             try:
                 cached = await self._get_cached(image.full_reference)
                 if cached:
+                    analysis = cached
                     return cached
 
                 scan = await get_scan(image)
-                if not scan.is_usable:
-                    logger.warning(
-                        f"Skipping {image.full_reference}: scan status "
-                        f"{scan.status.value} ({scan.error_message})"
-                    )
-                    errors.append(
-                        f"{image.full_reference}: scan {scan.status.value} "
-                        f"({scan.error_message or 'no details'})"
-                    )
+                # Single verification gate: anything short of a completed,
+                # parsed scan is reported as unverified and is never scored.
+                if not scan.is_verified:
+                    _skip(image, scan.status.value, scan.error_message)
                     return None
 
                 if self._ignored_cves:
@@ -129,70 +211,143 @@ class RecommendImagesUseCase:
                     remediation_score=rem_score.value,
                     is_eol=is_eol,
                     is_lts=is_lts,
+                    evidence_paths=(
+                        {scan.scanner: scan.evidence_path} if scan.evidence_path else {}
+                    ),
                 )
 
                 await self._set_cached(image.full_reference, analysis)
                 return analysis
             except Exception as e:
                 logger.warning(f"Failed to analyze {image.full_reference}: {e}")
-                errors.append(f"{image.full_reference}: {e}")
+                _skip(image, "ERROR", str(e))
                 return None
+            finally:
+                self._observer.finished(image.full_reference, analysis is not None)
 
-        tasks = [analyze_tag(tag) for tag in tags]
-        results = await asyncio.gather(*tasks)
-        analyses = [r for r in results if r is not None]
-        analyses.sort(key=lambda a: a.security_score, reverse=True)
+        self._observer.start(len(tags))
+        results = await asyncio.gather(*[analyze_tag(tag) for tag in tags])
+        return [r for r in results if r is not None], unverified, errors
 
-        baseline_images = [
-            a
-            for a in analyses
-            if a.scan.critical_count <= self._max_critical
-            and a.scan.high_count <= self._max_high
-            and a.scan.medium_count <= self._max_medium
-            and not a.is_eol
+    async def _finalize(
+        self, pool: list[ImageAnalysis], unverified: list[UnverifiedImage]
+    ) -> list[ImageAnalysis]:
+        """Cross-validate, confirm Docker Hub tags, and enforce the
+        no-scan-no-recommendation invariant on the final candidate list."""
+        # Verify a wider slice than TOP_N so candidates dropped for a
+        # missing Hub tag can be backfilled from the next best ones.
+        candidates = pool[: TOP_N * 2]
+
+        if self._cross_validator is not None and self._cross_validator.enabled and candidates:
+            self._observer.phase(f"Cross-validating top {min(TOP_N, len(candidates))} candidates")
+            await self._cross_validator.validate(candidates[:TOP_N])
+
+        if self._verify_hub_tags and candidates:
+            self._observer.phase("Verifying tags on Docker Hub")
+            await self._verify_on_hub(candidates, unverified)
+            candidates = [c for c in candidates if c.hub_tag_verified is not False]
+
+        selected = candidates[:TOP_N]
+        _assert_verified(selected)
+        for analysis in selected:
+            analysis.recommendation = build_recommendation(analysis)
+        return selected
+
+    async def _verify_on_hub(
+        self, candidates: list[ImageAnalysis], unverified: list[UnverifiedImage]
+    ) -> None:
+        checker = getattr(self._repository, "tag_exists", None)
+
+        async def check(analysis: ImageAnalysis) -> None:
+            analysis.hub_url = build_dockerhub_url(analysis.image.name, analysis.image.tag)
+            if not callable(checker):
+                return
+            exists = await checker(analysis.image.name, analysis.image.tag)
+            analysis.hub_tag_verified = exists
+            if exists is False:
+                logger.warning(
+                    f"Dropping {analysis.image.full_reference}: tag not found on Docker Hub"
+                )
+                unverified.append(
+                    UnverifiedImage(
+                        image_reference=analysis.image.full_reference,
+                        status="TAG_NOT_FOUND",
+                        reason="Tag does not exist on Docker Hub",
+                    )
+                )
+
+        await asyncio.gather(*[check(c) for c in candidates])
+
+    async def _write_manifest(self, query: str, selected: list[ImageAnalysis]) -> str:
+        if self._evidence is None or not selected:
+            return ""
+        entries = [
+            {
+                "image": a.image.full_reference,
+                "security_score": a.security_score,
+                "tier": a.tier,
+                "critical": a.scan.critical_count,
+                "high": a.scan.high_count,
+                "medium": a.scan.medium_count,
+                "scan_status": a.scan.status.value,
+                "scan_timestamp": a.scan.scan_timestamp,
+                "scan_divergence": a.scan_divergence,
+                "hub_url": a.hub_url,
+                "hub_tag_verified": a.hub_tag_verified,
+                "evidence": a.evidence_paths,
+            }
+            for a in selected
         ]
+        return await self._evidence.record_manifest(query, entries)
 
-        if baseline_images:
-            for img in baseline_images[:5]:
-                img.recommendation = build_recommendation(img)
-            return AnalysisResult(
-                query=image_name,
-                total_tags_scanned=len(tags),
-                baseline_met=True,
-                recommendations=baseline_images[:5],
-                errors=errors,
-            )
-
-        alternatives = [a for a in analyses if a.scan.critical_count == 0 and not a.is_eol]
-        alternatives.sort(key=lambda a: (a.scan.high_count, -a.remediation_score))
-
-        for alt in alternatives[:5]:
-            alt.recommendation = build_recommendation(alt)
-
-        return AnalysisResult(
-            query=image_name,
-            total_tags_scanned=len(tags),
-            baseline_met=False,
-            recommendations=[],
-            alternatives=alternatives[:5],
-            errors=errors,
-        )
+    async def _close_scanners(self) -> None:
+        secondary = self._cross_validator.scanner if self._cross_validator else None
+        for scanner in (self._scanner, secondary):
+            close = getattr(scanner, "close", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception as e:  # pragma: no cover - cleanup must not mask results
+                    logger.warning(f"Scanner cleanup failed: {e}")
 
     async def _get_cached(self, key: str) -> ImageAnalysis | None:
-        if self._cache:
-            data = await self._cache.get(f"analysis:{key}")
-            if data and isinstance(data, dict):
-                try:
-                    return ImageAnalysis.model_validate(data)
-                except ValidationError as e:
-                    logger.warning(f"Discarding stale cache entry for {key}: {e}")
-                    await self._cache.delete(f"analysis:{key}")
-                    return None
-        return None
+        if not self._cache:
+            return None
+        data = await self._cache.get(f"analysis:{key}")
+        if not (data and isinstance(data, dict)):
+            return None
+        try:
+            analysis: ImageAnalysis = ImageAnalysis.model_validate(data)
+        except ValidationError as e:
+            logger.warning(f"Discarding stale cache entry for {key}: {e}")
+            await self._cache.delete(f"analysis:{key}")
+            return None
+        # A cache hit is not proof of a successful scan: an entry written by
+        # an older build could carry a failed scan. Re-apply the gate.
+        if not analysis.scan.is_verified:
+            logger.warning(f"Discarding cache entry for {key}: cached scan is not verified")
+            await self._cache.delete(f"analysis:{key}")
+            return None
+        return analysis
 
     async def _set_cached(self, key: str, analysis: ImageAnalysis) -> None:
         if self._cache:
             await self._cache.set(f"analysis:{key}", analysis.model_dump(), ttl_seconds=86400)
+
+
+def _assert_verified(analyses: list[ImageAnalysis]) -> None:
+    """Final gate before results leave the use case.
+
+    Nothing reaches the user's "Recommended Images" table without a scan
+    result that exists, completed successfully, and produced a timestamp.
+    """
+    offenders = [
+        a.image.full_reference for a in analyses if a.scan is None or not a.scan.is_verified
+    ]
+    if offenders:
+        raise UnverifiedRecommendationError(
+            f"Refusing to recommend images without a verified scan: {', '.join(offenders)}"
+        )
 
 
 async def _enrich_with_threat_intel(scan: Any, threat_intel: ThreatIntelClient) -> Any:
@@ -310,6 +465,8 @@ def build_recommendation(analysis: ImageAnalysis) -> Recommendation:
         )
     if analysis.remediation_score == 100:
         summary_parts.append("All vulnerabilities have available fixes.")
+    if analysis.scan_divergence:
+        summary_parts.append(f"Scanner disagreement: {analysis.scan_divergence}.")
 
     return Recommendation(
         image_reference=analysis.image.full_reference,
