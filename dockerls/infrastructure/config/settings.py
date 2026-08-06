@@ -51,6 +51,9 @@ class Settings(BaseSettings):
 
     cache_dir: Path = Field(default_factory=_default_cache_dir)
     cache_ttl_seconds: int = 86400
+    # Tag existence is cached separately and more briefly: a tag
+    # disappearing matters sooner than a score going slightly stale.
+    tag_cache_ttl_seconds: int = 6 * 3600
     max_tags: int = 100
     workers: int = 10
     max_critical: int = 0

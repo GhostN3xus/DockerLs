@@ -5,9 +5,13 @@ from typing import Any, cast
 
 import httpx
 from loguru import logger
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from dockerls.domain.interfaces.eol_checker import EOLCheckerInterface
+from dockerls.utils.retry import (
+    DEFAULT_BACKOFF_BASE,
+    DEFAULT_MAX_ATTEMPTS,
+    retry_policy,
+)
 
 # Docker Hub image name -> endoflife.date product slug. Docker Hub names and
 # endoflife.date slugs frequently diverge (e.g. "node" vs "nodejs").
@@ -72,15 +76,26 @@ def _cycle_matches(version: str, cycle: str) -> bool:
 class EndOfLifeChecker(EOLCheckerInterface):
     BASE_URL = "https://endoflife.date/api"
 
-    def __init__(self, timeout: int = 15):
+    def __init__(
+        self,
+        timeout: int = 15,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        backoff_base: float = DEFAULT_BACKOFF_BASE,
+    ):
         self._timeout = timeout
+        self._max_attempts = max_attempts
+        self._backoff_base = backoff_base
         self._cache: dict[str, list[dict[str, Any]]] = {}
 
     def _resolve_product(self, product: str) -> str:
         return DOCKER_TO_ENDOFLIFE.get(product.lower(), product.lower())
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
     async def _fetch_product(self, product: str) -> list[dict[str, Any]]:
+        policy = retry_policy(self._max_attempts, self._backoff_base)
+        result: list[dict[str, Any]] = await policy(self._fetch_product_once, product)
+        return result
+
+    async def _fetch_product_once(self, product: str) -> list[dict[str, Any]]:
         slug = self._resolve_product(product)
         if slug in self._cache:
             return self._cache[slug]

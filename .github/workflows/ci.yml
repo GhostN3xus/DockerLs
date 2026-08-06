@@ -39,7 +39,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
-      - run: mypy dockerls/
+      - run: python -m mypy dockerls/
 
   test:
     runs-on: ubuntu-latest

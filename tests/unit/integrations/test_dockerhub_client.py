@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-from tenacity import RetryError
 
 from dockerls.integrations.dockerhub.client import DockerHubClient
 
@@ -86,6 +85,15 @@ class TestSearchTagsPartialResults:
 class TestRetryAfter:
     @pytest.mark.asyncio
     async def test_get_json_sleeps_for_retry_after_header(self):
+        """Exhausted retries must surface as an httpx error, not RetryError.
+
+        This previously asserted `RetryError`, which encoded a latent bug:
+        `tenacity.RetryError` is not an `httpx.HTTPError`, so the
+        `except httpx.HTTPError` handlers in `search_tags` and `tag_exists`
+        never caught it -- a sustained Hub rate limit crashed the command
+        instead of degrading to partial results. The retry policy now sets
+        `reraise=True` so the original error reaches those handlers.
+        """
         client = DockerHubClient()
         resp_429 = _response(429, {}, headers={"Retry-After": "3"})
 
@@ -94,11 +102,38 @@ class TestRetryAfter:
             patch("asyncio.sleep", AsyncMock()) as mock_sleep,
         ):
             async with await client._get_client() as http_client:
-                with pytest.raises(RetryError):
+                with pytest.raises(httpx.HTTPError):
                     await client._get_json(http_client, "https://hub.docker.com/v2/x")
 
         retry_after_calls = [c for c in mock_sleep.await_args_list if c.args == (3.0,)]
         assert len(retry_after_calls) >= 1
+
+    @pytest.mark.asyncio
+    async def test_sustained_rate_limit_degrades_instead_of_crashing(self):
+        """The bug the above test used to hide: `search_tags` must return
+        whatever it has rather than propagating out of the command."""
+        client = DockerHubClient()
+        resp_429 = _response(429, {}, headers={"Retry-After": "1"})
+
+        with (
+            patch("httpx.AsyncClient.get", AsyncMock(return_value=resp_429)),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            tags = await client.search_tags("node", limit=5)
+
+        assert tags == []
+
+    @pytest.mark.asyncio
+    async def test_sustained_rate_limit_makes_tag_exists_unknown(self):
+        client = DockerHubClient()
+        resp_429 = _response(429, {}, headers={"Retry-After": "1"})
+
+        with (
+            patch("httpx.AsyncClient.get", AsyncMock(return_value=resp_429)),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            # Unknown, never False: a rate limit is not evidence of absence.
+            assert await client.tag_exists("node", "22-alpine") is None
 
 
 class _RecordingCache:

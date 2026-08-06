@@ -50,6 +50,7 @@ dev = [
     "mypy>=1.10",
     "bandit>=1.7",
     "pip-audit>=2.7",
+    "types-PyYAML>=6.0",
 ]
 
 [project.scripts]
@@ -86,6 +87,9 @@ runtime-evaluated-base-classes = ["pydantic.BaseModel"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
+# Without this, every `class X(BaseModel)` is "cannot subclass ... has type
+# Any" -- 13 of the 20 errors that `strict = true` was silently tolerating.
+plugins = ["pydantic.mypy"]
 warn_unused_configs = true
 ignore_missing_imports = true
 

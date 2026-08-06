@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (audit of claims vs. code)
 
+- **A sustained Docker Hub rate limit crashed the command.** The `@retry`
+  decorator used tenacity's default, so exhausting retries raised
+  `tenacity.RetryError` -- which is *not* an `httpx.HTTPError`, so the
+  `except httpx.HTTPError` handlers in `search_tags` and `tag_exists` never
+  caught it. The retry policy now reraises the original error, and those
+  handlers degrade to partial results as they were written to. The previous
+  test asserted `RetryError` and so codified the bug.
+- **The remaining three shadowed settings are wired.** `cache_ttl_seconds`,
+  `retry_max_attempts` and `retry_backoff_base` were still read by nothing:
+  the TTL was hard-coded `86400` and the retry policy lived in a decorator
+  evaluated once at import, where no configuration could ever reach it.
+  The policy is now built per call from settings. Adds
+  `tag_cache_ttl_seconds`, which was previously a hard-coded 6 hours.
+- **`mypy strict` was nominal.** `pyproject.toml` declared `strict = true`
+  while tolerating 20 errors, 13 of them "cannot subclass BaseModel" from
+  the missing pydantic plugin. With `plugins = ["pydantic.mypy"]` and
+  `types-PyYAML`, the codebase now type-checks clean: 20 errors to 0. CI
+  runs `python -m mypy` so the plugin resolves against the same interpreter.
+
 - **No CI had ever run on this repository.** All four workflows triggered
   on `pull_request: branches: [main]`, and there is no `main` branch -- the
   default is `claude/docker-secure-finder-q7ikdh`. Lint, mypy and the test
