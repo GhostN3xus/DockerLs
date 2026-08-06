@@ -10,6 +10,7 @@ from rich.table import Table
 
 from dockerls.application.use_cases.recommend_images import build_recommendation
 from dockerls.cli.dependencies import build_recommend_use_case
+from dockerls.cli.options import OutputFormat
 from dockerls.cli.validators import check_workers
 
 console = Console()
@@ -18,8 +19,8 @@ console = Console()
 def advisor(
     image: str = typer.Argument(help="Docker image name (e.g., node, python, nginx)"),
     workers: int = typer.Option(10, "--workers", "-w", help="Concurrent workers"),
-    output_format: str = typer.Option(
-        "table", "--format", "-f", help="Output format: table or json"
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.TABLE, "--format", "-f", help="Output format"
     ),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
 ) -> None:
@@ -30,13 +31,13 @@ def advisor(
     asyncio.run(_advisor(image, workers, output_format))
 
 
-async def _advisor(image: str, workers: int, output_format: str) -> None:
+async def _advisor(image: str, workers: int, output_format: OutputFormat) -> None:
     use_case = await build_recommend_use_case(workers=workers)
     result = await use_case.execute(image)
 
     items = result.recommendations or result.alternatives
     if not items:
-        if output_format == "json":
+        if output_format == OutputFormat.JSON:
             error_payload = {"error": "No images found to advise on", "errors": result.errors}
             console.print(json.dumps(error_payload), soft_wrap=True)
         else:
@@ -46,7 +47,7 @@ async def _advisor(image: str, workers: int, output_format: str) -> None:
     best = items[0]
     rec = best.recommendation or build_recommendation(best)
 
-    if output_format == "json":
+    if output_format == OutputFormat.JSON:
         payload = best.model_dump()
         payload["remediation"] = rec.model_dump()
         console.print(json.dumps(payload, indent=2, default=str), soft_wrap=True)

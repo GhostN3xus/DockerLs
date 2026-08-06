@@ -11,6 +11,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from dockerls.cli.dependencies import build_recommend_use_case
+from dockerls.cli.options import OutputFormat
 from dockerls.cli.validators import check_limit, check_threshold, check_workers
 
 if TYPE_CHECKING:
@@ -55,8 +56,8 @@ def recommend(
     fail_on: FailOn = typer.Option(
         FailOn.NONE, "--fail-on", help="Exit non-zero if the top result has vulns at/above severity"
     ),
-    output_format: str = typer.Option(
-        "table", "--format", "-f", help="Output format: table or json"
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.TABLE, "--format", "-f", help="Output format"
     ),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
 ) -> None:
@@ -83,7 +84,7 @@ async def _recommend(
     limit: int,
     workers: int,
     fail_on: FailOn,
-    output_format: str,
+    output_format: OutputFormat,
 ) -> None:
     use_case = await build_recommend_use_case(
         max_critical=max_critical,
@@ -93,7 +94,7 @@ async def _recommend(
     )
     result = await use_case.execute(image, limit=limit)
 
-    if output_format == "json":
+    if output_format == OutputFormat.JSON:
         console.print(json.dumps(result.model_dump(), indent=2, default=str), soft_wrap=True)
     elif result.baseline_met and result.recommendations:
         console.print(Panel("[bold green]Recommended Images[/bold green]", expand=False))

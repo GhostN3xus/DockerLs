@@ -97,6 +97,23 @@ class TestLimitValidation:
         assert "limit must be at least 1" in r.output
 
 
+class TestFormatValidation:
+    """An invalid --format must error, not silently fall back to the table."""
+
+    @pytest.mark.parametrize("command", ["recommend", "advisor"])
+    def test_invalid_format_rejected(self, command):
+        r = _invoke([command, "node", "--format", "jsonn"])
+        assert r.exit_code != 0
+        assert "jsonn" in r.output
+
+    @pytest.mark.parametrize("command", ["recommend", "advisor"])
+    @pytest.mark.parametrize("value", ["table", "json"])
+    def test_valid_formats_accepted(self, command, value):
+        # Reaching the poisoned builder proves the value passed validation.
+        r = _invoke([command, "node", "--format", value])
+        assert isinstance(r.exception, AssertionError)
+
+
 class TestUseCaseGuards:
     """The use case itself refuses values that would deadlock it."""
 
