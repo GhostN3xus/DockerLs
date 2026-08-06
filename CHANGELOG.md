@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (audit of claims vs. code)
 
+- **`export` repeated the shadowed-settings bug** that was fixed only in
+  `recommend`: its `--workers` carried a hard-coded default of 10 and it
+  never passed a tag limit at all, so `DOCKERLS_WORKERS` and
+  `DOCKERLS_MAX_TAGS` had no effect there. It also wrote to disk with no
+  error handling, so an unwritable destination produced a traceback. It now
+  delegates both to configuration, creates missing parent directories, and
+  reports a write failure as a message with exit 1.
+- **`cache clear` / `cache cleanup` had no tests and no error handling.** A
+  corrupt cache database crashed the very command a user reaches for to fix
+  it. Storage errors are now reported with exit 1.
+
 - **A sustained Docker Hub rate limit crashed the command.** The `@retry`
   decorator used tenacity's default, so exhausting retries raised
   `tenacity.RetryError` -- which is *not* an `httpx.HTTPError`, so the
