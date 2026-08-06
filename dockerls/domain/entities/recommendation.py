@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel
 
 
-class ActionType(str, Enum):
+class ActionType(StrEnum):
     UPGRADE_IMAGE = "UPGRADE_IMAGE"
     SWITCH_TAG = "SWITCH_TAG"
     REBUILD_IMAGE = "REBUILD_IMAGE"

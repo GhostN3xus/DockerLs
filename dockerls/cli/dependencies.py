@@ -81,7 +81,10 @@ async def build_analyze_use_case() -> AnalyzeImageUseCase:
     scanner = await ScannerFactory.create()
     eol = EndOfLifeChecker(timeout=s.http_timeout)
     return AnalyzeImageUseCase(
-        repository=repo, scanner=scanner, eol_checker=eol, threat_intel=_threat_intel(),
+        repository=repo,
+        scanner=scanner,
+        eol_checker=eol,
+        threat_intel=_threat_intel(),
     )
 
 

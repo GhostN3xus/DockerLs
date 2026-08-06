@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import datetime
+from typing import Any
 
 import httpx
 from loguru import logger
@@ -26,7 +28,9 @@ class DockerHubClient(ImageRepositoryInterface):
         if self._auth_token:
             headers["Authorization"] = f"Bearer {self._auth_token}"
         return httpx.AsyncClient(
-            timeout=self._timeout, headers=headers, follow_redirects=True,
+            timeout=self._timeout,
+            headers=headers,
+            follow_redirects=True,
         )
 
     async def authenticate(self) -> bool:
@@ -60,7 +64,7 @@ class DockerHubClient(ImageRepositoryInterface):
         return resp
 
     @staticmethod
-    def _parse_images(images: list[dict]) -> tuple[int, str, str, list[str]]:
+    def _parse_images(images: list[dict[str, Any]]) -> tuple[int, str, str, list[str]]:
         """Return (size, digest, primary_architecture, all_architectures)."""
         archs = [img.get("architecture", "unknown") for img in images]
         for img in images:
@@ -106,16 +110,10 @@ class DockerHubClient(ImageRepositoryInterface):
                         last_updated = None
                         lu_str = tag_data.get("last_updated")
                         if lu_str:
-                            try:
-                                last_updated = datetime.fromisoformat(
-                                    lu_str.replace("Z", "+00:00")
-                                )
-                            except ValueError:
-                                pass
+                            with contextlib.suppress(ValueError):
+                                last_updated = datetime.fromisoformat(lu_str.replace("Z", "+00:00"))
 
-                        size, digest, arch, archs = self._parse_images(
-                            tag_data.get("images", [])
-                        )
+                        size, digest, arch, archs = self._parse_images(tag_data.get("images", []))
 
                         tags.append(
                             DockerImage(
@@ -158,12 +156,8 @@ class DockerHubClient(ImageRepositoryInterface):
                 last_updated = None
                 lu_str = data.get("last_updated")
                 if lu_str:
-                    try:
-                        last_updated = datetime.fromisoformat(
-                            lu_str.replace("Z", "+00:00")
-                        )
-                    except ValueError:
-                        pass
+                    with contextlib.suppress(ValueError):
+                        last_updated = datetime.fromisoformat(lu_str.replace("Z", "+00:00"))
 
                 size, digest, arch, archs = self._parse_images(data.get("images", []))
 

@@ -3,12 +3,12 @@ from __future__ import annotations
 import pytest
 
 from dockerls.application.use_cases.analyze_image import AnalyzeImageUseCase
+from dockerls.application.use_cases.compare_images import CompareImagesUseCase
 from dockerls.application.use_cases.recommend_images import RecommendImagesUseCase
 from dockerls.application.use_cases.search_images import SearchImagesUseCase
-from dockerls.application.use_cases.compare_images import CompareImagesUseCase
 from dockerls.domain.entities.image import DockerImage
 from dockerls.domain.entities.scan_result import ScanResult, ScanStatus
-from dockerls.domain.entities.vulnerability import Vulnerability, Severity
+from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.cache_store import CacheStoreInterface
 from dockerls.domain.interfaces.eol_checker import EOLCheckerInterface
 from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
@@ -38,7 +38,8 @@ class MockScanner(ScannerInterface):
     async def scan(self, image_reference):
         self.calls.append(image_reference)
         return ScanResult(
-            image_reference=image_reference, vulnerabilities=self._vulns,
+            image_reference=image_reference,
+            vulnerabilities=self._vulns,
             status=self._status,
             error_message="boom" if self._status != ScanStatus.OK else "",
         )

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
+from typing import TYPE_CHECKING
 
-from dockerls.domain.entities.scan_result import ScanResult
+if TYPE_CHECKING:
+    from dockerls.domain.entities.scan_result import ScanResult
 
 
-class Tier(str, Enum):
+class Tier(StrEnum):
     S = "S"
     A = "A"
     B = "B"

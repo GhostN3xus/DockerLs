@@ -1,9 +1,9 @@
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 from dockerls.domain.entities.image import DockerImage
-from dockerls.domain.entities.vulnerability import Vulnerability, Severity, FixStatus
+from dockerls.domain.entities.recommendation import ActionType, Recommendation, RemediationStep
 from dockerls.domain.entities.scan_result import ScanResult
-from dockerls.domain.entities.recommendation import Recommendation, RemediationStep, ActionType
+from dockerls.domain.entities.vulnerability import FixStatus, Severity, Vulnerability
 
 
 class TestDockerImage:
@@ -30,12 +30,12 @@ class TestDockerImage:
         assert img.age_days == 365
 
     def test_age_days_recent(self):
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         img = DockerImage(name="node", tag="latest", last_updated=now - timedelta(days=5))
         assert img.age_days == 5
 
     def test_recently_updated(self):
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         img = DockerImage(name="node", tag="latest", last_updated=now - timedelta(days=10))
         assert img.recently_updated is True
         img2 = DockerImage(name="node", tag="latest", last_updated=now - timedelta(days=60))

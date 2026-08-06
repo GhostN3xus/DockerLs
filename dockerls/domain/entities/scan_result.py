@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel
 
 from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 
 
-class ScanStatus(str, Enum):
+class ScanStatus(StrEnum):
     OK = "OK"
     ERROR = "ERROR"
     TIMEOUT = "TIMEOUT"
@@ -52,14 +52,10 @@ class ScanResult(BaseModel):
 
     @property
     def fixable_high_count(self) -> int:
-        return sum(
-            1 for v in self.vulnerabilities
-            if v.severity == Severity.HIGH and v.is_fixable
-        )
+        return sum(1 for v in self.vulnerabilities if v.severity == Severity.HIGH and v.is_fixable)
 
     @property
     def fixable_critical_count(self) -> int:
         return sum(
-            1 for v in self.vulnerabilities
-            if v.severity == Severity.CRITICAL and v.is_fixable
+            1 for v in self.vulnerabilities if v.severity == Severity.CRITICAL and v.is_fixable
         )

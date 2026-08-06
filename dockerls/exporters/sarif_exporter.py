@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from dockerls import __version__
-from dockerls.application.dto.analysis import AnalysisResult, ImageAnalysis
 from dockerls.domain.entities.vulnerability import Severity
 from dockerls.exporters.base import ExporterInterface
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from dockerls.application.dto.analysis import AnalysisResult, ImageAnalysis
 
 _SEVERITY_TO_LEVEL = {
     Severity.CRITICAL: "error",
@@ -26,8 +30,8 @@ class SARIFExporter(ExporterInterface):
 
     def export_string(self, result: AnalysisResult) -> str:
         images: list[ImageAnalysis] = [*result.recommendations, *result.alternatives]
-        rules: dict[str, dict] = {}
-        sarif_results: list[dict] = []
+        rules: dict[str, dict[str, Any]] = {}
+        sarif_results: list[dict[str, Any]] = []
 
         for analysis in images:
             for vuln in analysis.scan.vulnerabilities:
@@ -41,36 +45,42 @@ class SARIFExporter(ExporterInterface):
                             "tags": ["security", vuln.severity.value],
                         },
                     }
-                sarif_results.append({
-                    "ruleId": vuln.cve_id,
-                    "level": _SEVERITY_TO_LEVEL.get(vuln.severity, "warning"),
-                    "message": {
-                        "text": (
-                            f"{vuln.severity.value} vulnerability in "
-                            f"{vuln.package_name} {vuln.installed_version}"
-                            + (f" (fix: {vuln.fixed_version})" if vuln.fixed_version else "")
-                        )
-                    },
-                    "locations": [{
-                        "physicalLocation": {
-                            "artifactLocation": {"uri": analysis.image.full_reference}
-                        }
-                    }],
-                })
+                sarif_results.append(
+                    {
+                        "ruleId": vuln.cve_id,
+                        "level": _SEVERITY_TO_LEVEL.get(vuln.severity, "warning"),
+                        "message": {
+                            "text": (
+                                f"{vuln.severity.value} vulnerability in "
+                                f"{vuln.package_name} {vuln.installed_version}"
+                                + (f" (fix: {vuln.fixed_version})" if vuln.fixed_version else "")
+                            )
+                        },
+                        "locations": [
+                            {
+                                "physicalLocation": {
+                                    "artifactLocation": {"uri": analysis.image.full_reference}
+                                }
+                            }
+                        ],
+                    }
+                )
 
         sarif = {
             "version": "2.1.0",
             "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
-            "runs": [{
-                "tool": {
-                    "driver": {
-                        "name": "DockerLs",
-                        "informationUri": "https://github.com/GhostN3xus/DockerLs",
-                        "version": __version__,
-                        "rules": list(rules.values()),
-                    }
-                },
-                "results": sarif_results,
-            }],
+            "runs": [
+                {
+                    "tool": {
+                        "driver": {
+                            "name": "DockerLs",
+                            "informationUri": "https://github.com/GhostN3xus/DockerLs",
+                            "version": __version__,
+                            "rules": list(rules.values()),
+                        }
+                    },
+                    "results": sarif_results,
+                }
+            ],
         }
         return json.dumps(sarif, indent=2, default=str)

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from dockerls.application.dto.analysis import ComparisonResult, ImageAnalysis
-from dockerls.application.use_cases.analyze_image import AnalyzeImageUseCase
-from dockerls.domain.entities.vulnerability import Vulnerability
+
+if TYPE_CHECKING:
+    from dockerls.application.use_cases.analyze_image import AnalyzeImageUseCase
+    from dockerls.domain.entities.vulnerability import Vulnerability
 
 
 class CompareImagesUseCase:
@@ -33,7 +37,7 @@ class CompareImagesUseCase:
         common_vulns = [cve_map[cid] for cid in common_ids if cid in cve_map]
 
         unique_vulns: dict[str, list[Vulnerability]] = {}
-        for a, cve_ids_set in zip(analyses, all_cve_sets):
+        for a, cve_ids_set in zip(analyses, all_cve_sets, strict=True):
             unique_ids = cve_ids_set - common_ids
             unique_vulns[a.image.full_reference] = [
                 cve_map[uid] for uid in unique_ids if uid in cve_map
@@ -46,9 +50,7 @@ class CompareImagesUseCase:
         for a in analyses:
             if a.image.full_reference != winner.image.full_reference:
                 diff = winner.security_score - a.security_score
-                summary_parts.append(
-                    f"{a.image.full_reference}: -{diff:.1f} points"
-                )
+                summary_parts.append(f"{a.image.full_reference}: -{diff:.1f} points")
 
         return ComparisonResult(
             images=analyses,

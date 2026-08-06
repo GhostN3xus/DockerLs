@@ -1,18 +1,22 @@
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from dockerls.domain.entities.image import DockerImage
 from dockerls.domain.entities.scan_result import ScanResult, ScanStatus
-from dockerls.domain.entities.vulnerability import Vulnerability, Severity
+from dockerls.domain.entities.vulnerability import Severity, Vulnerability
+from dockerls.domain.value_objects.remediation_score import RemediationScore
 from dockerls.domain.value_objects.security_score import SecurityScore
 from dockerls.domain.value_objects.security_tier import SecurityTier, Tier
-from dockerls.domain.value_objects.remediation_score import RemediationScore
 
 
 def _image(**kwargs):
-    defaults = {"name": "node", "tag": "22-alpine", "is_official": True,
-                "last_updated": datetime.now(tz=timezone.utc) - timedelta(days=5)}
+    defaults = {
+        "name": "node",
+        "tag": "22-alpine",
+        "is_official": True,
+        "last_updated": datetime.now(tz=UTC) - timedelta(days=5),
+    }
     defaults.update(kwargs)
     return DockerImage(**defaults)
 
@@ -39,7 +43,7 @@ class TestSecurityScore:
         assert score.value == 0.0
 
     def test_score_clamped_to_hundred(self):
-        img = _image(last_updated=datetime.now(tz=timezone.utc))
+        img = _image(last_updated=datetime.now(tz=UTC))
         score = SecurityScore(img, _scan())
         assert score.value <= 100.0
 
@@ -55,7 +59,8 @@ class TestSecurityScore:
 
     def test_rejects_error_scan(self):
         scan = ScanResult(
-            image_reference="node:22-alpine", status=ScanStatus.ERROR,
+            image_reference="node:22-alpine",
+            status=ScanStatus.ERROR,
             error_message="trivy exited 1",
         )
         with pytest.raises(ValueError):
@@ -81,14 +86,10 @@ class TestSecurityScore:
         # Enough HIGH vulns to push the base score well under 100 so the
         # EPSS penalty isn't hidden by the [0, 100] clamp.
         base_vulns = [Vulnerability(cve_id=f"H{i}", severity=Severity.HIGH) for i in range(6)]
-        low_epss = SecurityScore(
-            _image(),
-            _scan([*base_vulns, Vulnerability(cve_id="C1", severity=Severity.HIGH, epss_score=0.1)]),
-        )
-        high_epss = SecurityScore(
-            _image(),
-            _scan([*base_vulns, Vulnerability(cve_id="C1", severity=Severity.HIGH, epss_score=0.9)]),
-        )
+        low_vuln = Vulnerability(cve_id="C1", severity=Severity.HIGH, epss_score=0.1)
+        high_vuln = Vulnerability(cve_id="C1", severity=Severity.HIGH, epss_score=0.9)
+        low_epss = SecurityScore(_image(), _scan([*base_vulns, low_vuln]))
+        high_epss = SecurityScore(_image(), _scan([*base_vulns, high_vuln]))
         assert high_epss.value < low_epss.value
 
     def test_hardened_source_bonus_not_double_counted_with_alpine(self):

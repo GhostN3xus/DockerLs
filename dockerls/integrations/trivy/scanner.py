@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 
 from loguru import logger
 
@@ -44,7 +45,7 @@ class TrivyScanner(ScannerInterface):
                 logger.error(f"SBOM generation failed for {safe_ref}: {stderr.decode()[:300]}")
                 return None
             return stdout.decode()
-        except (asyncio.TimeoutError, OSError) as e:
+        except (TimeoutError, OSError) as e:
             logger.error(f"SBOM generation failed for {safe_ref}: {e}")
             return None
 
@@ -52,7 +53,10 @@ class TrivyScanner(ScannerInterface):
         """Download/refresh the Trivy vulnerability DB once, up front."""
         try:
             proc = await asyncio.create_subprocess_exec(
-                "trivy", "image", "--download-db-only", "--quiet",
+                "trivy",
+                "image",
+                "--download-db-only",
+                "--quiet",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -62,18 +66,22 @@ class TrivyScanner(ScannerInterface):
                 return False
             self._skip_db_update = True
             return True
-        except (asyncio.TimeoutError, OSError) as e:
+        except (TimeoutError, OSError) as e:
             logger.warning(f"Trivy DB refresh failed: {e}")
             return False
 
     async def scan(self, image_reference: str) -> ScanResult:
         safe_ref = sanitize_image_name(image_reference)
         logger.info(f"Scanning {safe_ref} with Trivy")
-        timestamp = datetime.now(tz=timezone.utc).isoformat()
+        timestamp = datetime.now(tz=UTC).isoformat()
 
         cmd = [
-            "trivy", "image", "--format", "json",
-            "--severity", "CRITICAL,HIGH,MEDIUM,LOW",
+            "trivy",
+            "image",
+            "--format",
+            "json",
+            "--severity",
+            "CRITICAL,HIGH,MEDIUM,LOW",
             "--quiet",
         ]
         if self._skip_db_update:
@@ -86,15 +94,14 @@ class TrivyScanner(ScannerInterface):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=self._timeout
-            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
 
             if proc.returncode != 0:
                 err = stderr.decode(errors="replace")[:500]
                 logger.error(f"Trivy returned code {proc.returncode} for {safe_ref}: {err}")
                 return ScanResult(
-                    image_reference=safe_ref, scanner="trivy",
+                    image_reference=safe_ref,
+                    scanner="trivy",
                     scan_timestamp=timestamp,
                     status=ScanStatus.ERROR,
                     error_message=err,
@@ -102,7 +109,8 @@ class TrivyScanner(ScannerInterface):
 
             if not stdout:
                 return ScanResult(
-                    image_reference=safe_ref, scanner="trivy",
+                    image_reference=safe_ref,
+                    scanner="trivy",
                     scan_timestamp=timestamp,
                     status=ScanStatus.ERROR,
                     error_message="Trivy produced no output",
@@ -111,10 +119,11 @@ class TrivyScanner(ScannerInterface):
             data = json.loads(stdout.decode())
             return self._parse_results(safe_ref, data)
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error(f"Trivy scan timed out for {safe_ref}")
             return ScanResult(
-                image_reference=safe_ref, scanner="trivy",
+                image_reference=safe_ref,
+                scanner="trivy",
                 scan_timestamp=timestamp,
                 status=ScanStatus.TIMEOUT,
                 error_message=f"Scan exceeded {self._timeout}s timeout",
@@ -122,13 +131,14 @@ class TrivyScanner(ScannerInterface):
         except (json.JSONDecodeError, OSError) as e:
             logger.error(f"Trivy scan failed for {safe_ref}: {e}")
             return ScanResult(
-                image_reference=safe_ref, scanner="trivy",
+                image_reference=safe_ref,
+                scanner="trivy",
                 scan_timestamp=timestamp,
                 status=ScanStatus.ERROR,
                 error_message=str(e),
             )
 
-    def _parse_results(self, image_ref: str, data: dict) -> ScanResult:
+    def _parse_results(self, image_ref: str, data: dict[str, Any]) -> ScanResult:
         vulns: list[Vulnerability] = []
         for result in data.get("Results", []):
             for v in result.get("Vulnerabilities", []):
@@ -138,21 +148,24 @@ class TrivyScanner(ScannerInterface):
                 except ValueError:
                     severity = Severity.UNKNOWN
 
-                vulns.append(Vulnerability(
-                    cve_id=v.get("VulnerabilityID", ""),
-                    severity=severity,
-                    cvss_score=self._extract_cvss(v),
-                    package_name=v.get("PkgName", ""),
-                    installed_version=v.get("InstalledVersion", ""),
-                    fixed_version=v.get("FixedVersion", ""),
-                    description=v.get("Title", "")[:200],
-                    published_date=v.get("PublishedDate", ""),
-                ))
+                vulns.append(
+                    Vulnerability(
+                        cve_id=v.get("VulnerabilityID", ""),
+                        severity=severity,
+                        cvss_score=self._extract_cvss(v),
+                        package_name=v.get("PkgName", ""),
+                        installed_version=v.get("InstalledVersion", ""),
+                        fixed_version=v.get("FixedVersion", ""),
+                        description=v.get("Title", "")[:200],
+                        published_date=v.get("PublishedDate", ""),
+                    )
+                )
 
         return ScanResult(
-            image_reference=image_ref, scanner="trivy",
+            image_reference=image_ref,
+            scanner="trivy",
             vulnerabilities=vulns,
-            scan_timestamp=datetime.now(tz=timezone.utc).isoformat(),
+            scan_timestamp=datetime.now(tz=UTC).isoformat(),
         )
 
     # Deterministic source preference: NVD is the canonical/authoritative
@@ -160,7 +173,7 @@ class TrivyScanner(ScannerInterface):
     # last-resort fallback so the same finding always yields the same score.
     _CVSS_SOURCE_PRIORITY = ("nvd", "redhat", "ghsa", "amazon", "photon", "oracle-oval")
 
-    def _extract_cvss(self, vuln_data: dict) -> float:
+    def _extract_cvss(self, vuln_data: dict[str, Any]) -> float:
         cvss = vuln_data.get("CVSS", {})
         for source in self._CVSS_SOURCE_PRIORITY:
             entry = cvss.get(source)
@@ -174,7 +187,7 @@ class TrivyScanner(ScannerInterface):
         return 0.0
 
     @staticmethod
-    def _score_from_entry(entry: dict | None) -> float | None:
+    def _score_from_entry(entry: dict[str, Any] | None) -> float | None:
         if not entry:
             return None
         v4 = entry.get("V4Score")

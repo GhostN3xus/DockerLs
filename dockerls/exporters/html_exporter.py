@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from dockerls.application.dto.analysis import AnalysisResult, ImageAnalysis
 from dockerls.exporters.base import ExporterInterface
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from dockerls.application.dto.analysis import AnalysisResult, ImageAnalysis
 
 
 class HTMLExporter(ExporterInterface):
@@ -30,7 +34,8 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
 .a {{ color: #2563eb; font-weight: bold; }}
 .b {{ color: #d97706; font-weight: bold; }}
 .c {{ color: #dc2626; font-weight: bold; }}
-.info {{ background: #fff; padding: 1rem; border: 1px solid #ddd; border-radius: 4px; margin: 1rem 0; }}
+.info {{ background: #fff; padding: 1rem; border: 1px solid #ddd;
+  border-radius: 4px; margin: 1rem 0; }}
 </style>
 </head>
 <body>
@@ -54,12 +59,12 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
     def _row(self, a: ImageAnalysis) -> str:
         t = a.tier.lower()
         return (
-            f'<tr><td>{_esc(a.image.full_reference)}</td><td>{a.security_score}</td>'
+            f"<tr><td>{_esc(a.image.full_reference)}</td><td>{a.security_score}</td>"
             f'<td class="{t}">{a.tier}</td>'
-            f'<td>{a.scan.critical_count}</td><td>{a.scan.high_count}</td>'
-            f'<td>{a.scan.medium_count}</td><td>{a.scan.low_count}</td>'
-            f'<td>{a.scan.fixable_count}</td><td>{a.remediation_score}%</td>'
-            f'<td>{"Yes" if a.is_eol else "No"}</td></tr>'
+            f"<td>{a.scan.critical_count}</td><td>{a.scan.high_count}</td>"
+            f"<td>{a.scan.medium_count}</td><td>{a.scan.low_count}</td>"
+            f"<td>{a.scan.fixable_count}</td><td>{a.remediation_score}%</td>"
+            f"<td>{'Yes' if a.is_eol else 'No'}</td></tr>"
         )
 
 

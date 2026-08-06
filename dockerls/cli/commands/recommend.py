@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import json
-from enum import Enum
+from enum import StrEnum
+from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from dockerls.application.dto.analysis import ImageAnalysis
 from dockerls.cli.dependencies import build_recommend_use_case
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from dockerls.application.dto.analysis import AnalysisResult, ImageAnalysis
 
 console = Console()
 
@@ -25,14 +30,14 @@ EXIT_ALTERNATIVES_FOUND = 2
 EXIT_NONE_FOUND = 3
 
 
-class FailOn(str, Enum):
+class FailOn(StrEnum):
     NONE = "none"
     CRITICAL = "critical"
     HIGH = "high"
     MEDIUM = "medium"
 
 
-_FAIL_ON_COUNT = {
+_FAIL_ON_COUNT: dict[FailOn, Callable[[ImageAnalysis], int]] = {
     FailOn.CRITICAL: lambda a: a.scan.critical_count,
     FailOn.HIGH: lambda a: a.scan.critical_count + a.scan.high_count,
     FailOn.MEDIUM: lambda a: a.scan.critical_count + a.scan.high_count + a.scan.medium_count,
@@ -47,38 +52,54 @@ def recommend(
     limit: int = typer.Option(100, "--limit", "-l", help="Max tags to scan"),
     workers: int = typer.Option(10, "--workers", "-w", help="Concurrent workers"),
     fail_on: FailOn = typer.Option(
-        FailOn.NONE, "--fail-on", help="Exit non-zero if the top result has vulns at/above this severity"
+        FailOn.NONE, "--fail-on", help="Exit non-zero if the top result has vulns at/above severity"
     ),
-    format: str = typer.Option("table", "--format", "-f", help="Output format: table or json"),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table or json"
+    ),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
 ) -> None:
     """Recommend the most secure Docker image tags."""
     if no_color:
         console.no_color = True
-    asyncio.run(_recommend(image, max_critical, max_high, max_medium, limit, workers, fail_on, format))
+    asyncio.run(
+        _recommend(
+            image, max_critical, max_high, max_medium, limit, workers, fail_on, output_format
+        )
+    )
 
 
 async def _recommend(
-    image: str, max_critical: int, max_high: int,
-    max_medium: int, limit: int, workers: int,
-    fail_on: FailOn, format: str,
+    image: str,
+    max_critical: int,
+    max_high: int,
+    max_medium: int,
+    limit: int,
+    workers: int,
+    fail_on: FailOn,
+    output_format: str,
 ) -> None:
     use_case = await build_recommend_use_case(
-        max_critical=max_critical, max_high=max_high,
-        max_medium=max_medium, workers=workers,
+        max_critical=max_critical,
+        max_high=max_high,
+        max_medium=max_medium,
+        workers=workers,
     )
     result = await use_case.execute(image, limit=limit)
 
-    if format == "json":
-        console.print(json.dumps(result.model_dump(), indent=2, default=str))
+    if output_format == "json":
+        console.print(json.dumps(result.model_dump(), indent=2, default=str), soft_wrap=True)
     elif result.baseline_met and result.recommendations:
         console.print(Panel("[bold green]Recommended Images[/bold green]", expand=False))
         _print_table(result.recommendations)
     elif result.alternatives:
-        console.print(Panel(
-            "[bold yellow]No image found matching baseline.\n"
-            "Alternative Recommendations:[/bold yellow]", expand=False,
-        ))
+        console.print(
+            Panel(
+                "[bold yellow]No image found matching baseline.\n"
+                "Alternative Recommendations:[/bold yellow]",
+                expand=False,
+            )
+        )
         _print_table(result.alternatives)
     else:
         console.print("[red]No suitable images found.[/red]")
@@ -89,7 +110,7 @@ async def _recommend(
     raise typer.Exit(_exit_code(result, fail_on))
 
 
-def _exit_code(result, fail_on: FailOn) -> int:
+def _exit_code(result: AnalysisResult, fail_on: FailOn) -> int:
     items = result.recommendations or result.alternatives
     if items and fail_on != FailOn.NONE:
         counter = _FAIL_ON_COUNT[fail_on]
@@ -121,10 +142,14 @@ def _print_table(analyses: list[ImageAnalysis]) -> None:
     for i, a in enumerate(analyses, 1):
         ts = styles.get(a.tier, "")
         table.add_row(
-            str(i), a.image.full_reference, str(a.security_score),
+            str(i),
+            a.image.full_reference,
+            str(a.security_score),
             f"[{ts}]{a.tier}[/{ts}]" if ts else a.tier,
-            str(a.scan.critical_count), str(a.scan.high_count),
-            str(a.scan.medium_count), str(a.scan.fixable_count),
+            str(a.scan.critical_count),
+            str(a.scan.high_count),
+            str(a.scan.medium_count),
+            str(a.scan.fixable_count),
             f"{a.remediation_score}%",
         )
     console.print(table)

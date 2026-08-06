@@ -1,6 +1,4 @@
 import pytest
-import tempfile
-from pathlib import Path
 
 from dockerls.cache.sqlite_cache import SQLiteCache
 
@@ -57,8 +55,9 @@ class TestSQLiteCache:
         assert raw == "payload"
         # the stored row key must be prefixed with the schema version
         with cache._session() as session:
-            from dockerls.infrastructure.database.models import CacheEntry
             from sqlalchemy import select
+
+            from dockerls.infrastructure.database.models import CacheEntry
 
             row = session.execute(
                 select(CacheEntry).where(CacheEntry.key == f"{CACHE_SCHEMA_VERSION}:shared-key")
@@ -117,7 +116,10 @@ class TestCacheValidationMiss:
         await cache.set("analysis:node:latest", {"totally": "wrong-shape"})
 
         uc = RecommendImagesUseCase(
-            repository=NullRepo(), scanner=NullScanner(), eol_checker=NullEOL(), cache=cache,
+            repository=NullRepo(),
+            scanner=NullScanner(),
+            eol_checker=NullEOL(),
+            cache=cache,
         )
         result = await uc._get_cached("node:latest")
         assert result is None

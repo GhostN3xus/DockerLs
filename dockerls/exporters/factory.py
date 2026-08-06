@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from dockerls.exporters.base import ExporterInterface
+from typing import TYPE_CHECKING
+
 from dockerls.exporters.csv_exporter import CSVExporter
 from dockerls.exporters.html_exporter import HTMLExporter
 from dockerls.exporters.json_exporter import JSONExporter
 from dockerls.exporters.markdown_exporter import MarkdownExporter
 from dockerls.exporters.sarif_exporter import SARIFExporter
+
+if TYPE_CHECKING:
+    from dockerls.exporters.base import ExporterInterface
 
 
 class ExporterFactory:

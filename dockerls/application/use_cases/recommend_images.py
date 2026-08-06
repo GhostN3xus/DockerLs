@@ -2,27 +2,31 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 from pydantic import ValidationError
 
 from dockerls.application.dto.analysis import AnalysisResult, ImageAnalysis
-from dockerls.domain.entities.image import DockerImage
 from dockerls.domain.entities.recommendation import (
     ActionType,
     Recommendation,
     RemediationStep,
 )
-from dockerls.domain.interfaces.cache_store import CacheStoreInterface
-from dockerls.domain.interfaces.eol_checker import EOLCheckerInterface
-from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
-from dockerls.domain.interfaces.scanner import ScannerInterface
 from dockerls.domain.value_objects.remediation_score import RemediationScore
 from dockerls.domain.value_objects.security_score import SecurityScore
 from dockerls.domain.value_objects.security_tier import SecurityTier
-from dockerls.integrations.threat_intel.client import ThreatIntelClient
 from dockerls.utils.ignore_file import active_ignored_cve_ids, load_ignore_rules
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from dockerls.domain.entities.image import DockerImage
+    from dockerls.domain.interfaces.cache_store import CacheStoreInterface
+    from dockerls.domain.interfaces.eol_checker import EOLCheckerInterface
+    from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
+    from dockerls.domain.interfaces.scanner import ScannerInterface
+    from dockerls.integrations.threat_intel.client import ThreatIntelClient
 
 
 class RecommendImagesUseCase:
@@ -36,7 +40,7 @@ class RecommendImagesUseCase:
         max_high: int = 0,
         max_medium: int = 5,
         workers: int = 10,
-        ignore_path: Any = None,
+        ignore_path: Path | None = None,
         threat_intel: ThreatIntelClient | None = None,
     ):
         self._repository = repository
@@ -159,9 +163,7 @@ class RecommendImagesUseCase:
                 errors=errors,
             )
 
-        alternatives = [
-            a for a in analyses if a.scan.critical_count == 0 and not a.is_eol
-        ]
+        alternatives = [a for a in analyses if a.scan.critical_count == 0 and not a.is_eol]
         alternatives.sort(key=lambda a: (a.scan.high_count, -a.remediation_score))
 
         for alt in alternatives[:5]:
@@ -176,7 +178,7 @@ class RecommendImagesUseCase:
             errors=errors,
         )
 
-    async def _get_cached(self, key: str) -> Any | None:
+    async def _get_cached(self, key: str) -> ImageAnalysis | None:
         if self._cache:
             data = await self._cache.get(f"analysis:{key}")
             if data and isinstance(data, dict):
@@ -190,9 +192,7 @@ class RecommendImagesUseCase:
 
     async def _set_cached(self, key: str, analysis: ImageAnalysis) -> None:
         if self._cache:
-            await self._cache.set(
-                f"analysis:{key}", analysis.model_dump(), ttl_seconds=86400
-            )
+            await self._cache.set(f"analysis:{key}", analysis.model_dump(), ttl_seconds=86400)
 
 
 async def _enrich_with_threat_intel(scan: Any, threat_intel: ThreatIntelClient) -> Any:
@@ -213,10 +213,12 @@ async def _enrich_with_threat_intel(scan: Any, threat_intel: ThreatIntelClient) 
         return scan
 
     updated = [
-        v.model_copy(update={
-            "exploit_known": v.cve_id.upper() in kev_ids,
-            "epss_score": epss.get(v.cve_id.upper(), v.epss_score),
-        })
+        v.model_copy(
+            update={
+                "exploit_known": v.cve_id.upper() in kev_ids,
+                "epss_score": epss.get(v.cve_id.upper(), v.epss_score),
+            }
+        )
         for v in scan.vulnerabilities
     ]
     return scan.model_copy(update={"vulnerabilities": updated})

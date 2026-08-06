@@ -342,8 +342,7 @@ dockerls/
     dockerhub/       # Docker Hub API client
     trivy/           # Trivy scanner integration
     grype/           # Grype scanner integration (fallback)
-    scout/           # Docker Scout integration
-    nvd/             # NVD API client
+    nvd/             # NVD API client (rate-limited CVE lookups)
     endoflife/       # endoflife.date checker
   cache/             # SQLite cache implementation
   exporters/         # JSON, CSV, HTML, Markdown exporters
@@ -357,13 +356,32 @@ domain interfaces and are injected via the dependency builder.
 
 ## Configuration
 
+Settings are resolved in priority order: environment variables, then
+`~/.config/dockerls/config.toml` (or `$XDG_CONFIG_HOME/dockerls/config.toml`),
+then built-in defaults.
+
 ### Environment variables
 
-| Variable            | Description                  |
-|---------------------|------------------------------|
-| DOCKERHUB_USERNAME  | Docker Hub username          |
-| DOCKERHUB_TOKEN     | Docker Hub access token      |
-| XDG_CACHE_HOME      | Override cache directory     |
+| Variable                        | Description                              |
+|----------------------------------|-------------------------------------------|
+| DOCKERHUB_USERNAME               | Docker Hub username                       |
+| DOCKERHUB_TOKEN                  | Docker Hub access token                   |
+| NVD_API_KEY                      | NVD API key (raises the rate limit from 5 to 50 requests/30s) |
+| XDG_CACHE_HOME                   | Override cache directory                  |
+| XDG_CONFIG_HOME                  | Override config file directory            |
+| DOCKERLS_DISABLE_THREAT_INTEL    | Disable CISA KEV / EPSS lookups           |
+| DOCKERLS_<SETTING_NAME>          | Override any other setting below (e.g. `DOCKERLS_MAX_TAGS=200`) |
+
+### Config file
+
+```toml
+# ~/.config/dockerls/config.toml
+max_tags = 200
+workers = 20
+log_level = "DEBUG"
+```
+
+Keys match the setting names in the table below (snake_case, no prefix).
 
 ### Default thresholds
 
@@ -402,9 +420,10 @@ docker run --rm \
 docker compose run dockerls recommend node
 ```
 
-The Docker image follows OWASP Docker Security best practices:
-multi-stage build, specific base image version, non-root user,
-read-only filesystem support, all capabilities dropped.
+The Docker image follows OWASP Docker Security best practices: multi-stage
+build, base images pinned by digest (Python and Trivy), Trivy copied from
+its official image rather than installed via `curl | sh`, a non-root user,
+read-only filesystem support, and all capabilities dropped.
 
 ---
 
@@ -439,7 +458,8 @@ GitHub Actions workflows included:
 - **CI**: Ruff linting, Mypy type checking, Pytest across Python 3.11/3.12/3.13
 - **Security**: Bandit SAST, pip-audit dependency check, Trivy container scan
 - **CodeQL**: GitHub code scanning
-- **Release**: Automated PyPI publish on tag push
+- **Release**: Automated PyPI publish on tag push, with a GitHub-native SLSA
+  build provenance attestation and Sigstore-signed artifacts attached to the release
 - **Dependabot**: Weekly dependency updates
 
 ---

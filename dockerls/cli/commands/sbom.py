@@ -15,13 +15,15 @@ _FORMAT_ALIASES = {"cyclonedx": "cyclonedx", "spdx": "spdx-json", "spdx-json": "
 
 def sbom(
     image: str = typer.Argument(help="Full image reference (e.g., node:22-alpine)"),
-    format: str = typer.Option("cyclonedx", "--format", "-f", help="cyclonedx or spdx"),
+    output_format: str = typer.Option("cyclonedx", "--format", "-f", help="cyclonedx or spdx"),
     output: str = typer.Option("", "--output", "-o", help="Output file path (default: stdout)"),
 ) -> None:
     """Generate a Software Bill of Materials (SBOM) for an image via Trivy."""
-    fmt = _FORMAT_ALIASES.get(format.lower())
+    fmt = _FORMAT_ALIASES.get(output_format.lower())
     if fmt is None:
-        console.print(f"[red]Unsupported SBOM format: {format}. Use cyclonedx or spdx.[/red]")
+        console.print(
+            f"[red]Unsupported SBOM format: {output_format}. Use cyclonedx or spdx.[/red]"
+        )
         raise typer.Exit(1)
     asyncio.run(_sbom(image, fmt, output))
 
@@ -41,4 +43,4 @@ async def _sbom(image: str, fmt: str, output: str) -> None:
         Path(output).write_text(content, encoding="utf-8")
         console.print(f"[green]SBOM written to {output}[/green]")
     else:
-        console.print(content)
+        console.print(content, soft_wrap=True)

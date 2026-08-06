@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from dockerls.application.dto.analysis import AnalysisResult
 from dockerls.exporters.base import ExporterInterface
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from dockerls.application.dto.analysis import AnalysisResult
 
 
 class MarkdownExporter(ExporterInterface):
@@ -14,13 +18,18 @@ class MarkdownExporter(ExporterInterface):
         items = result.recommendations or result.alternatives
         status = "Baseline Met" if result.baseline_met else "Alternative Recommendations"
         lines = [
-            "# DockerLs Security Report", "",
+            "# DockerLs Security Report",
+            "",
             f"**Query:** {result.query}",
             f"**Tags Scanned:** {result.total_tags_scanned}",
-            f"**Status:** {status}", "",
-            "## Results", "",
-            "| Image | Score | Tier | Critical | High | Medium | Low | Fixable | Remediation | EOL |",
-            "|-------|-------|------|----------|------|--------|-----|---------|-------------|-----|",
+            f"**Status:** {status}",
+            "",
+            "## Results",
+            "",
+            "| Image | Score | Tier | Critical | High | Medium | Low | Fixable "
+            "| Remediation | EOL |",
+            "|-------|-------|------|----------|------|--------|-----|---------"
+            "|-------------|-----|",
         ]
         for a in items:
             eol = "Yes" if a.is_eol else "No"
@@ -33,10 +42,14 @@ class MarkdownExporter(ExporterInterface):
 
         if items and items[0].recommendation:
             rec = items[0].recommendation
-            lines += ["", "## Top Recommendation", "",
-                       f"**Image:** {rec.image_reference}",
-                       f"**Score:** {rec.security_score}",
-                       f"**Summary:** {rec.summary}"]
+            lines += [
+                "",
+                "## Top Recommendation",
+                "",
+                f"**Image:** {rec.image_reference}",
+                f"**Score:** {rec.security_score}",
+                f"**Summary:** {rec.summary}",
+            ]
             if rec.steps:
                 lines += ["", "### Remediation Steps", ""]
                 for s in rec.steps:

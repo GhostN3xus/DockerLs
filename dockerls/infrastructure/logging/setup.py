@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import re
 import sys
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
-_KV_SECRET_PATTERN = re.compile(
-    r"(token|password|secret|key|auth)(\s*[=:]\s*)\S+", re.IGNORECASE
-)
+if TYPE_CHECKING:
+    from loguru import Record
+
+_KV_SECRET_PATTERN = re.compile(r"(token|password|secret|key|auth)(\s*[=:]\s*)\S+", re.IGNORECASE)
 _BEARER_PATTERN = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
 _BASIC_PATTERN = re.compile(r"Basic\s+\S+", re.IGNORECASE)
 
@@ -21,7 +23,7 @@ def _mask_secrets(message: str) -> str:
     return result
 
 
-def _log_filter(record: dict) -> bool:
+def _log_filter(record: Record) -> bool:
     record["message"] = _mask_secrets(record["message"])
     return True
 
@@ -31,6 +33,8 @@ def setup_logging(level: str = "INFO") -> None:
     logger.add(
         sys.stderr,
         level=level.upper(),
-        format="<level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - {message}",
+        format=(
+            "<level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - {message}"
+        ),
         filter=_log_filter,
     )

@@ -12,11 +12,7 @@ class TestLoadIgnoreRules:
 
     def test_loads_valid_rules(self, tmp_path):
         f = tmp_path / ".dockerls-ignore.yaml"
-        f.write_text(
-            "ignores:\n"
-            "  - cve: CVE-2024-0001\n"
-            "    justification: not reachable\n"
-        )
+        f.write_text("ignores:\n  - cve: CVE-2024-0001\n    justification: not reachable\n")
         rules = load_ignore_rules(f)
         assert len(rules) == 1
         assert rules[0].cve == "CVE-2024-0001"
@@ -25,10 +21,7 @@ class TestLoadIgnoreRules:
         yesterday = (date.today() - timedelta(days=1)).isoformat()
         f = tmp_path / ".dockerls-ignore.yaml"
         f.write_text(
-            "ignores:\n"
-            f"  - cve: CVE-2024-0002\n"
-            f"    justification: temp\n"
-            f"    expires: {yesterday}\n"
+            f"ignores:\n  - cve: CVE-2024-0002\n    justification: temp\n    expires: {yesterday}\n"
         )
         rules = load_ignore_rules(f)
         assert rules == []
@@ -36,11 +29,7 @@ class TestLoadIgnoreRules:
     def test_future_expiry_kept(self, tmp_path):
         tomorrow = (date.today() + timedelta(days=1)).isoformat()
         f = tmp_path / ".dockerls-ignore.yaml"
-        f.write_text(
-            "ignores:\n"
-            f"  - cve: CVE-2024-0003\n"
-            f"    expires: {tomorrow}\n"
-        )
+        f.write_text(f"ignores:\n  - cve: CVE-2024-0003\n    expires: {tomorrow}\n")
         rules = load_ignore_rules(f)
         assert len(rules) == 1
 

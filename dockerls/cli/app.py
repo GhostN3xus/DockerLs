@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import typer
 
-from dockerls.cli.commands.analyze import analyze
 from dockerls.cli.commands.advisor import advisor
+from dockerls.cli.commands.analyze import analyze
 from dockerls.cli.commands.cache_cmd import cache_app
 from dockerls.cli.commands.compare import compare
 from dockerls.cli.commands.doctor import doctor

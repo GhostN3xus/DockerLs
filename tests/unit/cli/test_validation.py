@@ -40,8 +40,10 @@ class TestSanitizeImageName:
         assert sanitize_image_name(ref) == ref
 
     def test_private_registry_with_port(self):
-        assert sanitize_image_name("registry.internal:5000/team/app:v1") == \
-            "registry.internal:5000/team/app:v1"
+        assert (
+            sanitize_image_name("registry.internal:5000/team/app:v1")
+            == "registry.internal:5000/team/app:v1"
+        )
 
     def test_private_registry_no_port(self):
         assert sanitize_image_name("ghcr.io/org/repo:latest") == "ghcr.io/org/repo:latest"

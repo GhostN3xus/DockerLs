@@ -17,23 +17,26 @@ console = Console()
 def advisor(
     image: str = typer.Argument(help="Docker image name (e.g., node, python, nginx)"),
     workers: int = typer.Option(10, "--workers", "-w", help="Concurrent workers"),
-    format: str = typer.Option("table", "--format", "-f", help="Output format: table or json"),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table or json"
+    ),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
 ) -> None:
     """Security advisor: analyze and provide actionable remediation plan."""
     if no_color:
         console.no_color = True
-    asyncio.run(_advisor(image, workers, format))
+    asyncio.run(_advisor(image, workers, output_format))
 
 
-async def _advisor(image: str, workers: int, format: str) -> None:
+async def _advisor(image: str, workers: int, output_format: str) -> None:
     use_case = await build_recommend_use_case(workers=workers)
     result = await use_case.execute(image)
 
     items = result.recommendations or result.alternatives
     if not items:
-        if format == "json":
-            console.print(json.dumps({"error": "No images found to advise on", "errors": result.errors}))
+        if output_format == "json":
+            error_payload = {"error": "No images found to advise on", "errors": result.errors}
+            console.print(json.dumps(error_payload), soft_wrap=True)
         else:
             console.print("[red]No images found to advise on.[/red]")
         raise typer.Exit(1)
@@ -41,10 +44,10 @@ async def _advisor(image: str, workers: int, format: str) -> None:
     best = items[0]
     rec = best.recommendation or build_recommendation(best)
 
-    if format == "json":
+    if output_format == "json":
         payload = best.model_dump()
         payload["remediation"] = rec.model_dump()
-        console.print(json.dumps(payload, indent=2, default=str))
+        console.print(json.dumps(payload, indent=2, default=str), soft_wrap=True)
         return
 
     console.print(Panel(f"[bold]Security Advisor: {image}[/bold]", expand=False))

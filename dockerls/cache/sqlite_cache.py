@@ -3,14 +3,17 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy import CursorResult, delete, select
 
 from dockerls.domain.interfaces.cache_store import CacheStoreInterface
 from dockerls.infrastructure.database.models import CacheEntry, create_db_engine
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from sqlalchemy.orm import Session
 
 # Bump this when the shape of cached payloads changes so stale entries from
 # an older schema are treated as misses instead of crashing on load.
@@ -84,6 +87,6 @@ class SQLiteCache(CacheStoreInterface):
     def _cleanup_expired_sync(self) -> int:
         with self._session() as session:
             stmt = delete(CacheEntry).where(CacheEntry.expires_at < time.time())
-            result = session.execute(stmt)
+            result = cast("CursorResult[Any]", session.execute(stmt))
             session.commit()
-            return result.rowcount  # type: ignore[return-value]
+            return result.rowcount

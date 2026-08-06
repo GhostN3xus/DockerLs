@@ -1,4 +1,3 @@
-import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -71,8 +70,10 @@ class TestGrypeScanErrorPaths:
     async def test_timeout_is_timeout_status(self):
         scanner = GrypeScanner(timeout=1)
         proc = _FakeProc()
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
-             patch("asyncio.wait_for", AsyncMock(side_effect=asyncio.TimeoutError())):
+        with (
+            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
+            patch("asyncio.wait_for", AsyncMock(side_effect=TimeoutError())),
+        ):
             result = await scanner.scan("nginx:latest")
         assert result.status == ScanStatus.TIMEOUT
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from dockerls.domain.entities.image import DockerImage
-from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from dockerls.domain.entities.image import DockerImage
+    from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
 
 
 class SearchImagesUseCase:

@@ -60,12 +60,15 @@ async def _analyze(image: str) -> None:
         vtable.add_column("Status")
 
         sev_styles = {
-            "CRITICAL": "bold red", "HIGH": "yellow",
-            "MEDIUM": "white", "LOW": "dim",
+            "CRITICAL": "bold red",
+            "HIGH": "yellow",
+            "MEDIUM": "white",
+            "LOW": "dim",
         }
         for v in sorted(
             result.scan.vulnerabilities,
-            key=lambda x: x.cvss_score, reverse=True,
+            key=lambda x: x.cvss_score,
+            reverse=True,
         )[:30]:
             st = sev_styles.get(v.severity.value, "")
             status = "FIX AVAILABLE" if v.is_fixable else "NO FIX"

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from dockerls.domain.entities.scan_result import ScanResult
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from dockerls.domain.entities.scan_result import ScanResult
 
 
 class RemediationScore:

@@ -48,10 +48,15 @@ async def _compare(images: list[str]) -> None:
 
     for a in result.images:
         table.add_row(
-            a.image.full_reference, str(a.security_score), a.tier,
-            str(a.scan.critical_count), str(a.scan.high_count),
-            str(a.scan.medium_count), str(a.scan.total_count),
-            str(a.scan.fixable_count), f"{a.remediation_score}%",
+            a.image.full_reference,
+            str(a.security_score),
+            a.tier,
+            str(a.scan.critical_count),
+            str(a.scan.high_count),
+            str(a.scan.medium_count),
+            str(a.scan.total_count),
+            str(a.scan.fixable_count),
+            f"{a.remediation_score}%",
         )
     console.print(table)
 

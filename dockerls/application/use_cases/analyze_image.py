@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 from dockerls.application.dto.analysis import ImageAnalysis
 from dockerls.application.use_cases.recommend_images import _enrich_with_threat_intel
 from dockerls.domain.entities.image import DockerImage
-from dockerls.domain.interfaces.eol_checker import EOLCheckerInterface
-from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
-from dockerls.domain.interfaces.scanner import ScannerInterface
 from dockerls.domain.value_objects.remediation_score import RemediationScore
 from dockerls.domain.value_objects.security_score import SecurityScore
 from dockerls.domain.value_objects.security_tier import SecurityTier
-from dockerls.integrations.threat_intel.client import ThreatIntelClient
 from dockerls.utils.ignore_file import active_ignored_cve_ids, load_ignore_rules
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from dockerls.domain.interfaces.eol_checker import EOLCheckerInterface
+    from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
+    from dockerls.domain.interfaces.scanner import ScannerInterface
+    from dockerls.integrations.threat_intel.client import ThreatIntelClient
 
 
 class AnalyzeImageUseCase:
@@ -21,7 +26,7 @@ class AnalyzeImageUseCase:
         repository: ImageRepositoryInterface,
         scanner: ScannerInterface,
         eol_checker: EOLCheckerInterface,
-        ignore_path=None,
+        ignore_path: Path | None = None,
         threat_intel: ThreatIntelClient | None = None,
     ):
         self._repository = repository
@@ -38,7 +43,9 @@ class AnalyzeImageUseCase:
 
         scan = await self._scanner.scan(image.full_reference)
         if self._ignored_cves:
-            filtered = [v for v in scan.vulnerabilities if v.cve_id.upper() not in self._ignored_cves]
+            filtered = [
+                v for v in scan.vulnerabilities if v.cve_id.upper() not in self._ignored_cves
+            ]
             if len(filtered) != len(scan.vulnerabilities):
                 scan = scan.model_copy(update={"vulnerabilities": filtered})
         if self._threat_intel is not None:

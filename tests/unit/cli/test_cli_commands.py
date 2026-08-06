@@ -1,0 +1,258 @@
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, patch
+
+import httpx
+from typer.testing import CliRunner
+
+from dockerls.application.dto.analysis import ComparisonResult, ImageAnalysis
+from dockerls.cli.app import app
+from dockerls.domain.entities.image import DockerImage
+from dockerls.domain.entities.scan_result import ScanResult
+from dockerls.domain.entities.vulnerability import Severity, Vulnerability
+
+runner = CliRunner()
+
+
+def _analysis() -> ImageAnalysis:
+    vuln = Vulnerability(
+        cve_id="CVE-2024-0001",
+        severity=Severity.HIGH,
+        package_name="openssl",
+        installed_version="1.0",
+        fixed_version="1.1",
+    )
+    scan = ScanResult(image_reference="node:22-alpine", vulnerabilities=[vuln])
+    return ImageAnalysis(
+        image=DockerImage(name="node", tag="22-alpine"),
+        scan=scan,
+        security_score=80.0,
+        tier="B",
+        remediation_score=100,
+    )
+
+
+class TestSearchCommand:
+    def test_search_lists_tags(self):
+        repo = AsyncMock()
+        repo.search_tags = AsyncMock(
+            return_value=[
+                DockerImage(name="node", tag="22-alpine", is_official=True),
+            ]
+        )
+        with patch("dockerls.cli.commands.search.build_repository", AsyncMock(return_value=repo)):
+            result = runner.invoke(app, ["search", "node"])
+        assert result.exit_code == 0
+        assert "22-alpine" in result.stdout
+
+    def test_search_no_tags_exits_one(self):
+        repo = AsyncMock()
+        repo.search_tags = AsyncMock(return_value=[])
+        with patch("dockerls.cli.commands.search.build_repository", AsyncMock(return_value=repo)):
+            result = runner.invoke(app, ["search", "nope"])
+        assert result.exit_code == 1
+
+
+class TestAnalyzeCommand:
+    def test_analyze_prints_results(self):
+        use_case = AsyncMock()
+        use_case.execute = AsyncMock(return_value=_analysis())
+        with patch(
+            "dockerls.cli.commands.analyze.build_analyze_use_case",
+            AsyncMock(return_value=use_case),
+        ):
+            result = runner.invoke(app, ["analyze", "node:22-alpine"])
+        assert result.exit_code == 0
+        assert "CVE-2024-0001" in result.stdout
+
+    def test_analyze_scan_failure_exits_one(self):
+        use_case = AsyncMock()
+        use_case.execute = AsyncMock(side_effect=ValueError("scan ERROR"))
+        with patch(
+            "dockerls.cli.commands.analyze.build_analyze_use_case",
+            AsyncMock(return_value=use_case),
+        ):
+            result = runner.invoke(app, ["analyze", "node:22-alpine"])
+        assert result.exit_code == 1
+
+
+class TestCompareCommand:
+    def test_compare_requires_two_images(self):
+        result = runner.invoke(app, ["compare", "node:22-alpine"])
+        assert result.exit_code == 1
+
+    def test_compare_prints_winner(self):
+        use_case = AsyncMock()
+        a1, a2 = _analysis(), _analysis()
+        use_case.execute = AsyncMock(
+            return_value=ComparisonResult(
+                images=[a1, a2],
+                winner=a1.image.full_reference,
+                summary="best wins",
+            )
+        )
+        with patch(
+            "dockerls.cli.commands.compare.build_compare_use_case",
+            AsyncMock(return_value=use_case),
+        ):
+            result = runner.invoke(app, ["compare", "node:22-alpine", "node:20-alpine"])
+        assert result.exit_code == 0
+        assert "Winner" in result.stdout
+
+
+class TestExportCommand:
+    def test_export_json_to_stdout(self):
+        from dockerls.application.dto.analysis import AnalysisResult
+
+        use_case = AsyncMock()
+        use_case.execute = AsyncMock(
+            return_value=AnalysisResult(
+                query="node",
+                total_tags_scanned=1,
+                baseline_met=True,
+                recommendations=[_analysis()],
+            )
+        )
+        with patch(
+            "dockerls.cli.commands.export.build_recommend_use_case",
+            AsyncMock(return_value=use_case),
+        ):
+            result = runner.invoke(app, ["export", "node", "--format", "json"])
+        assert result.exit_code == 0
+        assert '"query"' in result.stdout
+
+    def test_export_unsupported_format(self):
+        from dockerls.application.dto.analysis import AnalysisResult
+
+        use_case = AsyncMock()
+        use_case.execute = AsyncMock(
+            return_value=AnalysisResult(
+                query="node",
+                total_tags_scanned=0,
+                baseline_met=False,
+            )
+        )
+        with patch(
+            "dockerls.cli.commands.export.build_recommend_use_case",
+            AsyncMock(return_value=use_case),
+        ):
+            result = runner.invoke(app, ["export", "node", "--format", "xml"])
+        assert result.exit_code == 1
+
+    def test_export_to_file(self, tmp_path):
+        from dockerls.application.dto.analysis import AnalysisResult
+
+        use_case = AsyncMock()
+        use_case.execute = AsyncMock(
+            return_value=AnalysisResult(
+                query="node",
+                total_tags_scanned=1,
+                baseline_met=True,
+                recommendations=[_analysis()],
+            )
+        )
+        out_file = tmp_path / "report.json"
+        with patch(
+            "dockerls.cli.commands.export.build_recommend_use_case",
+            AsyncMock(return_value=use_case),
+        ):
+            result = runner.invoke(
+                app, ["export", "node", "--format", "json", "--output", str(out_file)]
+            )
+        assert result.exit_code == 0
+        assert out_file.exists()
+
+
+class TestSbomCommand:
+    def test_sbom_prints_content(self):
+        scanner = AsyncMock()
+        scanner.is_available = AsyncMock(return_value=True)
+        scanner.generate_sbom = AsyncMock(return_value='{"bomFormat": "CycloneDX"}')
+        with patch("dockerls.cli.commands.sbom.TrivyScanner", return_value=scanner):
+            result = runner.invoke(app, ["sbom", "node:22-alpine"])
+        assert result.exit_code == 0
+        assert "CycloneDX" in result.stdout
+
+    def test_sbom_invalid_format_exits_one(self):
+        result = runner.invoke(app, ["sbom", "node:22-alpine", "--format", "bogus"])
+        assert result.exit_code == 1
+
+    def test_sbom_trivy_unavailable_exits_one(self):
+        scanner = AsyncMock()
+        scanner.is_available = AsyncMock(return_value=False)
+        with patch("dockerls.cli.commands.sbom.TrivyScanner", return_value=scanner):
+            result = runner.invoke(app, ["sbom", "node:22-alpine"])
+        assert result.exit_code == 1
+
+
+class TestLoginCommand:
+    def test_login_success(self):
+        client = AsyncMock()
+        client.authenticate = AsyncMock(return_value=True)
+        with (
+            patch("dockerls.cli.commands.login.DockerHubClient", return_value=client),
+            patch("dockerls.cli.commands.login.store_credentials", return_value=True),
+        ):
+            result = runner.invoke(app, ["login", "--username", "u", "--token", "t"])
+        assert result.exit_code == 0
+
+    def test_login_failure_exits_one(self):
+        client = AsyncMock()
+        client.authenticate = AsyncMock(return_value=False)
+        with patch("dockerls.cli.commands.login.DockerHubClient", return_value=client):
+            result = runner.invoke(app, ["login", "--username", "u", "--token", "bad"])
+        assert result.exit_code == 1
+
+    def test_login_missing_credentials_exits_one(self):
+        result = runner.invoke(app, ["login", "--username", "", "--token", ""])
+        assert result.exit_code == 1
+
+
+class TestDoctorCommand:
+    def test_doctor_runs(self):
+        result = runner.invoke(app, ["doctor"])
+        assert result.exit_code == 0
+
+
+class TestHealthCommand:
+    def test_health_reports_status(self):
+        ok_resp = httpx.Response(200, request=httpx.Request("GET", "https://x"))
+        with patch("httpx.AsyncClient.get", AsyncMock(return_value=ok_resp)):
+            result = runner.invoke(app, ["health"])
+        assert result.exit_code == 0
+        assert "Docker Hub API" in result.stdout
+
+    def test_health_handles_errors(self):
+        with patch(
+            "httpx.AsyncClient.get",
+            AsyncMock(
+                side_effect=httpx.ConnectError("boom", request=httpx.Request("GET", "https://x"))
+            ),
+        ):
+            result = runner.invoke(app, ["health"])
+        assert result.exit_code == 0
+        assert "Error" in result.stdout
+
+
+class TestCacheCommand:
+    def test_cache_clear(self):
+        cache = AsyncMock()
+        with patch("dockerls.cli.commands.cache_cmd.build_cache", return_value=cache):
+            result = runner.invoke(app, ["cache", "clear"])
+        assert result.exit_code == 0
+        cache.clear.assert_awaited_once()
+
+    def test_cache_cleanup(self):
+        cache = AsyncMock()
+        cache.cleanup_expired = AsyncMock(return_value=3)
+        with patch("dockerls.cli.commands.cache_cmd.build_cache", return_value=cache):
+            result = runner.invoke(app, ["cache", "cleanup"])
+        assert result.exit_code == 0
+        assert "3" in result.stdout
+
+
+class TestVersionCommand:
+    def test_version_prints(self):
+        result = runner.invoke(app, ["version"])
+        assert result.exit_code == 0
+        assert "DockerLs v" in result.stdout

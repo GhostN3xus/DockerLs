@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from loguru import logger
 
-from dockerls.domain.interfaces.scanner import ScannerInterface
-from dockerls.integrations.trivy.scanner import TrivyScanner
 from dockerls.integrations.grype.scanner import GrypeScanner
+from dockerls.integrations.trivy.scanner import TrivyScanner
+
+if TYPE_CHECKING:
+    from dockerls.domain.interfaces.scanner import ScannerInterface
 
 
 class ScannerFactory:

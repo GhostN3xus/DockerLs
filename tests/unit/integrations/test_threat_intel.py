@@ -24,7 +24,9 @@ class TestThreatIntelClient:
         client = ThreatIntelClient()
         with patch(
             "httpx.AsyncClient.get",
-            AsyncMock(side_effect=httpx.ConnectError("boom", request=httpx.Request("GET", "https://x"))),
+            AsyncMock(
+                side_effect=httpx.ConnectError("boom", request=httpx.Request("GET", "https://x"))
+            ),
         ):
             result = await client.known_exploited(["CVE-2024-0001"])
         assert result == set()
@@ -44,7 +46,9 @@ class TestThreatIntelClient:
         client = ThreatIntelClient()
         with patch(
             "httpx.AsyncClient.get",
-            AsyncMock(side_effect=httpx.ConnectError("boom", request=httpx.Request("GET", "https://x"))),
+            AsyncMock(
+                side_effect=httpx.ConnectError("boom", request=httpx.Request("GET", "https://x"))
+            ),
         ):
             scores = await client.epss_scores(["CVE-2024-0001"])
         assert scores == {}

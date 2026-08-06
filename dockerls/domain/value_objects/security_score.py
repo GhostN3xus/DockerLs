@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from dockerls.domain.entities.image import DockerImage
+from typing import TYPE_CHECKING
+
 from dockerls.domain.entities.scan_result import ScanResult, ScanStatus
+
+if TYPE_CHECKING:
+    from dockerls.domain.entities.image import DockerImage
 
 
 class SecurityScore:
@@ -42,9 +46,7 @@ class SecurityScore:
         # Distroless, hardened-vendor (Chainguard/Wolfi/Bitnami), and Alpine
         # are all "minimal base" signals; an image matching more than one
         # must not be double-counted.
-        if self._image.is_distroless or self._image.is_hardened_source:
-            score += 3
-        elif self._image.is_alpine:
+        if self._image.is_distroless or self._image.is_hardened_source or self._image.is_alpine:
             score += 3
         if self._image.recently_updated:
             score += 2

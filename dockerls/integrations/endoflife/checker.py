@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any, cast
 
 import httpx
 from loguru import logger
@@ -73,13 +74,13 @@ class EndOfLifeChecker(EOLCheckerInterface):
 
     def __init__(self, timeout: int = 15):
         self._timeout = timeout
-        self._cache: dict[str, list[dict]] = {}
+        self._cache: dict[str, list[dict[str, Any]]] = {}
 
     def _resolve_product(self, product: str) -> str:
         return DOCKER_TO_ENDOFLIFE.get(product.lower(), product.lower())
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
-    async def _fetch_product(self, product: str) -> list[dict]:
+    async def _fetch_product(self, product: str) -> list[dict[str, Any]]:
         slug = self._resolve_product(product)
         if slug in self._cache:
             return self._cache[slug]
@@ -87,7 +88,7 @@ class EndOfLifeChecker(EOLCheckerInterface):
             try:
                 resp = await client.get(f"{self.BASE_URL}/{slug}.json")
                 if resp.status_code == 200:
-                    data = resp.json()
+                    data = cast("list[dict[str, Any]]", resp.json())
                     self._cache[slug] = data
                     return data
                 return []
@@ -95,8 +96,8 @@ class EndOfLifeChecker(EOLCheckerInterface):
                 logger.debug(f"EOL check failed for {slug}: {e}")
                 return []
 
-    def _find_cycle(self, cycles: list[dict], version: str) -> dict | None:
-        best: dict | None = None
+    def _find_cycle(self, cycles: list[dict[str, Any]], version: str) -> dict[str, Any] | None:
+        best: dict[str, Any] | None = None
         best_len = -1
         for cycle in cycles:
             cycle_ver = str(cycle.get("cycle", ""))
@@ -119,8 +120,8 @@ class EndOfLifeChecker(EOLCheckerInterface):
             return eol
         if isinstance(eol, str):
             try:
-                eol_date = datetime.strptime(eol, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                return datetime.now(tz=timezone.utc) > eol_date
+                eol_date = datetime.strptime(eol, "%Y-%m-%d").replace(tzinfo=UTC)
+                return datetime.now(tz=UTC) > eol_date
             except ValueError:
                 return False
         return False

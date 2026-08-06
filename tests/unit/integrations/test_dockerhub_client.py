@@ -76,7 +76,8 @@ class TestSearchTagsPartialResults:
             ],
             "next": None,
         }
-        with patch.object(DockerHubClient, "_get_json", AsyncMock(return_value=_response(200, page))):
+        mock_get_json = AsyncMock(return_value=_response(200, page))
+        with patch.object(DockerHubClient, "_get_json", mock_get_json):
             tags = await client.search_tags("node", limit=100)
 
         assert tags[0].available_architectures == ["amd64", "arm64"]
@@ -88,8 +89,10 @@ class TestRetryAfter:
         client = DockerHubClient()
         resp_429 = _response(429, {}, headers={"Retry-After": "3"})
 
-        with patch("httpx.AsyncClient.get", AsyncMock(return_value=resp_429)), \
-             patch("asyncio.sleep", AsyncMock()) as mock_sleep:
+        with (
+            patch("httpx.AsyncClient.get", AsyncMock(return_value=resp_429)),
+            patch("asyncio.sleep", AsyncMock()) as mock_sleep,
+        ):
             async with await client._get_client() as http_client:
                 with pytest.raises(RetryError):
                     await client._get_json(http_client, "https://hub.docker.com/v2/x")

@@ -16,13 +16,18 @@ runner = CliRunner()
 def _analysis(critical=0, high=0) -> ImageAnalysis:
     vulns = []
     if critical:
-        vulns += [Vulnerability(cve_id=f"C{i}", severity=Severity.CRITICAL) for i in range(critical)]
+        vulns += [
+            Vulnerability(cve_id=f"C{i}", severity=Severity.CRITICAL) for i in range(critical)
+        ]
     if high:
         vulns += [Vulnerability(cve_id=f"H{i}", severity=Severity.HIGH) for i in range(high)]
     scan = ScanResult(image_reference="node:22-alpine", vulnerabilities=vulns)
     return ImageAnalysis(
         image=DockerImage(name="node", tag="22-alpine"),
-        scan=scan, security_score=90.0, tier="S", remediation_score=100,
+        scan=scan,
+        security_score=90.0,
+        tier="S",
+        remediation_score=100,
     )
 
 
@@ -35,7 +40,9 @@ def _mock_use_case(result: AnalysisResult):
 class TestRecommendExitCodes:
     def test_baseline_met_exits_zero(self):
         result = AnalysisResult(
-            query="node", total_tags_scanned=1, baseline_met=True,
+            query="node",
+            total_tags_scanned=1,
+            baseline_met=True,
             recommendations=[_analysis()],
         )
         with patch(
@@ -47,7 +54,9 @@ class TestRecommendExitCodes:
 
     def test_alternatives_only_exits_two(self):
         result = AnalysisResult(
-            query="node", total_tags_scanned=1, baseline_met=False,
+            query="node",
+            total_tags_scanned=1,
+            baseline_met=False,
             alternatives=[_analysis(high=1)],
         )
         with patch(
@@ -59,7 +68,9 @@ class TestRecommendExitCodes:
 
     def test_nothing_found_exits_three(self):
         result = AnalysisResult(
-            query="node", total_tags_scanned=1, baseline_met=False,
+            query="node",
+            total_tags_scanned=1,
+            baseline_met=False,
         )
         with patch(
             "dockerls.cli.commands.recommend.build_recommend_use_case",
@@ -70,7 +81,9 @@ class TestRecommendExitCodes:
 
     def test_no_tags_found_exits_one(self):
         result = AnalysisResult(
-            query="node", total_tags_scanned=0, baseline_met=False,
+            query="node",
+            total_tags_scanned=0,
+            baseline_met=False,
             errors=["No tags found for image"],
         )
         with patch(
@@ -82,7 +95,9 @@ class TestRecommendExitCodes:
 
     def test_fail_on_critical_forces_error_exit(self):
         result = AnalysisResult(
-            query="node", total_tags_scanned=1, baseline_met=False,
+            query="node",
+            total_tags_scanned=1,
+            baseline_met=False,
             alternatives=[_analysis(critical=1)],
         )
         with patch(
@@ -96,7 +111,9 @@ class TestRecommendExitCodes:
         import json
 
         result = AnalysisResult(
-            query="node", total_tags_scanned=1, baseline_met=True,
+            query="node",
+            total_tags_scanned=1,
+            baseline_met=True,
             recommendations=[_analysis()],
         )
         with patch(

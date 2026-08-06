@@ -57,7 +57,8 @@ class TestEndOfLifeChecker:
     async def test_is_eol_true_for_past_date(self):
         checker = EndOfLifeChecker()
         with patch.object(
-            checker, "_fetch_product",
+            checker,
+            "_fetch_product",
             AsyncMock(return_value=[{"cycle": "18", "eol": "2020-01-01"}]),
         ):
             assert await checker.is_eol("node", "18.19.0") is True
@@ -66,7 +67,8 @@ class TestEndOfLifeChecker:
     async def test_is_eol_false_for_future_date(self):
         checker = EndOfLifeChecker()
         with patch.object(
-            checker, "_fetch_product",
+            checker,
+            "_fetch_product",
             AsyncMock(return_value=[{"cycle": "22", "eol": "2099-01-01"}]),
         ):
             assert await checker.is_eol("node", "22.4.0") is False
@@ -75,7 +77,8 @@ class TestEndOfLifeChecker:
     async def test_is_lts(self):
         checker = EndOfLifeChecker()
         with patch.object(
-            checker, "_fetch_product",
+            checker,
+            "_fetch_product",
             AsyncMock(return_value=[{"cycle": "22", "lts": True}]),
         ):
             assert await checker.is_lts("node", "22.4.0") is True
