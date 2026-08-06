@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -21,9 +22,51 @@ class GrypeScanner(ScannerInterface):
     def __init__(self, timeout: int = 300, evidence: EvidenceStore | None = None):
         self._timeout = timeout
         self._evidence = evidence
+        self._skip_db_update = False
 
     async def is_available(self) -> bool:
         return shutil.which("grype") is not None
+
+    def _scan_env(self) -> dict[str, str] | None:
+        """Environment for a scan invocation.
+
+        Left at None until the DB has been refreshed once, so a scanner used
+        without `refresh_db()` still behaves exactly as before.
+        """
+        if not self._skip_db_update:
+            return None
+        env = os.environ.copy()
+        env["GRYPE_DB_AUTO_UPDATE"] = "false"
+        env["GRYPE_CHECK_FOR_APP_UPDATE"] = "false"
+        return env
+
+    async def refresh_db(self) -> bool:
+        """Update the vulnerability DB once, up front.
+
+        Grype otherwise checks its DB freshness on *every* invocation, which
+        is a network round trip per scan -- the dominant cost when
+        cross-validating several images. After this succeeds, scans run with
+        GRYPE_DB_AUTO_UPDATE=false so they go straight to matching.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(  # noqa: S603
+                "grype",
+                "db",
+                "update",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
+            if proc.returncode != 0:
+                logger.warning(f"Grype DB refresh failed: {stderr.decode()[:200]}")
+                return False
+        except (TimeoutError, OSError) as e:
+            logger.warning(f"Grype DB refresh failed: {e}")
+            return False
+
+        self._skip_db_update = True
+        logger.info("Grype DB ready; per-scan auto-update disabled")
+        return True
 
     async def scan(self, image_reference: str) -> ScanResult:
         safe_ref = sanitize_image_name(image_reference)
@@ -39,6 +82,7 @@ class GrypeScanner(ScannerInterface):
                 "--quiet",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self._scan_env(),
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
 

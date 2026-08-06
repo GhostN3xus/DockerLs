@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 _UNSAFE_PATH_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
 
-def _slugify(reference: str) -> str:
+def slugify_reference(reference: str) -> str:
     """Flatten an image reference into a single safe path segment.
 
     Deliberately collapses "/" and ":" instead of preserving them: the
@@ -23,6 +23,10 @@ def _slugify(reference: str) -> str:
     """
     slug = _UNSAFE_PATH_CHARS.sub("_", reference).strip("._-")
     return slug[:120] or "image"
+
+
+# Backwards-compatible private alias.
+_slugify = slugify_reference
 
 
 class EvidenceStore:
@@ -44,7 +48,8 @@ class EvidenceStore:
 
     def _record_scan_sync(self, image_reference: str, scanner: str, raw: str) -> str:
         stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%S%f")
-        path = self._root / f"{_slugify(image_reference)}__{_slugify(scanner)}__{stamp}.json"
+        name = f"{slugify_reference(image_reference)}__{slugify_reference(scanner)}__{stamp}.json"
+        path = self._root / name
         try:
             self._root.mkdir(parents=True, exist_ok=True)
             path.write_text(raw, encoding="utf-8")
@@ -59,7 +64,7 @@ class EvidenceStore:
 
     def _record_manifest_sync(self, query: str, entries: list[dict[str, Any]]) -> str:
         stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%S")
-        path = self._root / f"{_slugify(query)}__manifest__{stamp}.json"
+        path = self._root / f"{slugify_reference(query)}__manifest__{stamp}.json"
         payload = {
             "query": query,
             "generated_at": datetime.now(tz=UTC).isoformat(),

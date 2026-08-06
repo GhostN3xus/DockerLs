@@ -84,3 +84,58 @@ class TestGrypeScanErrorPaths:
         with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
             result = await scanner.scan("nginx:latest")
         assert result.status == ScanStatus.OK
+
+
+class _FakeProcRC:
+    def __init__(self, stdout=b"", stderr=b"", returncode=0):
+        self._stdout, self._stderr, self.returncode = stdout, stderr, returncode
+
+    async def communicate(self):
+        return self._stdout, self._stderr
+
+
+class TestGrypeDatabaseRefresh:
+    """Grype checks its DB on every invocation unless told not to; that
+    round trip per image was the dominant cross-validation cost."""
+
+    @pytest.mark.asyncio
+    async def test_refresh_db_runs_db_update(self):
+        scanner = GrypeScanner()
+        mock_exec = AsyncMock(return_value=_FakeProcRC(returncode=0))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            assert await scanner.refresh_db() is True
+
+        assert list(mock_exec.call_args.args) == ["grype", "db", "update"]
+
+    @pytest.mark.asyncio
+    async def test_scans_before_refresh_use_default_env(self):
+        scanner = GrypeScanner()
+        mock_exec = AsyncMock(return_value=_FakeProcRC(stdout=b'{"matches": []}'))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await scanner.scan("node:22-alpine")
+
+        assert mock_exec.call_args.kwargs["env"] is None
+
+    @pytest.mark.asyncio
+    async def test_scans_after_refresh_disable_auto_update(self):
+        scanner = GrypeScanner()
+        mock_exec = AsyncMock(return_value=_FakeProcRC(stdout=b'{"matches": []}'))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            await scanner.refresh_db()
+            await scanner.scan("node:22-alpine")
+
+        env = mock_exec.call_args.kwargs["env"]
+        assert env["GRYPE_DB_AUTO_UPDATE"] == "false"
+        assert env["GRYPE_CHECK_FOR_APP_UPDATE"] == "false"
+
+    @pytest.mark.asyncio
+    async def test_failed_refresh_leaves_auto_update_on(self):
+        """A failed pre-fetch must not leave scans running against a DB
+        that was never updated with updates suppressed."""
+        scanner = GrypeScanner()
+        mock_exec = AsyncMock(return_value=_FakeProcRC(stderr=b"boom", returncode=1))
+        with patch("asyncio.create_subprocess_exec", mock_exec):
+            assert await scanner.refresh_db() is False
+            await scanner.scan("node:22-alpine")
+
+        assert mock_exec.call_args.kwargs["env"] is None

@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     cross_validate: bool = True
     # Confirm each recommended tag really exists on Docker Hub.
     verify_hub_tags: bool = True
+    # Concurrent secondary scans during cross-validation.
+    cross_validate_workers: int = 5
+    # Search free hardened catalogues (Chainguard, Distroless) alongside
+    # Docker Hub, so a hardened image can win on measured vulnerabilities.
+    include_hardened_sources: bool = True
+    # Tags pulled per hardened source; these catalogues are small and their
+    # listings are unordered, so a wide fetch buys nothing.
+    hardened_tag_limit: int = 10
     scanner_timeout: int = 300
     http_timeout: int = 30
     retry_max_attempts: int = 3

@@ -37,7 +37,12 @@ class SecurityScore:
         score -= self._scan.critical_count * 20
         score -= self._scan.high_count * 5
         score -= self._scan.medium_count * 1
-        score -= self._image.age_days / 365.0
+        # Age only moves the score when the source actually reported a
+        # publish date. Registries that list tag names only (Chainguard,
+        # most OCI catalogues) would otherwise be charged the maximum age
+        # penalty and denied the recency bonus for missing metadata.
+        if self._image.age_known:
+            score -= self._image.age_days / 365.0
 
         if self._image.is_official:
             score += 5
@@ -48,7 +53,7 @@ class SecurityScore:
         # must not be double-counted.
         if self._image.is_distroless or self._image.is_hardened_source or self._image.is_alpine:
             score += 3
-        if self._image.recently_updated:
+        if self._image.age_known and self._image.recently_updated:
             score += 2
         if self._image.is_signed:
             score += 2

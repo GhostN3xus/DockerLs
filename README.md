@@ -131,16 +131,47 @@ tag cannot clear all three, it is reported separately and never scored:
    scanner (Grype when Trivy is primary, and vice versa). If the two
    disagree materially on CRITICAL/HIGH counts, the score is shown as
    `!disputed` instead of a number, with the discrepancy printed below.
-3. **Tag confirmed on Docker Hub.** Each tag is checked against the Hub API
-   before it is offered, and the table carries a direct link to it.
+3. **Tag confirmed in its source registry.** Docker Hub tags are checked
+   against the Hub API (`GET /v2/repositories/<ns>/<repo>/tags/<tag>`);
+   hardened-source tags are checked against that registry's own listing.
+   Either way the `Tag` column reflects a real registry answer, never a
+   constructed string.
 
 The run opens with a one-line summary of how many tags were analyzed versus
-skipped, plus the path to that run's log file:
+skipped, which catalogues were searched, and the path to that run's log file:
 
 ```
-OK 12/24 analyzed | X 12 skipped (technical error)
+OK 12/24 analyzed | X 12 skipped (technical error) | sources: Docker Hub, Chainguard, Distroless
 log: logs/dockerls_2026-08-06_13-36-15.log
 ```
+
+When nothing clears the baseline, the exact criteria are printed rather than
+just the verdict:
+
+```
+No image found matching baseline.
+Baseline: 0 Critical, 0 High, 5 Medium (and not EOL).
+No image met it -- showing the closest alternatives.
+```
+
+#### Image sources
+
+Docker Hub is searched alongside two free, security-hardened catalogues, and
+all of their tags go through the same scan pipeline -- a hardened image wins
+on measured vulnerabilities, not on reputation. The `Source` column says
+where each row came from.
+
+| Source | Registry | Notes |
+|--------|----------|-------|
+| Docker Hub | `docker.io` | Full tag listing with sizes and dates |
+| Chainguard | `cgr.dev/chainguard/<image>` | Free tier tracks moving tags (`latest`, `latest-dev`); pinned versions are a paid feature |
+| Distroless | `gcr.io/distroless/<image>` | GCR reports publish dates and sizes, so these tags are ranked newest-first |
+
+Cosign signatures, attestations, SBOMs, single-arch aliases and
+commit-pinned duplicates are filtered out of registry listings -- they are
+not images anyone would pull. A source that is unreachable is logged and
+skipped; it never takes down a search the other sources can still answer.
+Use `--no-hardened` for Docker Hub only.
 
 #### Output, logs and evidence
 
@@ -149,16 +180,37 @@ The terminal shows only a progress spinner and the results. All diagnostics
 `--verbose` to mirror them to stderr as well. Set `DOCKERLS_LOG_DIR` to move
 the log directory.
 
-The raw JSON from every scan is written to `.dockerls/scans/`, alongside a
-per-run manifest linking each displayed score to the exact scanner output it
-came from. Set `DOCKERLS_EVIDENCE_DIR` to relocate it.
+The raw JSON from every scan is written to
+`.dockerls/scans/<image>_<tag>__<scanner>__<timestamp>.json`, and the
+`Details` block under the table points each image at its own files:
+
+```
+Details
+  1. node:trixie-slim  Docker Hub
+     link:     https://hub.docker.com/_/node?tab=tags&name=trixie-slim
+     trivy:    .dockerls/scans/node_trixie-slim__trivy__20260806T153113154282.json
+     grype:    .dockerls/scans/node_trixie-slim__grype__20260806T153119491147.json
+  2. node:slim  Docker Hub
+     link:     https://hub.docker.com/_/node?tab=tags&name=slim
+     trivy:    .dockerls/scans/node_trixie-slim__trivy__20260806T153113154282.json  (shared digest)
+```
+
+`(shared digest)` marks evidence produced under a sibling tag's name: tags
+pointing at the same manifest digest are scanned once and share the result.
+A per-run manifest linking every displayed score to its evidence is written
+alongside. Set `DOCKERLS_EVIDENCE_DIR` to relocate the directory.
+
+The progress display renders to **stderr** and results to **stdout**, so
+`dockerls recommend node > out.txt` leaves the spinner on your terminal and
+writes clean results to the file.
 
 | Flag | Effect |
 |------|--------|
 | `--verbose` / `-v` | Also print logs to stderr |
 | `--no-progress` | Disable the progress spinner |
 | `--no-cross-validate` | Skip second-scanner validation (faster) |
-| `--no-hub-check` | Skip Docker Hub tag verification (offline use) |
+| `--no-hub-check` | Skip registry tag verification (offline use) |
+| `--no-hardened` | Search Docker Hub only |
 
 #### Scan concurrency
 
@@ -170,6 +222,14 @@ and removes those directories when the run ends. If hard-linking is not
 possible, it falls back to a single shared cache dir and serializes scans --
 slower, but never lock-contended. `DOCKERLS_TRIVY_CACHE_DIR` overrides the
 cache root.
+
+Grype checks its vulnerability DB for updates on *every* invocation, which
+is a network round trip per image. Cross-validation therefore runs
+`grype db update` once for the batch and then scans with
+`GRYPE_DB_AUTO_UPDATE=false`, and the validations themselves run
+concurrently (`DOCKERLS_CROSS_VALIDATE_WORKERS`, default 5) since they are
+independent. The acceptance suite holds the whole command to a 30-second
+budget for five images.
 
 ### advisor
 

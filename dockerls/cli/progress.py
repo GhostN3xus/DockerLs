@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from rich.console import Console
 from rich.progress import (
     BarColumn,
     Progress,
     SpinnerColumn,
+    TaskID,
     TextColumn,
     TimeElapsedColumn,
 )
@@ -13,31 +15,50 @@ from rich.progress import (
 if TYPE_CHECKING:
     from types import TracebackType
 
-    from rich.console import Console
-
 
 class RichScanObserver:
     """Renders scan progress as a single self-updating line.
 
-    This is the only thing allowed to write to the terminal while scans are
-    running -- loguru is file-only, and scanner stderr is captured -- so the
-    progress display can never be corrupted by interleaved log output.
+    Exactly one `Progress` (one Rich live display) exists per run, and it
+    renders to **stderr** while results are printed to stdout. That split is
+    what makes duplication structurally impossible: the live region and the
+    results stream are different file objects, so a result can never be
+    drawn into a progress frame, and piping stdout leaves the progress
+    display on the terminal where it belongs.
+
+    Anything that writes through `sys.stdout`/`sys.stderr` during the run
+    (a stray print, a loguru console sink) is captured by Rich and re-emitted
+    above the bar rather than tearing through the live region.
     """
 
-    def __init__(self, console: Console, enabled: bool = True):
-        self._console = console
+    def __init__(self, console: Console | None = None, enabled: bool = True):
+        # Default to a dedicated stderr console so the caller's stdout
+        # console is never shared with the live display.
+        self._console = console if console is not None else Console(stderr=True)
         self._enabled = enabled
         self._progress: Progress | None = None
-        self._task_id: int | None = None
+        self._task_id: TaskID | None = None
         self._total = 0
         self._done = 0
         self._failed = 0
+        self._entered = False
 
     @property
     def failed(self) -> int:
         return self._failed
 
+    @property
+    def progress(self) -> Progress | None:
+        """The single live display, or None when disabled/not started."""
+        return self._progress
+
     def __enter__(self) -> RichScanObserver:
+        if self._entered:
+            raise RuntimeError(
+                "RichScanObserver is not re-entrant: a second live display "
+                "would render a duplicate progress bar"
+            )
+        self._entered = True
         if self._enabled:
             self._progress = Progress(
                 SpinnerColumn(),
@@ -46,6 +67,11 @@ class RichScanObserver:
                 TimeElapsedColumn(),
                 console=self._console,
                 transient=True,
+                # Stray writes get rendered above the bar instead of
+                # corrupting the live region into a duplicate.
+                redirect_stdout=True,
+                redirect_stderr=True,
+                refresh_per_second=8,
             )
             self._progress.start()
         return self
@@ -59,6 +85,7 @@ class RichScanObserver:
         if self._progress is not None:
             self._progress.stop()
             self._progress = None
+        self._task_id = None
 
     def _describe(self, image_reference: str) -> str:
         return f"Scanning {image_reference}... [{self._done + 1}/{self._total}]"
