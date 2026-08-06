@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -15,6 +16,9 @@ if TYPE_CHECKING:
 # count is treated as a real disagreement worth flagging.
 DEFAULT_ABS_TOLERANCE = 2
 DEFAULT_REL_TOLERANCE = 0.5
+# Validations are independent of each other, so they run concurrently. The
+# cap keeps a handful of scanner processes from thrashing the machine.
+DEFAULT_WORKERS = 5
 
 
 class CrossValidator:
@@ -27,10 +31,12 @@ class CrossValidator:
         scanner: ScannerInterface | None,
         abs_tolerance: int = DEFAULT_ABS_TOLERANCE,
         rel_tolerance: float = DEFAULT_REL_TOLERANCE,
+        workers: int = DEFAULT_WORKERS,
     ):
         self._scanner = scanner
         self._abs_tolerance = abs_tolerance
         self._rel_tolerance = rel_tolerance
+        self._workers = max(1, workers)
 
     @property
     def enabled(self) -> bool:
@@ -42,15 +48,29 @@ class CrossValidator:
 
     async def validate(self, analyses: list[ImageAnalysis]) -> None:
         """Annotate each analysis in place with `scan_divergence` and the
-        secondary scanner's evidence path."""
+        secondary scanner's evidence path.
+
+        The DB is refreshed once before the batch, then the validations run
+        concurrently -- they share no state, so serializing them only added
+        latency.
+        """
         if self._scanner is None or not analyses:
             return
         if not await self._scanner.is_available():
             logger.info("Cross-validation scanner unavailable; skipping")
             return
 
-        for analysis in analyses:
-            await self._validate_one(analysis)
+        refresh_db = getattr(self._scanner, "refresh_db", None)
+        if callable(refresh_db):
+            await refresh_db()
+
+        semaphore = asyncio.Semaphore(self._workers)
+
+        async def guarded(analysis: ImageAnalysis) -> None:
+            async with semaphore:
+                await self._validate_one(analysis)
+
+        await asyncio.gather(*[guarded(a) for a in analyses])
 
     async def _validate_one(self, analysis: ImageAnalysis) -> None:
         if self._scanner is None:

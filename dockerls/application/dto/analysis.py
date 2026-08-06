@@ -29,6 +29,25 @@ class ImageAnalysis(BaseModel):
     evidence_paths: dict[str, str] = Field(default_factory=dict)
 
 
+class BaselineCriteria(BaseModel):
+    """The exact thresholds an image had to clear to count as a match.
+
+    Carried on the result so "no image found matching baseline" can state
+    what the baseline actually was instead of leaving the user to guess.
+    """
+
+    max_critical: int
+    max_high: int
+    max_medium: int
+
+    def describe(self) -> str:
+        return (
+            f"{self.max_critical} Critical, "
+            f"{self.max_high} High, "
+            f"{self.max_medium} Medium (and not EOL)"
+        )
+
+
 class UnverifiedImage(BaseModel):
     """A tag that could not be scanned successfully.
 
@@ -53,6 +72,9 @@ class AnalysisResult(BaseModel):
     unverified: list[UnverifiedImage] = []
     log_file: str = ""
     evidence_manifest: str = ""
+    baseline: BaselineCriteria | None = None
+    # Catalogues that returned at least one candidate for this query.
+    sources_searched: list[str] = []
 
     @property
     def unverified_count(self) -> int:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
+from dockerls.application.services.composite_repository import CompositeImageRepository
 from dockerls.application.services.cross_validation import CrossValidator
 from dockerls.application.services.scanner_factory import ScannerFactory
 from dockerls.application.use_cases.analyze_image import AnalyzeImageUseCase
@@ -15,6 +16,10 @@ from dockerls.infrastructure.evidence import EvidenceStore
 from dockerls.infrastructure.logging.setup import setup_logging
 from dockerls.integrations.dockerhub.client import DockerHubClient
 from dockerls.integrations.endoflife.checker import EndOfLifeChecker
+from dockerls.integrations.registry.hardened import (
+    ChainguardRepository,
+    DistrolessRepository,
+)
 from dockerls.integrations.threat_intel.client import ThreatIntelClient
 from dockerls.utils.auth import load_credentials
 
@@ -22,6 +27,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from dockerls.application.services.progress import ScanObserver
+    from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
 
 # Populated by _settings() on first use; exposed so commands can tell the
 # user exactly which file the run's diagnostics landed in.
@@ -84,6 +90,17 @@ def _threat_intel() -> ThreatIntelClient | None:
     return ThreatIntelClient(timeout=s.http_timeout)
 
 
+def build_hardened_repositories() -> list[ImageRepositoryInterface]:
+    """Free, security-hardened catalogues searched alongside Docker Hub."""
+    s = _settings()
+    if not s.include_hardened_sources:
+        return []
+    return [
+        ChainguardRepository(timeout=s.http_timeout),
+        DistrolessRepository(timeout=s.http_timeout),
+    ]
+
+
 async def build_recommend_use_case(
     max_critical: int = 0,
     max_high: int = 0,
@@ -92,10 +109,17 @@ async def build_recommend_use_case(
     observer: ScanObserver | None = None,
     cross_validate: bool | None = None,
     verify_hub_tags: bool | None = None,
+    include_hardened: bool | None = None,
 ) -> RecommendImagesUseCase:
     s = _settings()
     cache = build_cache()
-    repo = await build_repository(cache=cache)
+    hub = await build_repository(cache=cache)
+    hardened = (
+        build_hardened_repositories()
+        if (s.include_hardened_sources if include_hardened is None else include_hardened)
+        else []
+    )
+    repo = CompositeImageRepository(hub, hardened, extra_limit=s.hardened_tag_limit)
     evidence = build_evidence_store()
     scanner = await ScannerFactory.create(
         timeout=s.scanner_timeout,
@@ -122,7 +146,7 @@ async def build_recommend_use_case(
         workers=workers,
         threat_intel=_threat_intel(),
         observer=observer,
-        cross_validator=CrossValidator(secondary),
+        cross_validator=CrossValidator(secondary, workers=s.cross_validate_workers),
         evidence=evidence,
         verify_hub_tags=s.verify_hub_tags if verify_hub_tags is None else verify_hub_tags,
         log_file=current_log_file(),

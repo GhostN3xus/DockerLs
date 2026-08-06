@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 from pydantic import ValidationError
 
-from dockerls.application.dto.analysis import AnalysisResult, ImageAnalysis, UnverifiedImage
+from dockerls.application.dto.analysis import (
+    AnalysisResult,
+    BaselineCriteria,
+    ImageAnalysis,
+    UnverifiedImage,
+)
 from dockerls.application.services.progress import NullObserver
 from dockerls.domain.entities.recommendation import (
     ActionType,
@@ -17,7 +22,7 @@ from dockerls.domain.entities.recommendation import (
 from dockerls.domain.value_objects.remediation_score import RemediationScore
 from dockerls.domain.value_objects.security_score import SecurityScore
 from dockerls.domain.value_objects.security_tier import SecurityTier
-from dockerls.integrations.dockerhub.urls import build_dockerhub_url
+from dockerls.integrations.registry.urls import source_url
 from dockerls.utils.ignore_file import active_ignored_cve_ids, load_ignore_rules
 
 if TYPE_CHECKING:
@@ -84,6 +89,13 @@ class RecommendImagesUseCase:
         finally:
             await self._close_scanners()
 
+    def _baseline(self) -> BaselineCriteria:
+        return BaselineCriteria(
+            max_critical=self._max_critical,
+            max_high=self._max_high,
+            max_medium=self._max_medium,
+        )
+
     async def _execute(self, image_name: str, limit: int = 100) -> AnalysisResult:
         self._observer.phase("Preparing vulnerability database")
         refresh_db = getattr(self._scanner, "refresh_db", None)
@@ -99,6 +111,7 @@ class RecommendImagesUseCase:
                 baseline_met=False,
                 errors=["No tags found for image"],
                 log_file=str(self._log_file or ""),
+                baseline=self._baseline(),
             )
 
         analyses, unverified, errors = await self._scan_all(tags)
@@ -133,6 +146,8 @@ class RecommendImagesUseCase:
             errors=errors,
             unverified=unverified,
             log_file=str(self._log_file or ""),
+            baseline=self._baseline(),
+            sources_searched=_sources_of(tags),
         )
         result.evidence_manifest = await self._write_manifest(image_name, selected)
         return result
@@ -243,8 +258,8 @@ class RecommendImagesUseCase:
             await self._cross_validator.validate(candidates[:TOP_N])
 
         if self._verify_hub_tags and candidates:
-            self._observer.phase("Verifying tags on Docker Hub")
-            await self._verify_on_hub(candidates, unverified)
+            self._observer.phase("Verifying tags in their source registries")
+            await self._verify_tags(candidates, unverified)
             candidates = [c for c in candidates if c.hub_tag_verified is not False]
 
         selected = candidates[:TOP_N]
@@ -253,26 +268,33 @@ class RecommendImagesUseCase:
             analysis.recommendation = build_recommendation(analysis)
         return selected
 
-    async def _verify_on_hub(
+    async def _verify_tags(
         self, candidates: list[ImageAnalysis], unverified: list[UnverifiedImage]
     ) -> None:
+        """Confirm each candidate tag against the registry that owns it.
+
+        Docker Hub tags are checked through the Hub API; hardened-source
+        tags are checked against that source's own listing. Either way the
+        answer comes from the registry, never from a constructed string.
+        """
         checker = getattr(self._repository, "tag_exists", None)
 
         async def check(analysis: ImageAnalysis) -> None:
-            analysis.hub_url = build_dockerhub_url(analysis.image.name, analysis.image.tag)
+            analysis.hub_url = source_url(analysis.image.name, analysis.image.tag)
             if not callable(checker):
                 return
             exists = await checker(analysis.image.name, analysis.image.tag)
             analysis.hub_tag_verified = exists
             if exists is False:
                 logger.warning(
-                    f"Dropping {analysis.image.full_reference}: tag not found on Docker Hub"
+                    f"Dropping {analysis.image.full_reference}: "
+                    f"tag not found in {analysis.image.source}"
                 )
                 unverified.append(
                     UnverifiedImage(
                         image_reference=analysis.image.full_reference,
                         status="TAG_NOT_FOUND",
-                        reason="Tag does not exist on Docker Hub",
+                        reason=f"Tag does not exist in {analysis.image.source}",
                     )
                 )
 
@@ -333,6 +355,16 @@ class RecommendImagesUseCase:
     async def _set_cached(self, key: str, analysis: ImageAnalysis) -> None:
         if self._cache:
             await self._cache.set(f"analysis:{key}", analysis.model_dump(), ttl_seconds=86400)
+
+
+def _sources_of(tags: list[DockerImage]) -> list[str]:
+    """Distinct catalogues that contributed a candidate, in first-seen
+    order, so the run can report what it actually looked at."""
+    seen: list[str] = []
+    for tag in tags:
+        if tag.source not in seen:
+            seen.append(tag.source)
+    return seen
 
 
 def _assert_verified(analyses: list[ImageAnalysis]) -> None:

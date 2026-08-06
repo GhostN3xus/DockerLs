@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import typer
@@ -12,6 +13,7 @@ from rich.table import Table
 
 from dockerls.cli.dependencies import build_recommend_use_case, enable_console_logging
 from dockerls.cli.progress import RichScanObserver
+from dockerls.infrastructure.evidence import slugify_reference
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -66,7 +68,10 @@ def recommend(
         False, "--no-cross-validate", help="Skip second-scanner validation of top candidates"
     ),
     no_hub_check: bool = typer.Option(
-        False, "--no-hub-check", help="Skip Docker Hub tag existence verification"
+        False, "--no-hub-check", help="Skip registry tag existence verification"
+    ),
+    no_hardened: bool = typer.Option(
+        False, "--no-hardened", help="Search Docker Hub only (skip Chainguard/Distroless)"
     ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Also print logs to stderr (they always go to the log file)"
@@ -90,6 +95,7 @@ def recommend(
             show_progress=not no_progress and output_format != "json",
             cross_validate=not no_cross_validate,
             verify_hub_tags=not no_hub_check,
+            include_hardened=not no_hardened,
         )
     )
 
@@ -106,8 +112,11 @@ async def _recommend(
     show_progress: bool = True,
     cross_validate: bool = True,
     verify_hub_tags: bool = True,
+    include_hardened: bool = True,
 ) -> None:
-    with RichScanObserver(console, enabled=show_progress) as observer:
+    # The observer builds its own stderr console; `console` (stdout) is left
+    # exclusively for results so the two streams cannot interleave.
+    with RichScanObserver(enabled=show_progress) as observer:
         use_case = await build_recommend_use_case(
             max_critical=max_critical,
             max_high=max_high,
@@ -116,6 +125,7 @@ async def _recommend(
             observer=observer,
             cross_validate=cross_validate,
             verify_hub_tags=verify_hub_tags,
+            include_hardened=include_hardened,
         )
         result = await use_case.execute(image, limit=limit)
 
@@ -128,28 +138,41 @@ async def _recommend(
     if result.baseline_met and result.recommendations:
         console.print(Panel("[bold green]Recommended Images[/bold green]", expand=False))
         _print_table(result.recommendations)
-        _print_hub_links(result.recommendations)
+        _print_details(result.recommendations)
         _print_divergences(result.recommendations)
     elif result.alternatives:
-        console.print(
-            Panel(
-                "[bold yellow]No image found matching baseline.\n"
-                "Alternative Recommendations:[/bold yellow]",
-                expand=False,
-            )
-        )
+        console.print(Panel(_baseline_miss_message(result), expand=False))
         _print_table(result.alternatives)
-        _print_hub_links(result.alternatives)
+        _print_details(result.alternatives)
         _print_divergences(result.alternatives)
     else:
         console.print("[red]No suitable images found.[/red]")
+        console.print(f"[dim]{_baseline_line(result)}[/dim]")
 
     _print_unverified(result)
 
     if result.evidence_manifest:
-        console.print(f"\n[dim]Scan evidence: {result.evidence_manifest}[/dim]")
+        console.print(f"\n[dim]Evidence manifest: {result.evidence_manifest}[/dim]")
 
     raise typer.Exit(_exit_code(result, fail_on))
+
+
+def _baseline_line(result: AnalysisResult) -> str:
+    if result.baseline is None:
+        return ""
+    return f"Baseline: {result.baseline.describe()}."
+
+
+def _baseline_miss_message(result: AnalysisResult) -> str:
+    """Name the exact threshold that was not met, so "no match" is a fact
+    the reader can check rather than an opaque verdict."""
+    baseline = _baseline_line(result)
+    detail = f"{baseline}\n" if baseline else ""
+    return (
+        f"[bold yellow]No image found matching baseline.[/bold yellow]\n"
+        f"[yellow]{detail}"
+        f"No image met it -- showing the closest alternatives.[/yellow]"
+    )
 
 
 def _print_summary(result: AnalysisResult) -> None:
@@ -162,6 +185,8 @@ def _print_summary(result: AnalysisResult) -> None:
     parts = [f"[green]OK {analyzed}/{total} analyzed[/green]"]
     if skipped:
         parts.append(f"[yellow]X {skipped} skipped (technical error)[/yellow]")
+    if result.sources_searched:
+        parts.append(f"[magenta]sources: {', '.join(result.sources_searched)}[/magenta]")
     console.print(" | ".join(parts))
     if result.log_file:
         # Its own line: a wrapped path is a path the user cannot copy.
@@ -185,12 +210,13 @@ def _print_table(analyses: list[ImageAnalysis]) -> None:
     table = Table()
     table.add_column("#", justify="right", style="dim")
     table.add_column("Image", style="cyan bold", overflow="fold")
+    table.add_column("Source", style="magenta")
     table.add_column("Score", justify="right", style="green", no_wrap=True)
     table.add_column("Tier", justify="center")
     table.add_column("C/H/M", justify="center", no_wrap=True)
     table.add_column("Fix", justify="right", style="green")
     table.add_column("Rem", justify="right")
-    table.add_column("Hub", justify="center")
+    table.add_column("Tag", justify="center")
 
     styles = {"S": "bold green", "A": "bold blue", "B": "bold yellow", "C": "bold red"}
     for i, a in enumerate(analyses, 1):
@@ -206,6 +232,7 @@ def _print_table(analyses: list[ImageAnalysis]) -> None:
         table.add_row(
             str(i),
             a.image.full_reference,
+            a.image.source,
             score,
             f"[{ts}]{a.tier}[/{ts}]" if ts else a.tier,
             counts,
@@ -214,22 +241,47 @@ def _print_table(analyses: list[ImageAnalysis]) -> None:
             _hub_status(a),
         )
     console.print(table)
-    console.print("[dim]C/H/M = Critical/High/Medium | Fix = fixable | Rem = remediation[/dim]")
+    console.print(
+        "[dim]C/H/M = Critical/High/Medium | Fix = fixable | Rem = remediation | "
+        "Tag = confirmed in source registry[/dim]"
+    )
 
 
-def _print_hub_links(analyses: list[ImageAnalysis]) -> None:
-    """Full Hub URLs are listed below the table rather than inside it --
-    they are far too wide for a terminal column."""
-    linked = [a for a in analyses if a.hub_url]
-    if not linked:
+def _print_details(analyses: list[ImageAnalysis]) -> None:
+    """Per-image registry link and the scan evidence backing its score.
+
+    Both are listed below the table rather than in it: URLs and file paths
+    are far too wide for a terminal column, and each image needs its *own*
+    evidence path, not just a pointer to the aggregate manifest.
+    """
+    if not analyses:
         return
-    console.print("\n[bold]Docker Hub[/bold]")
+    console.print("\n[bold]Details[/bold]")
     for i, a in enumerate(analyses, 1):
-        if not a.hub_url:
-            continue
-        console.print(f"  {i}. [cyan]{a.image.full_reference}[/cyan]")
-        # soft_wrap keeps the URL on one line so it stays copy-pasteable.
-        console.print(f"     [link={a.hub_url}]{a.hub_url}[/link]", soft_wrap=True)
+        console.print(f"  {i}. [cyan]{a.image.full_reference}[/cyan]  [dim]{a.image.source}[/dim]")
+        if a.hub_url:
+            # soft_wrap keeps the URL on one line so it stays copy-pasteable.
+            console.print(f"     link:     [link={a.hub_url}]{a.hub_url}[/link]", soft_wrap=True)
+        if a.evidence_paths:
+            for scanner, path in sorted(a.evidence_paths.items()):
+                note = _shared_scan_note(a, path)
+                console.print(f"     {scanner + ':':9} [dim]{path}{note}[/dim]", soft_wrap=True)
+        else:
+            console.print("     [dim]evidence: not recorded[/dim]")
+
+
+def _shared_scan_note(analysis: ImageAnalysis, path: str) -> str:
+    """Flag evidence produced under a sibling tag's name.
+
+    Tags that share a manifest digest are scanned once and share the
+    result, so the file can be named for whichever tag triggered the scan.
+    That is correct -- they are the same image -- but without saying so the
+    path looks like it belongs to the wrong image.
+    """
+    if not path:
+        return ""
+    own_prefix = f"{slugify_reference(analysis.image.full_reference)}__"
+    return "" if Path(path).name.startswith(own_prefix) else "  (shared digest)"
 
 
 def _print_divergences(analyses: list[ImageAnalysis]) -> None:

@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Follow-up to the `recommend` overhaul, driven by a real run of
+`dockerls recommend node`.
+
+### Fixed
+- **The security score could not tell images apart.** Bonuses totalled +19
+  against a base of 100, so anything reasonably decorated hit the clamp: a
+  clean image, a 1-HIGH image, a 2-HIGH image and a 5-MEDIUM image all
+  reported exactly `100.0` -- the number claimed a vulnerable image was as
+  safe as a clean one. Scoring now starts at 96 with qualitative bonuses
+  capped at 4.0, strictly below a single HIGH penalty, so no combination of
+  "official + minimal + signed + LTS + recent" can lift an image with an
+  extra HIGH or CRITICAL above a cleaner one. Bonuses can still outweigh a
+  MEDIUM or two, which is intended. The redundant "zero vulnerabilities"
+  bonus is gone -- zero findings already means zero penalty.
+- **Cross-validation was pathologically slow** (~4m12s for five images).
+  Two causes, both addressed: Grype re-checks its vulnerability DB on every
+  invocation, so the batch now runs `grype db update` once and scans with
+  `GRYPE_DB_AUTO_UPDATE=false`; and the validations ran in a sequential
+  `for` loop despite being independent, so they now run concurrently under
+  a worker cap (`DOCKERLS_CROSS_VALIDATE_WORKERS`, default 5).
+- Images from registries that list tag names only were charged the maximum
+  age penalty and denied the recency bonus for metadata the registry simply
+  does not publish. Age now moves the score only when the source actually
+  reported a date.
+
+### Added
+- **Free hardened catalogues are searched alongside Docker Hub**:
+  Chainguard (`cgr.dev/chainguard/<image>`) and Distroless
+  (`gcr.io/distroless/<image>`). Their tags run through the same scan
+  pipeline, so a hardened image wins on measured vulnerabilities rather
+  than reputation. New `Source` column names each row's origin, and the run
+  summary lists which catalogues answered. `--no-hardened` opts out.
+- Registry listings are filtered to actual images: cosign `.sig`/`.att`/
+  `.sbom` artifacts (~1000 per Chainguard repo), single-arch aliases and
+  commit-pinned duplicates are dropped.
+- "No image found matching baseline" now prints the exact criteria that
+  were not met.
+- The `Details` block gives every image its own evidence paths, marking
+  `(shared digest)` where tags sharing a manifest were scanned once.
+- `AnalysisResult.sources_searched` and `AnalysisResult.baseline` expose
+  both facts to `--format json`.
+- Acceptance suite (`tests/acceptance/`) asserting the end-to-end budget
+  (<30s for five images), one progress display with no leakage into the
+  results stream, per-image evidence on disk, and that both hardened
+  sources are consulted.
+
+### Changed
+- The progress display renders to **stderr**, results to **stdout**, so the
+  two streams cannot interleave and piping stdout keeps the spinner on the
+  terminal. The observer is single-use and rejects re-entry; a test asserts
+  the package contains exactly one Rich live display.
+- Tag verification generalised beyond Docker Hub: each tag is confirmed by
+  the registry that owns it. The table's `Hub` column is now `Tag`.
+
+
+
 `dockerls recommend` overhaul: clean terminal output, the root cause of the
 Trivy scan errors removed, and no image recommended without proof it was
 scanned and that its tag exists.

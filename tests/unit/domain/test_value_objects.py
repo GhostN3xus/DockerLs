@@ -151,3 +151,105 @@ class TestRemediationScore:
         ]
         rs = RemediationScore(_scan(vulns))
         assert rs.value == 60
+
+
+class TestScoreDiscriminatesBetweenImages:
+    """The score must rank by measured vulnerabilities.
+
+    Regression: bonuses summed to +19 against a base of 100, so anything
+    reasonably decorated hit the 100 clamp. A clean image, a 1-HIGH image,
+    a 2-HIGH image and a 5-MEDIUM image all reported exactly 100.0 -- the
+    number claimed a vulnerable image was as safe as a clean one.
+    """
+
+    def _score(self, image=None, vulns=None, **kwargs):
+        return SecurityScore(image or _image(), _scan(vulns), **kwargs).value
+
+    def _highs(self, n):
+        return [Vulnerability(cve_id=f"H{i}", severity=Severity.HIGH) for i in range(n)]
+
+    def _mediums(self, n):
+        return [Vulnerability(cve_id=f"M{i}", severity=Severity.MEDIUM) for i in range(n)]
+
+    def test_clean_beats_one_high(self):
+        assert self._score() > self._score(vulns=self._highs(1))
+
+    def test_each_extra_high_lowers_the_score(self):
+        scores = [self._score(vulns=self._highs(n)) for n in range(4)]
+        assert scores == sorted(scores, reverse=True)
+        assert len(set(scores)) == 4, f"scores collapsed onto each other: {scores}"
+
+    def test_mediums_are_distinguishable(self):
+        assert self._score() > self._score(vulns=self._mediums(1))
+        assert self._score(vulns=self._mediums(1)) > self._score(vulns=self._mediums(5))
+
+    def test_a_fully_decorated_clean_image_is_not_clamped(self):
+        """It should land near the top on its merits, not by hitting the
+        ceiling -- otherwise it is indistinguishable from a worse image."""
+        best = SecurityScore(
+            _image(is_signed=True, last_updated=datetime.now(tz=UTC)),
+            _scan(),
+            is_lts=True,
+        ).value
+        assert best == 100.0
+        # And a clean image lacking those qualities scores strictly lower.
+        plain = SecurityScore(DockerImage(name="x/y", tag="1.0"), _scan()).value
+        assert plain < best
+
+
+class TestQualityNeverOutweighsSeverity:
+    """Bonuses are capped below one HIGH, so no amount of "official +
+    minimal + signed + LTS + recent" can promote a more vulnerable image
+    above a cleaner one."""
+
+    def _best_at(self, highs):
+        vulns = [Vulnerability(cve_id=f"H{i}", severity=Severity.HIGH) for i in range(highs)]
+        return SecurityScore(
+            _image(is_signed=True, last_updated=datetime.now(tz=UTC)),
+            _scan(vulns),
+            is_lts=True,
+        ).value
+
+    def _worst_at(self, highs):
+        vulns = [Vulnerability(cve_id=f"H{i}", severity=Severity.HIGH) for i in range(highs)]
+        return SecurityScore(DockerImage(name="x/y", tag="1.0"), _scan(vulns)).value
+
+    @pytest.mark.parametrize("highs", [1, 2, 3])
+    def test_best_decorated_image_loses_to_worst_cleaner_image(self, highs):
+        assert self._best_at(highs) < self._worst_at(highs - 1)
+
+    def test_one_critical_outweighs_every_bonus(self):
+        critical = [Vulnerability(cve_id="C1", severity=Severity.CRITICAL)]
+        decorated = SecurityScore(
+            _image(is_signed=True, last_updated=datetime.now(tz=UTC)),
+            _scan(critical),
+            is_lts=True,
+        ).value
+        assert decorated < SecurityScore(DockerImage(name="x/y", tag="1.0"), _scan()).value
+
+    def test_quality_can_outweigh_a_couple_of_mediums(self):
+        """Intended flexibility: a signed official minimal image with two
+        MEDIUMs is a defensible pick over an unremarkable clean one."""
+        mediums = [Vulnerability(cve_id=f"M{i}", severity=Severity.MEDIUM) for i in range(2)]
+        good = SecurityScore(_image(), _scan(mediums)).value
+        plain = SecurityScore(DockerImage(name="x/y", tag="1.0"), _scan()).value
+        assert good > plain
+
+
+class TestUndatedImagesAreNotPenalised:
+    """Registries that list tag names only cannot date their tags; charging
+    them the maximum age penalty punished missing metadata, not risk."""
+
+    def test_undated_image_pays_no_age_penalty(self):
+        undated = DockerImage(name="cgr.dev/chainguard/node", tag="latest")
+        dated_old = DockerImage(
+            name="node", tag="latest", last_updated=datetime.now(tz=UTC) - timedelta(days=900)
+        )
+        assert SecurityScore(undated, _scan()).value > SecurityScore(dated_old, _scan()).value
+
+    def test_undated_image_gets_no_recency_bonus_either(self):
+        undated = DockerImage(name="cgr.dev/chainguard/node", tag="latest")
+        fresh = DockerImage(
+            name="cgr.dev/chainguard/node", tag="latest", last_updated=datetime.now(tz=UTC)
+        )
+        assert SecurityScore(fresh, _scan()).value > SecurityScore(undated, _scan()).value
