@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -17,6 +18,14 @@ def _default_cache_dir() -> Path:
     if xdg:
         return Path(xdg) / "dockerls"
     return Path.home() / ".cache" / "dockerls"
+
+
+def _default_log_dir() -> Path:
+    return Path("logs")
+
+
+def _default_evidence_dir() -> Path:
+    return Path(".dockerls") / "scans"
 
 
 def _default_config_path() -> Path:
@@ -50,6 +59,17 @@ class Settings(BaseSettings):
     dockerhub_username: str = Field(default="", validation_alias="DOCKERHUB_USERNAME")
     dockerhub_token: str = Field(default="", validation_alias="DOCKERHUB_TOKEN")
     log_level: str = "INFO"
+    # Diagnostics go here, never to the terminal (see setup_logging).
+    log_dir: Path = Field(default_factory=_default_log_dir)
+    # Raw scanner JSON, kept so every displayed score is auditable.
+    evidence_dir: Path = Field(default_factory=_default_evidence_dir)
+    # Trivy's own cache root; the per-worker cache pool is built next to it.
+    trivy_cache_dir: Path | None = None
+    # Re-scan the top candidates with the secondary scanner and flag
+    # material disagreements instead of showing an undisputed score.
+    cross_validate: bool = True
+    # Confirm each recommended tag really exists on Docker Hub.
+    verify_hub_tags: bool = True
     scanner_timeout: int = 300
     http_timeout: int = 30
     retry_max_attempts: int = 3
@@ -86,3 +106,9 @@ class Settings(BaseSettings):
 
     def ensure_dirs(self) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # Log and evidence dirs are best-effort: a read-only working
+        # directory must degrade (setup_logging falls back to the cache dir,
+        # evidence recording is skipped) rather than abort the command.
+        for path in (self.log_dir, self.evidence_dir):
+            with contextlib.suppress(OSError):
+                path.mkdir(parents=True, exist_ok=True)

@@ -21,10 +21,25 @@ class ScanResult(BaseModel):
     scan_timestamp: str = ""
     status: ScanStatus = ScanStatus.OK
     error_message: str = ""
+    # Path to the raw scanner JSON this result was parsed from, so a score
+    # shown to the user can always be traced back to its source evidence.
+    evidence_path: str = ""
 
     @property
     def is_usable(self) -> bool:
         return self.status in (ScanStatus.OK, ScanStatus.PARTIAL)
+
+    @property
+    def is_verified(self) -> bool:
+        """A scan that actually completed and produced a parsed result.
+
+        This is the gate for recommending an image: only a scanner run that
+        exited cleanly (`OK`) and carries a timestamp counts as proof. A
+        `PARTIAL` scan is usable for reporting but is deliberately *not*
+        verified -- it means some targets could not be inspected, so its
+        vulnerability counts are a lower bound, not a measurement.
+        """
+        return self.status is ScanStatus.OK and bool(self.scan_timestamp)
 
     @property
     def critical_count(self) -> int:

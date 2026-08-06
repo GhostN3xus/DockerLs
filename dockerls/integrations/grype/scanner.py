@@ -4,7 +4,7 @@ import asyncio
 import json
 import shutil
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -13,10 +13,14 @@ from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.scanner import ScannerInterface
 from dockerls.utils.validation import sanitize_image_name
 
+if TYPE_CHECKING:
+    from dockerls.infrastructure.evidence import EvidenceStore
+
 
 class GrypeScanner(ScannerInterface):
-    def __init__(self, timeout: int = 300):
+    def __init__(self, timeout: int = 300, evidence: EvidenceStore | None = None):
         self._timeout = timeout
+        self._evidence = evidence
 
     async def is_available(self) -> bool:
         return shutil.which("grype") is not None
@@ -58,8 +62,12 @@ class GrypeScanner(ScannerInterface):
                     error_message="Grype produced no output",
                 )
 
-            data = json.loads(stdout.decode())
-            return self._parse_results(safe_ref, data)
+            raw = stdout.decode()
+            data = json.loads(raw)
+            result = self._parse_results(safe_ref, data)
+            if self._evidence is not None:
+                result.evidence_path = await self._evidence.record_scan(safe_ref, "grype", raw)
+            return result
 
         except TimeoutError:
             logger.error(f"Grype scan timed out for {safe_ref}")

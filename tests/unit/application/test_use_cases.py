@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from dockerls.application.use_cases.analyze_image import AnalyzeImageUseCase
@@ -41,6 +43,9 @@ class MockScanner(ScannerInterface):
             image_reference=image_reference,
             vulnerabilities=self._vulns,
             status=self._status,
+            # Real scanners always stamp a completed scan; the verification
+            # gate treats a missing timestamp as "no scan actually ran".
+            scan_timestamp=datetime.now(tz=UTC).isoformat(),
             error_message="boom" if self._status != ScanStatus.OK else "",
         )
 

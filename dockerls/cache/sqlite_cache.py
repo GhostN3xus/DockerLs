@@ -17,7 +17,9 @@ if TYPE_CHECKING:
 
 # Bump this when the shape of cached payloads changes so stale entries from
 # an older schema are treated as misses instead of crashing on load.
-CACHE_SCHEMA_VERSION = "v1"
+# v2: ImageAnalysis gained verification metadata (scan evidence paths, Hub
+# tag state, scanner divergence) and ScanResult gained `evidence_path`.
+CACHE_SCHEMA_VERSION = "v2"
 
 
 class SQLiteCache(CacheStoreInterface):
