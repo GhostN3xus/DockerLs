@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (audit of claims vs. code)
+
+An audit of every README/CHANGELOG claim against the code that implements
+it, checking each is reached on the real execution path. Findings:
+
+- **Documented configuration did nothing.** `Settings` declared
+  `max_tags`, `workers`, `max_critical`, `max_high` and `max_medium`, and
+  the README documented `DOCKERLS_<SETTING>` and `config.toml` as the way
+  to change them -- but the CLI carried hard-coded `typer.Option` defaults
+  that shadowed `Settings` entirely. The README's own example
+  (`DOCKERLS_MAX_TAGS=200`, `max_tags = 200` in config.toml) was a no-op.
+  Flags now default to `None` and fall back to the configured value; an
+  explicit flag still wins. Covered by `test_settings_are_wired.py`, which
+  fails 11 tests against the previous code.
+- **`validate_threshold` was never called.** `--max-critical -5` and
+  `--max-medium 999999` were accepted silently. Thresholds are now
+  validated, and an invalid one prints a message and exits 1 instead of
+  raising a traceback.
+- **`SecurityTier.production_ready` was never read** and "Tier B =
+  conditional" lived only in the README, so a Tier B row in the terminal
+  carried no indication it needs human review. The CLI now prints a
+  `Requires review` section naming each affected image.
+- **The NVD integration is not wired into any command** -- `NVDClient` is
+  only ever instantiated in tests, so `NVD_API_KEY` had no effect despite
+  the README advertising a rate-limit benefit. Documented as reserved
+  rather than removed; wiring it is separate work.
+- README's `--max-medium 10` example read as contradicting the documented
+  default of 5; it is an override and now says so.
+
 Follow-up to the `recommend` overhaul, driven by a real run of
 `dockerls recommend node`.
 

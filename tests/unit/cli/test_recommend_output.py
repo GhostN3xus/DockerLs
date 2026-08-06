@@ -201,3 +201,64 @@ class TestJsonOutputCarriesVerificationData:
         assert parsed["unverified"][0]["image_reference"] == "node:26.7-slim"
         assert parsed["recommendations"][0]["hub_tag_verified"] is True
         assert parsed["log_file"] == "logs/run.log"
+
+
+class TestTierWarningsAreSurfaced:
+    """`SecurityTier.production_ready` existed but was never read, and the
+    README's "Tier B = conditional" was nowhere in the terminal output. A
+    reader of the table had no way to know a row needs human review."""
+
+    def _tiered(self, tier):
+        a = _analysis()
+        a.tier = tier
+        return a
+
+    def test_tier_b_is_flagged_as_needing_review(self):
+        result = AnalysisResult(
+            query="node",
+            total_tags_scanned=1,
+            total_tags_analyzed=1,
+            baseline_met=False,
+            alternatives=[self._tiered("B")],
+        )
+        out = _run(result).stdout
+        assert "Requires review" in out
+        assert "Tier B" in out
+        assert "human review before production" in out
+
+    def test_tier_c_is_flagged_as_not_production_ready(self):
+        result = AnalysisResult(
+            query="node",
+            total_tags_scanned=1,
+            total_tags_analyzed=1,
+            baseline_met=False,
+            alternatives=[self._tiered("C")],
+        )
+        out = _run(result).stdout
+        assert "not production ready" in out
+
+    def test_tier_s_and_a_get_no_warning(self):
+        for tier in ("S", "A"):
+            result = AnalysisResult(
+                query="node",
+                total_tags_scanned=1,
+                total_tags_analyzed=1,
+                baseline_met=True,
+                recommendations=[self._tiered(tier)],
+            )
+            assert "Requires review" not in _run(result).stdout
+
+    def test_warning_names_the_specific_image(self):
+        good, risky = _analysis(tag="22-alpine"), self._tiered("B")
+        risky.image = DockerImage(name="node", tag="18-bookworm")
+        result = AnalysisResult(
+            query="node",
+            total_tags_scanned=2,
+            total_tags_analyzed=2,
+            baseline_met=False,
+            alternatives=[good, risky],
+        )
+        out = _run(result).stdout
+        block = out.split("Requires review")[1]
+        assert "node:18-bookworm" in block
+        assert "node:22-alpine" not in block

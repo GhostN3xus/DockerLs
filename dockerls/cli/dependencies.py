@@ -22,6 +22,7 @@ from dockerls.integrations.registry.hardened import (
 )
 from dockerls.integrations.threat_intel.client import ThreatIntelClient
 from dockerls.utils.auth import load_credentials
+from dockerls.utils.validation import validate_threshold
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -53,6 +54,12 @@ def enable_console_logging() -> None:
     s = _settings()
     global _LOG_FILE
     _LOG_FILE = setup_logging(s.log_level, log_dir=s.log_dir, console=True)
+
+
+def resolve_tag_limit(limit: int | None) -> int:
+    """`--limit` falls back to the configured `max_tags`."""
+    s = _settings()
+    return validate_threshold(s.max_tags if limit is None else limit, "--limit")
 
 
 def build_evidence_store() -> EvidenceStore:
@@ -102,16 +109,31 @@ def build_hardened_repositories() -> list[ImageRepositoryInterface]:
 
 
 async def build_recommend_use_case(
-    max_critical: int = 0,
-    max_high: int = 0,
-    max_medium: int = 5,
-    workers: int = 10,
+    max_critical: int | None = None,
+    max_high: int | None = None,
+    max_medium: int | None = None,
+    workers: int | None = None,
     observer: ScanObserver | None = None,
     cross_validate: bool | None = None,
     verify_hub_tags: bool | None = None,
     include_hardened: bool | None = None,
 ) -> RecommendImagesUseCase:
     s = _settings()
+    # None means "not given on the command line", so the configured value
+    # applies. Previously these carried hard-coded defaults that shadowed
+    # Settings entirely, which made DOCKERLS_MAX_MEDIUM and the config file
+    # silently do nothing.
+    max_critical = validate_threshold(
+        s.max_critical if max_critical is None else max_critical, "--max-critical"
+    )
+    max_high = validate_threshold(s.max_high if max_high is None else max_high, "--max-high")
+    max_medium = validate_threshold(
+        s.max_medium if max_medium is None else max_medium, "--max-medium"
+    )
+    workers = validate_threshold(s.workers if workers is None else workers, "--workers")
+    if workers < 1:
+        raise ValueError("--workers must be at least 1")
+
     cache = build_cache()
     hub = await build_repository(cache=cache)
     hardened = (
