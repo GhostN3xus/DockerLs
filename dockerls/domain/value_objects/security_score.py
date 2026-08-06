@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dockerls.domain.entities.image import DockerImage
-from dockerls.domain.entities.scan_result import ScanResult
+from dockerls.domain.entities.scan_result import ScanResult, ScanStatus
 
 
 class SecurityScore:
@@ -12,6 +12,11 @@ class SecurityScore:
         is_eol: bool = False,
         is_lts: bool = False,
     ):
+        if scan.status not in (ScanStatus.OK, ScanStatus.PARTIAL):
+            raise ValueError(
+                f"Cannot score {image.full_reference}: scan status is "
+                f"{scan.status.value} ({scan.error_message or 'no details'})"
+            )
         self._image = image
         self._scan = scan
         self._is_eol = is_eol

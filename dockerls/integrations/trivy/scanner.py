@@ -7,28 +7,55 @@ from datetime import datetime, timezone
 
 from loguru import logger
 
-from dockerls.domain.entities.scan_result import ScanResult
+from dockerls.domain.entities.scan_result import ScanResult, ScanStatus
 from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.scanner import ScannerInterface
 from dockerls.utils.validation import sanitize_image_name
 
 
 class TrivyScanner(ScannerInterface):
-    def __init__(self, timeout: int = 300):
+    def __init__(self, timeout: int = 300, skip_db_update: bool = False):
         self._timeout = timeout
+        self._skip_db_update = skip_db_update
 
     async def is_available(self) -> bool:
         return shutil.which("trivy") is not None
 
+    async def refresh_db(self) -> bool:
+        """Download/refresh the Trivy vulnerability DB once, up front."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "trivy", "image", "--download-db-only", "--quiet",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
+            if proc.returncode != 0:
+                logger.warning(f"Trivy DB refresh failed: {stderr.decode()[:200]}")
+                return False
+            self._skip_db_update = True
+            return True
+        except (asyncio.TimeoutError, OSError) as e:
+            logger.warning(f"Trivy DB refresh failed: {e}")
+            return False
+
     async def scan(self, image_reference: str) -> ScanResult:
         safe_ref = sanitize_image_name(image_reference)
         logger.info(f"Scanning {safe_ref} with Trivy")
+        timestamp = datetime.now(tz=timezone.utc).isoformat()
+
+        cmd = [
+            "trivy", "image", "--format", "json",
+            "--severity", "CRITICAL,HIGH,MEDIUM,LOW",
+            "--quiet",
+        ]
+        if self._skip_db_update:
+            cmd.append("--skip-db-update")
+        cmd.append(safe_ref)
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "trivy", "image", "--format", "json",
-                "--severity", "CRITICAL,HIGH,MEDIUM,LOW",
-                "--quiet", safe_ref,
+            proc = await asyncio.create_subprocess_exec(  # noqa: S603
+                *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -37,15 +64,21 @@ class TrivyScanner(ScannerInterface):
             )
 
             if proc.returncode != 0:
-                logger.warning(
-                    f"Trivy returned code {proc.returncode}: "
-                    f"{stderr.decode()[:200]}"
+                err = stderr.decode(errors="replace")[:500]
+                logger.error(f"Trivy returned code {proc.returncode} for {safe_ref}: {err}")
+                return ScanResult(
+                    image_reference=safe_ref, scanner="trivy",
+                    scan_timestamp=timestamp,
+                    status=ScanStatus.ERROR,
+                    error_message=err,
                 )
 
             if not stdout:
                 return ScanResult(
                     image_reference=safe_ref, scanner="trivy",
-                    scan_timestamp=datetime.now(tz=timezone.utc).isoformat(),
+                    scan_timestamp=timestamp,
+                    status=ScanStatus.ERROR,
+                    error_message="Trivy produced no output",
                 )
 
             data = json.loads(stdout.decode())
@@ -55,13 +88,17 @@ class TrivyScanner(ScannerInterface):
             logger.error(f"Trivy scan timed out for {safe_ref}")
             return ScanResult(
                 image_reference=safe_ref, scanner="trivy",
-                scan_timestamp=datetime.now(tz=timezone.utc).isoformat(),
+                scan_timestamp=timestamp,
+                status=ScanStatus.TIMEOUT,
+                error_message=f"Scan exceeded {self._timeout}s timeout",
             )
         except (json.JSONDecodeError, OSError) as e:
             logger.error(f"Trivy scan failed for {safe_ref}: {e}")
             return ScanResult(
                 image_reference=safe_ref, scanner="trivy",
-                scan_timestamp=datetime.now(tz=timezone.utc).isoformat(),
+                scan_timestamp=timestamp,
+                status=ScanStatus.ERROR,
+                error_message=str(e),
             )
 
     def _parse_results(self, image_ref: str, data: dict) -> ScanResult:

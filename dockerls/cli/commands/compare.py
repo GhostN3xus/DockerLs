@@ -24,7 +24,11 @@ def compare(
 
 async def _compare(images: list[str]) -> None:
     use_case = await build_compare_use_case()
-    result = await use_case.execute(images)
+    try:
+        result = await use_case.execute(images)
+    except ValueError as e:
+        console.print(f"[red]Scan failed: {e}[/red]")
+        raise typer.Exit(1) from e
 
     console.print(Panel("[bold]Image Comparison[/bold]", expand=False))
 

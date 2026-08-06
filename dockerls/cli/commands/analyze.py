@@ -20,7 +20,11 @@ def analyze(
 
 async def _analyze(image: str) -> None:
     use_case = await build_analyze_use_case()
-    result = await use_case.execute(image)
+    try:
+        result = await use_case.execute(image)
+    except ValueError as e:
+        console.print(f"[red]Scan failed: {e}[/red]")
+        raise typer.Exit(1) from e
 
     console.print(f"\n[bold]Analysis: {result.image.full_reference}[/bold]\n")
 

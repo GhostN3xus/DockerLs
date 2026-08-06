@@ -10,6 +10,7 @@ from dockerls.infrastructure.config.settings import Settings
 from dockerls.infrastructure.logging.setup import setup_logging
 from dockerls.integrations.dockerhub.client import DockerHubClient
 from dockerls.integrations.endoflife.checker import EndOfLifeChecker
+from dockerls.utils.auth import load_credentials
 
 
 def _settings() -> Settings:
@@ -19,13 +20,17 @@ def _settings() -> Settings:
     return s
 
 
-def build_repository() -> DockerHubClient:
+async def build_repository() -> DockerHubClient:
     s = _settings()
-    return DockerHubClient(
-        username=s.dockerhub_username,
-        token=s.dockerhub_token,
-        timeout=s.http_timeout,
-    )
+    username = s.dockerhub_username
+    token = s.dockerhub_token
+    if not username or not token:
+        username, token = load_credentials()
+
+    client = DockerHubClient(username=username, token=token, timeout=s.http_timeout)
+    if username and token:
+        await client.authenticate()
+    return client
 
 
 def build_cache() -> SQLiteCache:
@@ -40,7 +45,7 @@ async def build_recommend_use_case(
     workers: int = 10,
 ) -> RecommendImagesUseCase:
     s = _settings()
-    repo = build_repository()
+    repo = await build_repository()
     scanner = await ScannerFactory.create()
     eol = EndOfLifeChecker(timeout=s.http_timeout)
     cache = build_cache()
@@ -59,7 +64,7 @@ async def build_recommend_use_case(
 
 async def build_analyze_use_case() -> AnalyzeImageUseCase:
     s = _settings()
-    repo = build_repository()
+    repo = await build_repository()
     scanner = await ScannerFactory.create()
     eol = EndOfLifeChecker(timeout=s.http_timeout)
     return AnalyzeImageUseCase(repository=repo, scanner=scanner, eol_checker=eol)
@@ -71,5 +76,5 @@ async def build_compare_use_case() -> CompareImagesUseCase:
 
 
 async def build_search_use_case() -> SearchImagesUseCase:
-    repo = build_repository()
+    repo = await build_repository()
     return SearchImagesUseCase(repository=repo)

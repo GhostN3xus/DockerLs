@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from loguru import logger
+from pydantic import ValidationError
 
 from dockerls.application.dto.analysis import AnalysisResult, ImageAnalysis
 from dockerls.domain.entities.image import DockerImage
@@ -43,6 +45,10 @@ class RecommendImagesUseCase:
         self._workers = workers
 
     async def execute(self, image_name: str, limit: int = 100) -> AnalysisResult:
+        refresh_db = getattr(self._scanner, "refresh_db", None)
+        if callable(refresh_db):
+            await refresh_db()
+
         tags = await self._repository.search_tags(image_name, limit=limit)
         if not tags:
             return AnalysisResult(
@@ -55,38 +61,67 @@ class RecommendImagesUseCase:
         semaphore = asyncio.Semaphore(self._workers)
         errors: list[str] = []
 
-        async def analyze_tag(image: DockerImage) -> ImageAnalysis | None:
-            async with semaphore:
-                try:
-                    cached = await self._get_cached(image.full_reference)
-                    if cached:
-                        return cached
+        # P0-3: dedupe scans by digest so tags sharing the same manifest
+        # digest are only scanned once and share the result.
+        scan_locks: dict[str, asyncio.Lock] = {}
+        scan_cache: dict[str, Any] = {}
 
+        def _dedup_key(image: DockerImage) -> str:
+            return image.digest or image.full_reference
+
+        async def get_scan(image: DockerImage) -> Any:
+            key = _dedup_key(image)
+            lock = scan_locks.setdefault(key, asyncio.Lock())
+            async with lock:
+                if key in scan_cache:
+                    return scan_cache[key]
+                async with semaphore:
                     scan = await self._scanner.scan(image.full_reference)
-                    product, version = _extract_product_version(image)
-                    is_eol = await self._eol_checker.is_eol(product, version)
-                    is_lts = await self._eol_checker.is_lts(product, version)
+                scan_cache[key] = scan
+                return scan
 
-                    score = SecurityScore(image, scan, is_eol=is_eol, is_lts=is_lts)
-                    tier = SecurityTier(scan)
-                    rem_score = RemediationScore(scan)
+        async def analyze_tag(image: DockerImage) -> ImageAnalysis | None:
+            try:
+                cached = await self._get_cached(image.full_reference)
+                if cached:
+                    return cached
 
-                    analysis = ImageAnalysis(
-                        image=image,
-                        scan=scan,
-                        security_score=score.value,
-                        tier=tier.tier.value,
-                        remediation_score=rem_score.value,
-                        is_eol=is_eol,
-                        is_lts=is_lts,
+                scan = await get_scan(image)
+                if not scan.is_usable:
+                    logger.warning(
+                        f"Skipping {image.full_reference}: scan status "
+                        f"{scan.status.value} ({scan.error_message})"
                     )
-
-                    await self._set_cached(image.full_reference, analysis)
-                    return analysis
-                except Exception as e:
-                    logger.warning(f"Failed to analyze {image.full_reference}: {e}")
-                    errors.append(f"{image.full_reference}: {e}")
+                    errors.append(
+                        f"{image.full_reference}: scan {scan.status.value} "
+                        f"({scan.error_message or 'no details'})"
+                    )
                     return None
+
+                product, version = _extract_product_version(image)
+                is_eol = await self._eol_checker.is_eol(product, version)
+                is_lts = await self._eol_checker.is_lts(product, version)
+
+                score = SecurityScore(image, scan, is_eol=is_eol, is_lts=is_lts)
+                tier = SecurityTier(scan)
+                rem_score = RemediationScore(scan)
+
+                analysis = ImageAnalysis(
+                    image=image,
+                    scan=scan,
+                    security_score=score.value,
+                    tier=tier.tier.value,
+                    remediation_score=rem_score.value,
+                    is_eol=is_eol,
+                    is_lts=is_lts,
+                )
+
+                await self._set_cached(image.full_reference, analysis)
+                return analysis
+            except Exception as e:
+                logger.warning(f"Failed to analyze {image.full_reference}: {e}")
+                errors.append(f"{image.full_reference}: {e}")
+                return None
 
         tasks = [analyze_tag(tag) for tag in tags]
         results = await asyncio.gather(*tasks)
@@ -134,7 +169,12 @@ class RecommendImagesUseCase:
         if self._cache:
             data = await self._cache.get(f"analysis:{key}")
             if data and isinstance(data, dict):
-                return ImageAnalysis.model_validate(data)
+                try:
+                    return ImageAnalysis.model_validate(data)
+                except ValidationError as e:
+                    logger.warning(f"Discarding stale cache entry for {key}: {e}")
+                    await self._cache.delete(f"analysis:{key}")
+                    return None
         return None
 
     async def _set_cached(self, key: str, analysis: ImageAnalysis) -> None:
@@ -144,14 +184,13 @@ class RecommendImagesUseCase:
             )
 
 
+_LEADING_VERSION_RE = re.compile(r"^\d+(?:\.\d+){0,3}")
+
+
 def _extract_product_version(image: DockerImage) -> tuple[str, str]:
     name = image.name.split("/")[-1]
-    tag = image.tag
-    version = ""
-    for part in tag.replace("-", ".").split("."):
-        if part and part[0].isdigit():
-            version = part
-            break
+    match = _LEADING_VERSION_RE.match(image.tag)
+    version = match.group(0) if match else ""
     return name, version
 
 

@@ -1,7 +1,9 @@
 from datetime import datetime, timezone, timedelta
 
+import pytest
+
 from dockerls.domain.entities.image import DockerImage
-from dockerls.domain.entities.scan_result import ScanResult
+from dockerls.domain.entities.scan_result import ScanResult, ScanStatus
 from dockerls.domain.entities.vulnerability import Vulnerability, Severity
 from dockerls.domain.value_objects.security_score import SecurityScore
 from dockerls.domain.value_objects.security_tier import SecurityTier, Tier
@@ -50,6 +52,24 @@ class TestSecurityScore:
         score_normal = SecurityScore(_image(), _scan())
         score_lts = SecurityScore(_image(), _scan(), is_lts=True)
         assert score_lts.value >= score_normal.value
+
+    def test_rejects_error_scan(self):
+        scan = ScanResult(
+            image_reference="node:22-alpine", status=ScanStatus.ERROR,
+            error_message="trivy exited 1",
+        )
+        with pytest.raises(ValueError):
+            SecurityScore(_image(), scan)
+
+    def test_rejects_timeout_scan(self):
+        scan = ScanResult(image_reference="node:22-alpine", status=ScanStatus.TIMEOUT)
+        with pytest.raises(ValueError):
+            SecurityScore(_image(), scan)
+
+    def test_accepts_partial_scan(self):
+        scan = ScanResult(image_reference="node:22-alpine", status=ScanStatus.PARTIAL)
+        score = SecurityScore(_image(), scan)
+        assert score.value > 0
 
 
 class TestSecurityTier:

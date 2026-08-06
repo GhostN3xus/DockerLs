@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from dockerls.application.dto.analysis import ImageAnalysis
 from dockerls.domain.entities.image import DockerImage
 from dockerls.domain.interfaces.eol_checker import EOLCheckerInterface
@@ -30,11 +32,8 @@ class AnalyzeImageUseCase:
         scan = await self._scanner.scan(image.full_reference)
 
         product = name.split("/")[-1]
-        version = ""
-        for part in tag.replace("-", ".").split("."):
-            if part and part[0].isdigit():
-                version = part
-                break
+        match = re.match(r"^\d+(?:\.\d+){0,3}", tag)
+        version = match.group(0) if match else ""
 
         is_eol = await self._eol_checker.is_eol(product, version)
         is_lts = await self._eol_checker.is_lts(product, version)

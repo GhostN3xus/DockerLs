@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from loguru import logger
 
-from dockerls.domain.entities.scan_result import ScanResult
+from dockerls.domain.entities.scan_result import ScanResult, ScanStatus
 from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.scanner import ScannerInterface
 from dockerls.utils.validation import sanitize_image_name
@@ -23,9 +23,10 @@ class GrypeScanner(ScannerInterface):
     async def scan(self, image_reference: str) -> ScanResult:
         safe_ref = sanitize_image_name(image_reference)
         logger.info(f"Scanning {safe_ref} with Grype")
+        timestamp = datetime.now(tz=timezone.utc).isoformat()
 
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc = await asyncio.create_subprocess_exec(  # noqa: S603
                 "grype", safe_ref, "-o", "json", "--quiet",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -34,20 +35,42 @@ class GrypeScanner(ScannerInterface):
                 proc.communicate(), timeout=self._timeout
             )
 
+            if proc.returncode != 0:
+                err = stderr.decode(errors="replace")[:500]
+                logger.error(f"Grype returned code {proc.returncode} for {safe_ref}: {err}")
+                return ScanResult(
+                    image_reference=safe_ref, scanner="grype",
+                    scan_timestamp=timestamp,
+                    status=ScanStatus.ERROR,
+                    error_message=err,
+                )
+
             if not stdout:
                 return ScanResult(
                     image_reference=safe_ref, scanner="grype",
-                    scan_timestamp=datetime.now(tz=timezone.utc).isoformat(),
+                    scan_timestamp=timestamp,
+                    status=ScanStatus.ERROR,
+                    error_message="Grype produced no output",
                 )
 
             data = json.loads(stdout.decode())
             return self._parse_results(safe_ref, data)
 
-        except (asyncio.TimeoutError, json.JSONDecodeError, OSError) as e:
+        except asyncio.TimeoutError:
+            logger.error(f"Grype scan timed out for {safe_ref}")
+            return ScanResult(
+                image_reference=safe_ref, scanner="grype",
+                scan_timestamp=timestamp,
+                status=ScanStatus.TIMEOUT,
+                error_message=f"Scan exceeded {self._timeout}s timeout",
+            )
+        except (json.JSONDecodeError, OSError) as e:
             logger.error(f"Grype scan failed for {safe_ref}: {e}")
             return ScanResult(
                 image_reference=safe_ref, scanner="grype",
-                scan_timestamp=datetime.now(tz=timezone.utc).isoformat(),
+                scan_timestamp=timestamp,
+                status=ScanStatus.ERROR,
+                error_message=str(e),
             )
 
     def _parse_results(self, image_ref: str, data: dict) -> ScanResult:

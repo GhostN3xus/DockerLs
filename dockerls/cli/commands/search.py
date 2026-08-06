@@ -20,7 +20,7 @@ def search(
 
 
 async def _search(image: str, limit: int) -> None:
-    repo = build_repository()
+    repo = await build_repository()
     tags = await repo.search_tags(image, limit=limit)
 
     if not tags:

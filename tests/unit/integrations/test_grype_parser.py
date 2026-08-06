@@ -1,3 +1,9 @@
+import asyncio
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from dockerls.domain.entities.scan_result import ScanStatus
 from dockerls.integrations.grype.scanner import GrypeScanner
 
 
@@ -39,3 +45,41 @@ class TestGrypeParser:
         scanner = GrypeScanner()
         result = scanner._parse_results("nginx:latest", {"matches": []})
         assert result.total_count == 0
+
+
+class _FakeProc:
+    def __init__(self, stdout=b"", stderr=b"", returncode=0):
+        self._stdout = stdout
+        self._stderr = stderr
+        self.returncode = returncode
+
+    async def communicate(self):
+        return self._stdout, self._stderr
+
+
+class TestGrypeScanErrorPaths:
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_is_error_status(self):
+        scanner = GrypeScanner()
+        proc = _FakeProc(stdout=b"", stderr=b"boom", returncode=1)
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            result = await scanner.scan("nginx:latest")
+        assert result.status == ScanStatus.ERROR
+        assert result.is_usable is False
+
+    @pytest.mark.asyncio
+    async def test_timeout_is_timeout_status(self):
+        scanner = GrypeScanner(timeout=1)
+        proc = _FakeProc()
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
+             patch("asyncio.wait_for", AsyncMock(side_effect=asyncio.TimeoutError())):
+            result = await scanner.scan("nginx:latest")
+        assert result.status == ScanStatus.TIMEOUT
+
+    @pytest.mark.asyncio
+    async def test_successful_scan_has_ok_status(self):
+        scanner = GrypeScanner()
+        proc = _FakeProc(stdout=b'{"matches": []}', returncode=0)
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            result = await scanner.scan("nginx:latest")
+        assert result.status == ScanStatus.OK

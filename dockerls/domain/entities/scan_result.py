@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+from enum import Enum
+
 from pydantic import BaseModel
 
 from dockerls.domain.entities.vulnerability import Severity, Vulnerability
+
+
+class ScanStatus(str, Enum):
+    OK = "OK"
+    ERROR = "ERROR"
+    TIMEOUT = "TIMEOUT"
+    PARTIAL = "PARTIAL"
 
 
 class ScanResult(BaseModel):
@@ -10,6 +19,12 @@ class ScanResult(BaseModel):
     scanner: str = "trivy"
     vulnerabilities: list[Vulnerability] = []
     scan_timestamp: str = ""
+    status: ScanStatus = ScanStatus.OK
+    error_message: str = ""
+
+    @property
+    def is_usable(self) -> bool:
+        return self.status in (ScanStatus.OK, ScanStatus.PARTIAL)
 
     @property
     def critical_count(self) -> int:

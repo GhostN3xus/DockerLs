@@ -7,7 +7,7 @@ from dockerls.application.use_cases.recommend_images import RecommendImagesUseCa
 from dockerls.application.use_cases.search_images import SearchImagesUseCase
 from dockerls.application.use_cases.compare_images import CompareImagesUseCase
 from dockerls.domain.entities.image import DockerImage
-from dockerls.domain.entities.scan_result import ScanResult
+from dockerls.domain.entities.scan_result import ScanResult, ScanStatus
 from dockerls.domain.entities.vulnerability import Vulnerability, Severity
 from dockerls.domain.interfaces.cache_store import CacheStoreInterface
 from dockerls.domain.interfaces.eol_checker import EOLCheckerInterface
@@ -30,11 +30,18 @@ class MockRepo(ImageRepositoryInterface):
 
 
 class MockScanner(ScannerInterface):
-    def __init__(self, vulns=None):
+    def __init__(self, vulns=None, status=ScanStatus.OK):
         self._vulns = vulns or []
+        self._status = status
+        self.calls: list[str] = []
 
     async def scan(self, image_reference):
-        return ScanResult(image_reference=image_reference, vulnerabilities=self._vulns)
+        self.calls.append(image_reference)
+        return ScanResult(
+            image_reference=image_reference, vulnerabilities=self._vulns,
+            status=self._status,
+            error_message="boom" if self._status != ScanStatus.OK else "",
+        )
 
     async def is_available(self):
         return True
@@ -123,6 +130,36 @@ class TestRecommendImages:
         result = await uc.execute("nothing")
         assert result.baseline_met is False
         assert len(result.errors) > 0
+
+    @pytest.mark.asyncio
+    async def test_error_scans_never_recommended(self, tags):
+        scanner = MockScanner(status=ScanStatus.ERROR)
+        uc = RecommendImagesUseCase(
+            repository=MockRepo(tags),
+            scanner=scanner,
+            eol_checker=MockEOL(),
+        )
+        result = await uc.execute("node")
+        assert result.baseline_met is False
+        assert result.recommendations == []
+        assert result.alternatives == []
+        assert len(result.errors) == len(tags)
+
+    @pytest.mark.asyncio
+    async def test_dedup_scans_by_digest(self):
+        shared_tags = [
+            DockerImage(name="node", tag="22-alpine", digest="sha256:abc", is_official=True),
+            DockerImage(name="node", tag="22", digest="sha256:abc", is_official=True),
+            DockerImage(name="node", tag="20-alpine", digest="sha256:xyz", is_official=True),
+        ]
+        scanner = MockScanner()
+        uc = RecommendImagesUseCase(
+            repository=MockRepo(shared_tags),
+            scanner=scanner,
+            eol_checker=MockEOL(),
+        )
+        await uc.execute("node")
+        assert len(scanner.calls) == 2
 
 
 class TestAnalyzeImage:
