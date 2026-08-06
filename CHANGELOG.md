@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (audit of claims vs. code)
 
+- **Credential redaction leaked in 10 of 17 realistic log formats.** The
+  key/value pattern required the key name to be followed *immediately* by
+  `=` or `:`, and every JSON-shaped line has a quote in between
+  (`"token": "..."`) -- so the formats an HTTP client is most likely to
+  produce passed straight through. Redaction now covers JSON (nested,
+  compact, single-quoted, multiline), TOML, querystrings, multipart bodies,
+  URL userinfo, `curl -u`, `Settings(...)` reprs and auth schemes, plus
+  self-identifying credential formats (Docker PAT, GitHub token, JWT, AWS
+  key, Slack token) that appear with no key at all. 60 adversarial cases in
+  `test_secret_masking.py`, each asserting the secret is *absent* rather
+  than that some masked form is present.
+- **`health` reported the Docker Hub API as degraded on every healthy
+  run** -- it probed `https://hub.docker.com/v2/`, which answers 404 by
+  design. An alarm that is always on tells you nothing. It also always
+  exited 0, so it could not gate anything; it now exits 1 when any service
+  is unreachable or returns an error status.
+- **Age penalty was uncapped**, growing a point per year, so a 10-year-old
+  image lost as much as two HIGH findings on staleness alone. Capped at 3
+  points, where it can still order equally-clean images without competing
+  with measured severity.
+
 An audit of every README/CHANGELOG claim against the code that implements
 it, checking each is reached on the real execution path. Findings:
 

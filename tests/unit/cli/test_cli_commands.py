@@ -223,6 +223,12 @@ class TestHealthCommand:
         assert "Docker Hub API" in result.stdout
 
     def test_health_handles_errors(self):
+        """A total outage must be reported *and* must fail the command.
+
+        This previously asserted exit_code == 0, which codified the bug:
+        `health` could not gate anything because it reported success no
+        matter what it found.
+        """
         with patch(
             "httpx.AsyncClient.get",
             AsyncMock(
@@ -230,8 +236,9 @@ class TestHealthCommand:
             ),
         ):
             result = runner.invoke(app, ["health"])
-        assert result.exit_code == 0
-        assert "Error" in result.stdout
+        assert result.exit_code == 1
+        assert "Unreachable" in result.stdout
+        assert "degraded" in result.stdout
 
 
 class TestCacheCommand:

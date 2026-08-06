@@ -13,6 +13,7 @@ import io
 import json
 import re
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -25,6 +26,7 @@ from dockerls.application.use_cases.recommend_images import RecommendImagesUseCa
 from dockerls.cli.commands import recommend as recommend_cmd
 from dockerls.cli.progress import RichScanObserver
 from dockerls.domain.entities.image import DockerImage
+from dockerls.domain.entities.scan_result import ScanResult, ScanStatus
 from dockerls.domain.interfaces.eol_checker import EOLCheckerInterface
 from dockerls.infrastructure.evidence import EvidenceStore
 from dockerls.integrations.grype.scanner import GrypeScanner
@@ -296,3 +298,113 @@ async def test_table_shows_source_and_details_show_evidence(pipeline):
     assert "Docker Hub" in rendered
     for analysis in result.recommendations:
         assert Path(analysis.evidence_paths["trivy"]).name in rendered
+
+
+@pytest.mark.asyncio
+async def test_high_concurrency_loses_no_tag_and_hides_no_failure(
+    scanner_stubs, tmp_path, monkeypatch
+):
+    """Every tag must end up either analyzed or in the skipped report.
+
+    The Trivy cache lock made losing workers exit non-zero; a run that
+    quietly dropped them would look cleaner than it was. Accounting must
+    balance exactly, at a concurrency well above the tag count.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DOCKERLS_TEST_TRIVY_DELAY", "0.02")
+
+    tags = [f"22.{i}-alpine" for i in range(30)]
+
+    class _ManyTags:
+        host = ""
+
+        async def search_tags(self, image_name, limit=100):
+            return [
+                DockerImage(name=image_name, tag=t, is_official=True, source="Docker Hub")
+                for t in tags[:limit]
+            ]
+
+        async def get_image_metadata(self, image_name, tag):
+            return None
+
+        async def tag_exists(self, image_name, tag):
+            return True
+
+    evidence = EvidenceStore(tmp_path / ".dockerls" / "scans")
+    use_case = RecommendImagesUseCase(
+        repository=_ManyTags(),
+        scanner=TrivyScanner(workers=20, cache_dir=tmp_path / "trivy", evidence=evidence),
+        eol_checker=_EOL(),
+        workers=20,
+        observer=RichScanObserver(enabled=False),
+        evidence=evidence,
+        max_medium=50,
+    )
+    result = await use_case.execute("node", limit=len(tags))
+
+    assert result.total_tags_scanned == len(tags)
+    # Nothing may vanish: analyzed + skipped must account for every tag.
+    assert result.total_tags_analyzed + result.unverified_count == len(tags)
+    assert result.total_tags_analyzed == len(tags), (
+        f"{result.unverified_count} tags failed under concurrency: "
+        f"{[u.reason for u in result.unverified][:3]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_scanner_failures_are_all_reported_never_dropped(
+    scanner_stubs, tmp_path, monkeypatch
+):
+    """The mirror case: when scans genuinely fail, every failure must be
+    named in the report rather than silently reducing the table."""
+    monkeypatch.chdir(tmp_path)
+
+    tags = [f"22.{i}-alpine" for i in range(12)]
+
+    class _Repo:
+        host = ""
+
+        async def search_tags(self, image_name, limit=100):
+            return [
+                DockerImage(name=image_name, tag=t, is_official=True, source="Docker Hub")
+                for t in tags
+            ]
+
+        async def get_image_metadata(self, image_name, tag):
+            return None
+
+        async def tag_exists(self, image_name, tag):
+            return True
+
+    class _HalfBroken:
+        async def is_available(self):
+            return True
+
+        async def scan(self, image_reference):
+            index = int(image_reference.split(".")[1].split("-")[0])
+            if index % 2:
+                return ScanResult(
+                    image_reference=image_reference,
+                    scan_timestamp=datetime.now(tz=UTC).isoformat(),
+                    status=ScanStatus.ERROR,
+                    error_message="cache may be in use by another process: timeout",
+                )
+            return ScanResult(
+                image_reference=image_reference,
+                scan_timestamp=datetime.now(tz=UTC).isoformat(),
+            )
+
+    result = await RecommendImagesUseCase(
+        repository=_Repo(),
+        scanner=_HalfBroken(),
+        eol_checker=_EOL(),
+        workers=20,
+        observer=RichScanObserver(enabled=False),
+        max_medium=50,
+    ).execute("node", limit=len(tags))
+
+    assert result.total_tags_analyzed == 6
+    assert result.unverified_count == 6
+    assert result.total_tags_analyzed + result.unverified_count == len(tags)
+    # Each failure names its image, so none is hidden behind a count.
+    assert len({u.image_reference for u in result.unverified}) == 6

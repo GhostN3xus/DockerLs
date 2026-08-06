@@ -11,9 +11,58 @@ from loguru import logger
 if TYPE_CHECKING:
     from loguru import Record
 
-_KV_SECRET_PATTERN = re.compile(r"(token|password|secret|key|auth)(\s*[=:]\s*)\S+", re.IGNORECASE)
-_BEARER_PATTERN = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
-_BASIC_PATTERN = re.compile(r"Basic\s+\S+", re.IGNORECASE)
+MASK = "***MASKED***"
+
+# Key names that introduce a credential, in any casing or word shape
+# ("apiKey", "api_key", "API-KEY", "dockerhub_token", "senha").
+_SECRET_KEY = r"[\w.-]*(?:token|password|passwd|senha|secret|api[-_]?key|credential|auth)[\w.-]*"  # noqa: S105
+
+# A quoted key/value pair, as it appears in JSON or a dict repr:
+#   "token": "value"      'apiKey' : 'value'      "auth": {"token": "value"}
+# The quote between the key and the separator is exactly what the previous
+# pattern could not cross, which left every JSON-shaped log line in clear.
+_QUOTED_KV = re.compile(
+    rf"""(?P<prefix>["']?{_SECRET_KEY}["']?\s*[:=]\s*)(?P<quote>["'])(?P<value>(?:\\.|[^"'\\])*)(?P=quote)""",
+    re.IGNORECASE,
+)
+
+# An unquoted key/value pair: token=abc, senha: abc, x-api-key: abc.
+_BARE_KV = re.compile(
+    rf"(?P<prefix>\b{_SECRET_KEY}\s*[=:]\s*)(?P<value>[^\s,;&\"'}}\]]+)", re.IGNORECASE
+)
+
+# Authorization schemes.
+_SCHEME = re.compile(
+    r"\b(?P<scheme>Bearer|Basic|Token|Digest)\s+(?P<value>[^\s,;\"'=:][^\s,;\"']*)",
+    re.IGNORECASE,
+)
+
+# Credentials embedded in a URL: https://user:secret@host
+_URL_USERINFO = re.compile(r"(?P<prefix>://[^/\s:@]+:)(?P<value>[^@/\s]+)(?P<at>@)")
+
+# curl-style inline credentials: -u user:secret, --user user:secret
+_CURL_USER = re.compile(r"(?P<prefix>(?:-u|--user)\s+[^\s:]+:)(?P<value>\S+)")
+
+# Credential formats that are self-identifying, so they are redacted even
+# when they appear with no key to introduce them -- a bare token inside a
+# list or an exception message has no "token=" in front of it.
+_KNOWN_SECRET_VALUE = re.compile(
+    r"""
+      \bdckr_pat_[A-Za-z0-9_-]{8,}                          # Docker Hub PAT
+    | \bgh[pousr]_[A-Za-z0-9]{20,}                           # GitHub token
+    | \beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+  # JWT
+    | \bAKIA[0-9A-Z]{16}\b                                   # AWS access key id
+    | \bxox[baprs]-[A-Za-z0-9-]{10,}                          # Slack token
+    """,
+    re.VERBOSE,
+)
+
+# multipart/form-data, where the value sits on its own line after a blank
+# line rather than next to the key.
+_MULTIPART = re.compile(
+    rf"""(?P<prefix>name=["']{_SECRET_KEY}["'][^\n]*\r?\n\r?\n)(?P<value>[^\r\n]+)""",
+    re.IGNORECASE,
+)
 
 _FILE_FORMAT = "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}"
 _CONSOLE_FORMAT = (
@@ -22,15 +71,28 @@ _CONSOLE_FORMAT = (
 
 
 def _mask_secrets(message: str) -> str:
-    # Never echo any part of the secret value itself -- only the key name
-    # and separator (e.g. "token=") are non-sensitive and kept for context.
-    #
-    # Scheme patterns run *first*. In "auth: Bearer <token>" the key-value
-    # pattern's \S+ would otherwise consume only the word "Bearer" and stop,
-    # leaving the actual credential in the clear.
-    result = _BEARER_PATTERN.sub("Bearer ***MASKED***", message)
-    result = _BASIC_PATTERN.sub("Basic ***MASKED***", result)
-    result = _KV_SECRET_PATTERN.sub(lambda m: f"{m.group(1)}{m.group(2)}***MASKED***", result)
+    """Redact credentials from a log line in every shape they arrive in.
+
+    Only the key name and separator (e.g. `token=`) are kept, never any part
+    of the value. Over-masking a benign line is an acceptable cost; leaking
+    a token into a log file is not, so the key patterns are deliberately
+    broad.
+
+    Order matters: scheme patterns run before the key/value ones, because
+    in `auth: Bearer <token>` a key/value match would consume only the word
+    `Bearer` and stop, leaving the credential in the clear.
+    """
+    result = _SCHEME.sub(lambda m: f"{m.group('scheme')} {MASK}", message)
+    result = _URL_USERINFO.sub(lambda m: f"{m.group('prefix')}{MASK}{m.group('at')}", result)
+    result = _CURL_USER.sub(lambda m: f"{m.group('prefix')}{MASK}", result)
+    result = _MULTIPART.sub(lambda m: f"{m.group('prefix')}{MASK}", result)
+    result = _QUOTED_KV.sub(
+        lambda m: f"{m.group('prefix')}{m.group('quote')}{MASK}{m.group('quote')}", result
+    )
+    result = _BARE_KV.sub(lambda m: f"{m.group('prefix')}{MASK}", result)
+    # Last: catch self-identifying credential formats that appeared with no
+    # key in front of them for any of the patterns above to anchor on.
+    result = _KNOWN_SECRET_VALUE.sub(MASK, result)
     return result
 
 

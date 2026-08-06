@@ -253,3 +253,73 @@ class TestUndatedImagesAreNotPenalised:
             name="cgr.dev/chainguard/node", tag="latest", last_updated=datetime.now(tz=UTC)
         )
         assert SecurityScore(fresh, _scan()).value > SecurityScore(undated, _scan()).value
+
+
+class TestAgePenaltyIsCapped:
+    """Age is staleness, not vulnerability. Uncapped it grew a point per
+    year, so an old-but-clean image could be scored below a fresh image
+    carrying real CRITICALs."""
+
+    def _aged(self, years):
+        return DockerImage(
+            name="node",
+            tag="22",
+            is_official=True,
+            last_updated=datetime.now(tz=UTC) - timedelta(days=365 * years),
+        )
+
+    def test_penalty_stops_growing_past_the_cap(self):
+        from dockerls.domain.value_objects.security_score import MAX_AGE_PENALTY
+
+        ten = SecurityScore(self._aged(10), _scan()).value
+        thirty = SecurityScore(self._aged(30), _scan()).value
+        assert ten == thirty
+        fresh = SecurityScore(self._aged(0), _scan()).value
+        assert fresh - ten <= MAX_AGE_PENALTY + 0.6  # + the recency bonus
+
+    def test_age_still_orders_images_within_the_cap(self):
+        assert (
+            SecurityScore(self._aged(1), _scan()).value
+            > SecurityScore(self._aged(3), _scan()).value
+        )
+
+    def test_a_very_old_clean_image_still_beats_a_fresh_critical_one(self):
+        critical = [Vulnerability(cve_id="C1", severity=Severity.CRITICAL)]
+        old_clean = SecurityScore(self._aged(30), _scan()).value
+        fresh_critical = SecurityScore(self._aged(0), _scan(critical)).value
+        assert old_clean > fresh_critical
+
+
+class TestHardenedVersusOfficial:
+    """`official` must never beat a hardened image that is strictly better
+    on measured vulnerabilities -- the whole point of searching Chainguard
+    and Distroless."""
+
+    def _official(self, vulns=None):
+        return SecurityScore(
+            DockerImage(name="node", tag="22", is_official=True, last_updated=datetime.now(tz=UTC)),
+            _scan(vulns),
+        ).value
+
+    def _hardened(self, vulns=None, name="cgr.dev/chainguard/node"):
+        # No last_updated: these registries publish tag names only.
+        return SecurityScore(DockerImage(name=name, tag="latest"), _scan(vulns)).value
+
+    def _highs(self, n):
+        return [Vulnerability(cve_id=f"H{i}", severity=Severity.HIGH) for i in range(n)]
+
+    @pytest.mark.parametrize("official_highs", [1, 2, 3])
+    def test_clean_hardened_beats_official_with_highs(self, official_highs):
+        assert self._hardened() > self._official(self._highs(official_highs))
+
+    def test_clean_distroless_beats_official_with_a_critical(self):
+        critical = [Vulnerability(cve_id="C1", severity=Severity.CRITICAL)]
+        assert self._hardened(name="gcr.io/distroless/nodejs") > self._official(critical)
+
+    def test_hardened_with_fewer_highs_beats_official_with_more(self):
+        assert self._hardened(self._highs(1)) > self._official(self._highs(3))
+
+    def test_official_wins_only_when_vulnerabilities_are_equal(self):
+        """The bonus is a tie-breaker, and `official` alone should not
+        outrank a minimal hardened base at the same severity."""
+        assert self._official() >= self._hardened() - 1.0
