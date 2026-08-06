@@ -97,7 +97,7 @@ Recommend the most secure tags based on vulnerability scanning.
 
 ```bash
 dockerls recommend node
-dockerls recommend node --max-critical 0 --max-high 0 --max-medium 10
+dockerls recommend node --max-medium 10          # loosen the default of 5
 dockerls recommend nginx --workers 20
 dockerls recommend node --format json
 dockerls recommend node --fail-on high --no-color
@@ -470,7 +470,6 @@ dockerls/
     dockerhub/       # Docker Hub API client
     trivy/           # Trivy scanner integration
     grype/           # Grype scanner integration (fallback)
-    nvd/             # NVD API client (rate-limited CVE lookups)
     endoflife/       # endoflife.date checker
   cache/             # SQLite cache implementation
   exporters/         # JSON, CSV, HTML, Markdown exporters
@@ -494,7 +493,6 @@ then built-in defaults.
 |----------------------------------|-------------------------------------------|
 | DOCKERHUB_USERNAME               | Docker Hub username                       |
 | DOCKERHUB_TOKEN                  | Docker Hub access token                   |
-| NVD_API_KEY                      | NVD API key (raises the rate limit from 5 to 50 requests/30s) |
 | XDG_CACHE_HOME                   | Override cache directory                  |
 | XDG_CONFIG_HOME                  | Override config file directory            |
 | DOCKERLS_DISABLE_THREAT_INTEL    | Disable CISA KEV / EPSS lookups           |
@@ -510,6 +508,11 @@ log_level = "DEBUG"
 ```
 
 Keys match the setting names in the table below (snake_case, no prefix).
+
+Every threshold flag (`--max-critical`, `--max-high`, `--max-medium`,
+`--workers`, `--limit`) falls back to its configured value when omitted, so
+`DOCKERLS_MAX_MEDIUM=10` and a `config.toml` entry both take effect. An
+explicit flag always wins over configuration.
 
 ### Default thresholds
 
@@ -599,7 +602,7 @@ GitHub Actions workflows included:
 DockerLs operates as a read-only advisory tool. It:
 - Reads from Docker Hub API (public data)
 - Executes Trivy/Grype as local subprocesses
-- Queries NVD and endoflife.date APIs
+- Queries endoflife.date, CISA KEV and EPSS APIs
 - Caches results locally in SQLite
 
 It does not:

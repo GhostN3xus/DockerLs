@@ -11,7 +11,11 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from dockerls.cli.dependencies import build_recommend_use_case, enable_console_logging
+from dockerls.cli.dependencies import (
+    build_recommend_use_case,
+    enable_console_logging,
+    resolve_tag_limit,
+)
 from dockerls.cli.progress import RichScanObserver
 from dockerls.infrastructure.evidence import slugify_reference
 
@@ -51,11 +55,21 @@ _FAIL_ON_COUNT: dict[FailOn, Callable[[ImageAnalysis], int]] = {
 
 def recommend(
     image: str = typer.Argument(help="Docker image name (e.g., node, python, nginx)"),
-    max_critical: int = typer.Option(0, "--max-critical", help="Max critical vulns allowed"),
-    max_high: int = typer.Option(0, "--max-high", help="Max high vulns allowed"),
-    max_medium: int = typer.Option(5, "--max-medium", help="Max medium vulns allowed"),
-    limit: int = typer.Option(100, "--limit", "-l", help="Max tags to scan"),
-    workers: int = typer.Option(10, "--workers", "-w", help="Concurrent workers"),
+    max_critical: int | None = typer.Option(
+        None, "--max-critical", help="Max critical vulns allowed [config: max_critical, default 0]"
+    ),
+    max_high: int | None = typer.Option(
+        None, "--max-high", help="Max high vulns allowed [config: max_high, default 0]"
+    ),
+    max_medium: int | None = typer.Option(
+        None, "--max-medium", help="Max medium vulns allowed [config: max_medium, default 5]"
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", "-l", help="Max tags to scan [config: max_tags, default 100]"
+    ),
+    workers: int | None = typer.Option(
+        None, "--workers", "-w", help="Concurrent workers [config: workers, default 10]"
+    ),
     fail_on: FailOn = typer.Option(
         FailOn.NONE, "--fail-on", help="Exit non-zero if the top result has vulns at/above severity"
     ),
@@ -82,31 +96,37 @@ def recommend(
         console.no_color = True
     if verbose:
         enable_console_logging()
-    asyncio.run(
-        _recommend(
-            image,
-            max_critical,
-            max_high,
-            max_medium,
-            limit,
-            workers,
-            fail_on,
-            output_format,
-            show_progress=not no_progress and output_format != "json",
-            cross_validate=not no_cross_validate,
-            verify_hub_tags=not no_hub_check,
-            include_hardened=not no_hardened,
+    try:
+        asyncio.run(
+            _recommend(
+                image,
+                max_critical,
+                max_high,
+                max_medium,
+                limit,
+                workers,
+                fail_on,
+                output_format,
+                show_progress=not no_progress and output_format != "json",
+                cross_validate=not no_cross_validate,
+                verify_hub_tags=not no_hub_check,
+                include_hardened=not no_hardened,
+            )
         )
-    )
+    except ValueError as e:
+        # Bad thresholds are user error, not a crash: show the message, not
+        # a stack trace (pretty_exceptions_enable is off app-wide).
+        console.print(f"[red]Invalid configuration:[/red] {e}")
+        raise typer.Exit(EXIT_ERROR) from e
 
 
 async def _recommend(
     image: str,
-    max_critical: int,
-    max_high: int,
-    max_medium: int,
-    limit: int,
-    workers: int,
+    max_critical: int | None,
+    max_high: int | None,
+    max_medium: int | None,
+    limit: int | None,
+    workers: int | None,
     fail_on: FailOn,
     output_format: str,
     show_progress: bool = True,
@@ -127,7 +147,7 @@ async def _recommend(
             verify_hub_tags=verify_hub_tags,
             include_hardened=include_hardened,
         )
-        result = await use_case.execute(image, limit=limit)
+        result = await use_case.execute(image, limit=resolve_tag_limit(limit))
 
     if output_format == "json":
         console.print(json.dumps(result.model_dump(), indent=2, default=str), soft_wrap=True)
@@ -149,6 +169,7 @@ async def _recommend(
         console.print("[red]No suitable images found.[/red]")
         console.print(f"[dim]{_baseline_line(result)}[/dim]")
 
+    _print_tier_warnings(result.recommendations or result.alternatives)
     _print_unverified(result)
 
     if result.evidence_manifest:
@@ -282,6 +303,27 @@ def _shared_scan_note(analysis: ImageAnalysis, path: str) -> str:
         return ""
     own_prefix = f"{slugify_reference(analysis.image.full_reference)}__"
     return "" if Path(path).name.startswith(own_prefix) else "  (shared digest)"
+
+
+# Tier meanings that the reader must act on. Tier C never reaches the table
+# (it fails the baseline and the alternatives filter), but Tier B can, and
+# the README calling it "conditional" is no use to someone reading a
+# terminal.
+_TIER_WARNINGS = {
+    "B": "conditional -- requires human review before production use",
+    "C": "not production ready",
+}
+
+
+def _print_tier_warnings(analyses: list[ImageAnalysis]) -> None:
+    flagged = [a for a in analyses if a.tier in _TIER_WARNINGS]
+    if not flagged:
+        return
+    console.print("\n[bold yellow]! Requires review[/bold yellow]")
+    for a in flagged:
+        console.print(
+            f"  {a.image.full_reference}  [dim]Tier {a.tier}: {_TIER_WARNINGS[a.tier]}[/dim]"
+        )
 
 
 def _print_divergences(analyses: list[ImageAnalysis]) -> None:

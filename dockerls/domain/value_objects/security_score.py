@@ -12,6 +12,11 @@ CRITICAL_PENALTY = 20.0
 HIGH_PENALTY = 5.0
 MEDIUM_PENALTY = 1.0
 EOL_PENALTY = 20.0
+# Age is a staleness signal, not a vulnerability. Uncapped it grew by one
+# point per year, so a 10-year-old image lost as much as two HIGH findings
+# on age alone. Capped at 3, it can order equally-clean images without
+# ever competing with measured severity.
+MAX_AGE_PENALTY = 3.0
 EXPLOITED_PENALTY = 10.0
 HIGH_EPSS_PENALTY = 5.0
 
@@ -89,7 +94,7 @@ class SecurityScore:
         # most OCI catalogues) would otherwise be charged the maximum age
         # penalty and denied the recency bonus for missing metadata.
         if self._image.age_known:
-            penalty += self._image.age_days / 365.0
+            penalty += min(self._image.age_days / 365.0, MAX_AGE_PENALTY)
         return penalty
 
     @property

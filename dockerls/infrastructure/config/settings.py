@@ -38,7 +38,7 @@ def _default_config_path() -> Path:
 class Settings(BaseSettings):
     """Configuration resolved, highest priority first, from: constructor
     kwargs -> environment variables -> ~/.config/dockerls/config.toml ->
-    field defaults. DOCKERHUB_USERNAME/DOCKERHUB_TOKEN/NVD_API_KEY keep
+    field defaults. DOCKERHUB_USERNAME and DOCKERHUB_TOKEN keep
     their historical unprefixed env var names for backward compatibility;
     every other setting is DOCKERLS_<FIELD_NAME>.
     """
@@ -83,7 +83,6 @@ class Settings(BaseSettings):
     retry_max_attempts: int = 3
     retry_backoff_base: float = 2.0
     enable_threat_intel: bool = True
-    nvd_api_key: str = Field(default="", validation_alias="NVD_API_KEY")
 
     @classmethod
     def settings_customise_sources(

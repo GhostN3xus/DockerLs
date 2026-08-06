@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (audit of claims vs. code)
+
+- **No CI had ever run on this repository.** All four workflows triggered
+  on `pull_request: branches: [main]`, and there is no `main` branch -- the
+  default is `claude/docker-secure-finder-q7ikdh`. Lint, mypy and the test
+  matrix had never executed on a single commit or pull request, so every
+  quality claim rested on local runs alone. The branch filter is removed
+  from `pull_request` (fires on any base, and survives the default branch
+  being renamed), `push` ignores dependabot branches, and a concurrency
+  group collapses the duplicate push/PR runs.
+- **The NVD integration was removed rather than advertised.** `NVDClient`
+  was only ever instantiated in tests and nothing under `dockerls/`
+  imported it, so `NVD_API_KEY` never had any effect. Its one real signal
+  -- known-exploited status -- is already provided by `ThreatIntelClient`
+  (CISA KEV + EPSS), which *is* wired in and tested; wiring NVD too would
+  have added a redundant network dependency to make a documentation line
+  true. The module, its setting and its README entries are gone. It
+  remains in git history if it is wanted later.
+- **`health` probed a service the tool no longer uses and missed the ones
+  it does.** It now checks Docker Hub, Chainguard, Distroless,
+  endoflife.date, CISA KEV and EPSS -- the catalogues that feed the scan
+  pipeline and the feeds that weight the score.
+
+- **Credential redaction leaked in 10 of 17 realistic log formats.** The
+  key/value pattern required the key name to be followed *immediately* by
+  `=` or `:`, and every JSON-shaped line has a quote in between
+  (`"token": "..."`) -- so the formats an HTTP client is most likely to
+  produce passed straight through. Redaction now covers JSON (nested,
+  compact, single-quoted, multiline), TOML, querystrings, multipart bodies,
+  URL userinfo, `curl -u`, `Settings(...)` reprs and auth schemes, plus
+  self-identifying credential formats (Docker PAT, GitHub token, JWT, AWS
+  key, Slack token) that appear with no key at all. 60 adversarial cases in
+  `test_secret_masking.py`, each asserting the secret is *absent* rather
+  than that some masked form is present.
+- **`health` reported the Docker Hub API as degraded on every healthy
+  run** -- it probed `https://hub.docker.com/v2/`, which answers 404 by
+  design. An alarm that is always on tells you nothing. It also always
+  exited 0, so it could not gate anything; it now exits 1 when any service
+  is unreachable or returns an error status.
+- **Age penalty was uncapped**, growing a point per year, so a 10-year-old
+  image lost as much as two HIGH findings on staleness alone. Capped at 3
+  points, where it can still order equally-clean images without competing
+  with measured severity.
+
+An audit of every README/CHANGELOG claim against the code that implements
+it, checking each is reached on the real execution path. Findings:
+
+- **Documented configuration did nothing.** `Settings` declared
+  `max_tags`, `workers`, `max_critical`, `max_high` and `max_medium`, and
+  the README documented `DOCKERLS_<SETTING>` and `config.toml` as the way
+  to change them -- but the CLI carried hard-coded `typer.Option` defaults
+  that shadowed `Settings` entirely. The README's own example
+  (`DOCKERLS_MAX_TAGS=200`, `max_tags = 200` in config.toml) was a no-op.
+  Flags now default to `None` and fall back to the configured value; an
+  explicit flag still wins. Covered by `test_settings_are_wired.py`, which
+  fails 11 tests against the previous code.
+- **`validate_threshold` was never called.** `--max-critical -5` and
+  `--max-medium 999999` were accepted silently. Thresholds are now
+  validated, and an invalid one prints a message and exits 1 instead of
+  raising a traceback.
+- **`SecurityTier.production_ready` was never read** and "Tier B =
+  conditional" lived only in the README, so a Tier B row in the terminal
+  carried no indication it needs human review. The CLI now prints a
+  `Requires review` section naming each affected image.
+- **The NVD integration is not wired into any command** -- `NVDClient` is
+  only ever instantiated in tests, so `NVD_API_KEY` had no effect despite
+  the README advertising a rate-limit benefit. Documented as reserved
+  rather than removed; wiring it is separate work.
+- README's `--max-medium 10` example read as contradicting the documented
+  default of 5; it is an override and now says so.
+
 Follow-up to the `recommend` overhaul, driven by a real run of
 `dockerls recommend node`.
 
