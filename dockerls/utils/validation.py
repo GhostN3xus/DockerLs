@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import re
 
+# Supports plain names ("node"), tags ("node:22-alpine"), digest
+# references ("node@sha256:<64 hex>"), tag+digest combined, and private
+# registry prefixes with an optional port ("ghcr.io/org/repo:tag",
+# "registry.internal:5000/team/app@sha256:...").
 _IMAGE_NAME_PATTERN = re.compile(
-    r"^[a-zA-Z0-9][a-zA-Z0-9._/-]*(?::[a-zA-Z0-9._-]+)?$"
+    r"^(?:[a-zA-Z0-9.-]+(?::\d+)?/)?"
+    r"[a-zA-Z0-9._/-]+"
+    r"(?::[a-zA-Z0-9._-]+)?"
+    r"(?:@sha256:[a-fA-F0-9]{64})?$"
 )
 _MAX_NAME_LENGTH = 256
 

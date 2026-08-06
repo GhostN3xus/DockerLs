@@ -128,10 +128,32 @@ class TrivyScanner(ScannerInterface):
             scan_timestamp=datetime.now(tz=timezone.utc).isoformat(),
         )
 
+    # Deterministic source preference: NVD is the canonical/authoritative
+    # score; vendor-specific advisories come next; anything else is a
+    # last-resort fallback so the same finding always yields the same score.
+    _CVSS_SOURCE_PRIORITY = ("nvd", "redhat", "ghsa", "amazon", "photon", "oracle-oval")
+
     def _extract_cvss(self, vuln_data: dict) -> float:
         cvss = vuln_data.get("CVSS", {})
-        for source in cvss.values():
-            v3 = source.get("V3Score")
-            if v3 is not None:
-                return float(v3)
+        for source in self._CVSS_SOURCE_PRIORITY:
+            entry = cvss.get(source)
+            score = self._score_from_entry(entry)
+            if score is not None:
+                return score
+        for entry in cvss.values():
+            score = self._score_from_entry(entry)
+            if score is not None:
+                return score
         return 0.0
+
+    @staticmethod
+    def _score_from_entry(entry: dict | None) -> float | None:
+        if not entry:
+            return None
+        v4 = entry.get("V4Score")
+        if v4 is not None:
+            return float(v4)
+        v3 = entry.get("V3Score")
+        if v3 is not None:
+            return float(v3)
+        return None

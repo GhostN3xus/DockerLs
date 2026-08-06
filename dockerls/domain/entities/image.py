@@ -11,6 +11,7 @@ class DockerImage(BaseModel):
     digest: str = ""
     size_bytes: int = 0
     architecture: str = "amd64"
+    available_architectures: list[str] = Field(default_factory=list)
     os: str = "linux"
     last_updated: datetime | None = None
     pull_count: int = 0

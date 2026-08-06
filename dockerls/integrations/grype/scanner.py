@@ -89,11 +89,7 @@ class GrypeScanner(ScannerInterface):
             fixed_versions = vd.get("fix", {}).get("versions", [])
             fixed_version = fixed_versions[0] if fixed_versions else ""
 
-            cvss_score = 0.0
-            for entry in vd.get("cvss", []):
-                score = entry.get("metrics", {}).get("baseScore", 0.0)
-                if score > cvss_score:
-                    cvss_score = score
+            cvss_score = self._extract_cvss(vd.get("cvss", []))
 
             vulns.append(Vulnerability(
                 cve_id=vd.get("id", ""),
@@ -110,3 +106,20 @@ class GrypeScanner(ScannerInterface):
             vulnerabilities=vulns,
             scan_timestamp=datetime.now(tz=timezone.utc).isoformat(),
         )
+
+    @staticmethod
+    def _extract_cvss(entries: list[dict]) -> float:
+        """Deterministic CVSS selection: NVD source > any other vendor
+        source > first available, instead of an arbitrary max() across
+        differently-scored advisories."""
+        if not entries:
+            return 0.0
+
+        def base_score(entry: dict) -> float:
+            return float(entry.get("metrics", {}).get("baseScore", 0.0))
+
+        for entry in entries:
+            if "nvd" in str(entry.get("source", "")).lower():
+                return base_score(entry)
+
+        return base_score(entries[0])

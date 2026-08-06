@@ -455,7 +455,10 @@ A: No. Trivy/Grype handle image pulling internally for scanning.
 DockerLs only queries metadata from Docker Hub.
 
 **Q: Can I use it with private registries?**
-A: Currently Docker Hub only. Private registry support is planned for v2.0.
+A: `analyze` and `compare` accept any valid reference, including private
+registries with a port (`registry.internal:5000/team/app:tag`) and digest
+references (`node@sha256:...`). `search` and `recommend` still query
+Docker Hub's tag listing API, so they are limited to Docker Hub repositories.
 
 **Q: How accurate is the scoring?**
 A: The score combines vulnerability counts, image age, and base type.

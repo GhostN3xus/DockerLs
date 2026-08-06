@@ -14,3 +14,11 @@ class TestSecretMasking:
     def test_no_false_positive(self):
         result = _mask_secrets("Processing node:22-alpine image")
         assert result == "Processing node:22-alpine image"
+
+    def test_no_partial_leak_of_token_value(self):
+        result = _mask_secrets("token=abcdefghijklmnopqrstuvwxyz")
+        assert "abcdefghij" not in result
+
+    def test_no_partial_leak_of_bearer_value(self):
+        result = _mask_secrets("Bearer abcdefghijklmnopqrstuvwxyz")
+        assert "abcdefghij" not in result

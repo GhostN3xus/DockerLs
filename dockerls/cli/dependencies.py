@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import lru_cache
+
 from dockerls.application.services.scanner_factory import ScannerFactory
 from dockerls.application.use_cases.analyze_image import AnalyzeImageUseCase
 from dockerls.application.use_cases.compare_images import CompareImagesUseCase
@@ -13,6 +15,7 @@ from dockerls.integrations.endoflife.checker import EndOfLifeChecker
 from dockerls.utils.auth import load_credentials
 
 
+@lru_cache(maxsize=1)
 def _settings() -> Settings:
     s = Settings()
     s.ensure_dirs()

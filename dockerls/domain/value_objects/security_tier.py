@@ -13,8 +13,9 @@ class Tier(str, Enum):
 
 
 class SecurityTier:
-    def __init__(self, scan: ScanResult):
+    def __init__(self, scan: ScanResult, is_eol: bool = False):
         self._scan = scan
+        self._is_eol = is_eol
         self._tier = self._classify()
 
     @property
@@ -23,6 +24,10 @@ class SecurityTier:
 
     @property
     def production_ready(self) -> bool:
+        # An EOL base is never production-ready, regardless of its
+        # vulnerability tier -- it will stop receiving security patches.
+        if self._is_eol:
+            return False
         return self._tier != Tier.C
 
     def _classify(self) -> Tier:

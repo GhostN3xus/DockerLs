@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 
 import httpx
@@ -45,6 +46,36 @@ class DockerHubClient(ImageRepositoryInterface):
         return False
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
+    async def _get_json(self, client: httpx.AsyncClient, url: str) -> httpx.Response:
+        """Perform a single GET with retry scoped to *this* request only, so
+        a transient failure deep into a paginated fetch doesn't force the
+        whole listing to restart from page one. Honors Retry-After on 429."""
+        resp = await client.get(url)
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After")
+            wait_s = float(retry_after) if retry_after and retry_after.isdigit() else 2.0
+            logger.warning(f"Rate limited by Docker Hub, waiting {wait_s}s")
+            await asyncio.sleep(wait_s)
+            resp.raise_for_status()
+        return resp
+
+    @staticmethod
+    def _parse_images(images: list[dict]) -> tuple[int, str, str, list[str]]:
+        """Return (size, digest, primary_architecture, all_architectures)."""
+        archs = [img.get("architecture", "unknown") for img in images]
+        for img in images:
+            if img.get("architecture") == "amd64":
+                return img.get("size", 0), img.get("digest", ""), "amd64", archs
+        if images:
+            first = images[0]
+            return (
+                first.get("size", 0),
+                first.get("digest", ""),
+                first.get("architecture", "unknown"),
+                archs,
+            )
+        return 0, "", "amd64", archs
+
     async def search_tags(self, image_name: str, limit: int = 100) -> list[DockerImage]:
         safe_name = sanitize_image_name(image_name)
         namespace = "library" if "/" not in safe_name else safe_name.split("/")[0]
@@ -60,7 +91,7 @@ class DockerHubClient(ImageRepositoryInterface):
         async with await self._get_client() as client:
             while url and len(tags) < limit:
                 try:
-                    resp = await client.get(url)
+                    resp = await self._get_json(client, url)
                     if resp.status_code == 404:
                         logger.warning(f"Image not found: {safe_name}")
                         return []
@@ -82,20 +113,9 @@ class DockerHubClient(ImageRepositoryInterface):
                             except ValueError:
                                 pass
 
-                        size = 0
-                        digest = ""
-                        arch = "amd64"
-                        for img in tag_data.get("images", []):
-                            if img.get("architecture") == "amd64":
-                                size = img.get("size", 0)
-                                digest = img.get("digest", "")
-                                arch = "amd64"
-                                break
-                        if not digest and tag_data.get("images"):
-                            first = tag_data["images"][0]
-                            size = first.get("size", 0)
-                            digest = first.get("digest", "")
-                            arch = first.get("architecture", "unknown")
+                        size, digest, arch, archs = self._parse_images(
+                            tag_data.get("images", [])
+                        )
 
                         tags.append(
                             DockerImage(
@@ -104,22 +124,22 @@ class DockerHubClient(ImageRepositoryInterface):
                                 digest=digest,
                                 size_bytes=size,
                                 architecture=arch,
+                                available_architectures=archs,
                                 last_updated=last_updated,
                                 is_official=namespace == "library",
                             )
                         )
 
                     url = data.get("next")
-                except httpx.HTTPStatusError as e:
-                    if e.response.status_code == 429:
-                        logger.warning("Rate limited by Docker Hub")
-                        raise
-                    logger.error(f"Docker Hub API error: {e}")
+                except httpx.HTTPError as e:
+                    # Network blips or non-429 API errors degrade to a
+                    # partial result (whatever pages already fetched)
+                    # instead of crashing the whole search.
+                    logger.error(f"Docker Hub API error, returning partial results: {e}")
                     break
 
         return tags[:limit]
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
     async def get_image_metadata(self, image_name: str, tag: str) -> DockerImage | None:
         safe_name = sanitize_image_name(image_name)
         namespace = "library" if "/" not in safe_name else safe_name.split("/")[0]
@@ -129,7 +149,7 @@ class DockerHubClient(ImageRepositoryInterface):
 
         async with await self._get_client() as client:
             try:
-                resp = await client.get(url)
+                resp = await self._get_json(client, url)
                 if resp.status_code == 404:
                     return None
                 resp.raise_for_status()
@@ -145,19 +165,15 @@ class DockerHubClient(ImageRepositoryInterface):
                     except ValueError:
                         pass
 
-                size = 0
-                digest = ""
-                for img in data.get("images", []):
-                    if img.get("architecture") == "amd64":
-                        size = img.get("size", 0)
-                        digest = img.get("digest", "")
-                        break
+                size, digest, arch, archs = self._parse_images(data.get("images", []))
 
                 return DockerImage(
                     name=safe_name,
                     tag=tag,
                     digest=digest,
                     size_bytes=size,
+                    architecture=arch,
+                    available_architectures=archs,
                     last_updated=last_updated,
                     is_official=namespace == "library",
                 )

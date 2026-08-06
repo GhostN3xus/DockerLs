@@ -39,9 +39,11 @@ class SecurityScore:
             score += 5
         if self._scan.total_count == 0:
             score += 5
-        if self._image.is_alpine:
-            score += 3
+        # Distroless and Alpine are both "minimal base" signals; an image
+        # matching both must not be double-counted.
         if self._image.is_distroless:
+            score += 3
+        elif self._image.is_alpine:
             score += 3
         if self._image.recently_updated:
             score += 2

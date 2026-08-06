@@ -29,6 +29,27 @@ class TestSanitizeImageName:
     def test_strips_whitespace(self):
         assert sanitize_image_name("  node  ") == "node"
 
+    def test_digest_reference(self):
+        digest = "a" * 64
+        ref = f"node@sha256:{digest}"
+        assert sanitize_image_name(ref) == ref
+
+    def test_tag_and_digest_combined(self):
+        digest = "b" * 64
+        ref = f"node:22-alpine@sha256:{digest}"
+        assert sanitize_image_name(ref) == ref
+
+    def test_private_registry_with_port(self):
+        assert sanitize_image_name("registry.internal:5000/team/app:v1") == \
+            "registry.internal:5000/team/app:v1"
+
+    def test_private_registry_no_port(self):
+        assert sanitize_image_name("ghcr.io/org/repo:latest") == "ghcr.io/org/repo:latest"
+
+    def test_invalid_digest_length_rejected(self):
+        with pytest.raises(ValueError):
+            sanitize_image_name("node@sha256:deadbeef")
+
 
 class TestValidateThreshold:
     def test_valid(self):

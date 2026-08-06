@@ -103,7 +103,7 @@ class RecommendImagesUseCase:
                 is_lts = await self._eol_checker.is_lts(product, version)
 
                 score = SecurityScore(image, scan, is_eol=is_eol, is_lts=is_lts)
-                tier = SecurityTier(scan)
+                tier = SecurityTier(scan, is_eol=is_eol)
                 rem_score = RemediationScore(scan)
 
                 analysis = ImageAnalysis(

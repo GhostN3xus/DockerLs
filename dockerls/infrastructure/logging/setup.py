@@ -5,17 +5,19 @@ import sys
 
 from loguru import logger
 
-_SENSITIVE_PATTERNS = [
-    re.compile(r"(token|password|secret|key|auth)\s*[=:]\s*\S+", re.IGNORECASE),
-    re.compile(r"Bearer\s+\S+", re.IGNORECASE),
-    re.compile(r"Basic\s+\S+", re.IGNORECASE),
-]
+_KV_SECRET_PATTERN = re.compile(
+    r"(token|password|secret|key|auth)(\s*[=:]\s*)\S+", re.IGNORECASE
+)
+_BEARER_PATTERN = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
+_BASIC_PATTERN = re.compile(r"Basic\s+\S+", re.IGNORECASE)
 
 
 def _mask_secrets(message: str) -> str:
-    result = message
-    for pattern in _SENSITIVE_PATTERNS:
-        result = pattern.sub(lambda m: m.group(0)[:10] + "***MASKED***", result)
+    # Never echo any part of the secret value itself -- only the key name
+    # and separator (e.g. "token=") are non-sensitive and kept for context.
+    result = _KV_SECRET_PATTERN.sub(lambda m: f"{m.group(1)}{m.group(2)}***MASKED***", message)
+    result = _BEARER_PATTERN.sub("Bearer ***MASKED***", result)
+    result = _BASIC_PATTERN.sub("Basic ***MASKED***", result)
     return result
 
 
