@@ -28,9 +28,26 @@ def sanitize_image_name(name: str) -> str:
     return name
 
 
-def validate_threshold(value: int, name: str) -> int:
-    if value < 0:
-        raise ValueError(f"{name} must be non-negative")
-    if value > 10000:
-        raise ValueError(f"{name} exceeds maximum allowed value")
+_MAX_THRESHOLD = 10000
+
+# Each worker holds a slot on an asyncio.Semaphore; 0 would deadlock the
+# scan loop forever and anything much above this only adds contention and
+# rate-limit pressure on Docker Hub.
+MIN_WORKERS = 1
+MAX_WORKERS = 50
+
+
+def validate_threshold(value: int, name: str, *, minimum: int = 0) -> int:
+    if value < minimum:
+        if minimum == 0:
+            raise ValueError(f"{name} must be non-negative")
+        raise ValueError(f"{name} must be at least {minimum}")
+    if value > _MAX_THRESHOLD:
+        raise ValueError(f"{name} exceeds maximum allowed value ({_MAX_THRESHOLD})")
+    return value
+
+
+def validate_workers(value: int, name: str = "workers") -> int:
+    if value < MIN_WORKERS or value > MAX_WORKERS:
+        raise ValueError(f"{name} must be between {MIN_WORKERS} and {MAX_WORKERS}")
     return value

@@ -17,6 +17,7 @@ from dockerls.domain.value_objects.remediation_score import RemediationScore
 from dockerls.domain.value_objects.security_score import SecurityScore
 from dockerls.domain.value_objects.security_tier import SecurityTier
 from dockerls.utils.ignore_file import active_ignored_cve_ids, load_ignore_rules
+from dockerls.utils.validation import validate_threshold, validate_workers
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -47,14 +48,17 @@ class RecommendImagesUseCase:
         self._scanner = scanner
         self._eol_checker = eol_checker
         self._cache = cache
-        self._max_critical = max_critical
-        self._max_high = max_high
-        self._max_medium = max_medium
-        self._workers = workers
+        # Defense in depth: the CLI already rejects these, but a library
+        # caller passing workers=0 would otherwise deadlock on the semaphore.
+        self._max_critical = validate_threshold(max_critical, "max_critical")
+        self._max_high = validate_threshold(max_high, "max_high")
+        self._max_medium = validate_threshold(max_medium, "max_medium")
+        self._workers = validate_workers(workers)
         self._ignored_cves = active_ignored_cve_ids(load_ignore_rules(ignore_path))
         self._threat_intel = threat_intel
 
     async def execute(self, image_name: str, limit: int = 100) -> AnalysisResult:
+        limit = validate_threshold(limit, "limit", minimum=1)
         refresh_db = getattr(self._scanner, "refresh_db", None)
         if callable(refresh_db):
             await refresh_db()

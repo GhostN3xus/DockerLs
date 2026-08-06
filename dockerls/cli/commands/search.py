@@ -7,6 +7,7 @@ from rich.console import Console
 from rich.table import Table
 
 from dockerls.cli.dependencies import build_repository
+from dockerls.cli.validators import check_limit
 
 console = Console()
 
@@ -16,6 +17,7 @@ def search(
     limit: int = typer.Option(100, "--limit", "-l", help="Maximum tags to retrieve"),
 ) -> None:
     """Search Docker Hub for available tags of an image."""
+    limit = check_limit(limit)
     asyncio.run(_search(image, limit))
 
 

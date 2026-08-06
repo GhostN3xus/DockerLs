@@ -7,6 +7,7 @@ import typer
 from rich.console import Console
 
 from dockerls.cli.dependencies import build_recommend_use_case
+from dockerls.cli.validators import check_workers
 from dockerls.exporters.factory import ExporterFactory
 
 console = Console()
@@ -21,6 +22,7 @@ def export(
     workers: int = typer.Option(10, "--workers", "-w", help="Concurrent workers"),
 ) -> None:
     """Export analysis results in various formats."""
+    workers = check_workers(workers)
     asyncio.run(_export(image, output_format, output, workers))
 
 

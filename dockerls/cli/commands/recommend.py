@@ -11,6 +11,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from dockerls.cli.dependencies import build_recommend_use_case
+from dockerls.cli.validators import check_limit, check_threshold, check_workers
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -62,6 +63,11 @@ def recommend(
     """Recommend the most secure Docker image tags."""
     if no_color:
         console.no_color = True
+    max_critical = check_threshold(max_critical, "max_critical")
+    max_high = check_threshold(max_high, "max_high")
+    max_medium = check_threshold(max_medium, "max_medium")
+    limit = check_limit(limit)
+    workers = check_workers(workers)
     asyncio.run(
         _recommend(
             image, max_critical, max_high, max_medium, limit, workers, fail_on, output_format

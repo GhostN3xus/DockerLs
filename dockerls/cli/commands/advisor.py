@@ -10,6 +10,7 @@ from rich.table import Table
 
 from dockerls.application.use_cases.recommend_images import build_recommendation
 from dockerls.cli.dependencies import build_recommend_use_case
+from dockerls.cli.validators import check_workers
 
 console = Console()
 
@@ -25,6 +26,7 @@ def advisor(
     """Security advisor: analyze and provide actionable remediation plan."""
     if no_color:
         console.no_color = True
+    workers = check_workers(workers)
     asyncio.run(_advisor(image, workers, output_format))
 
 
