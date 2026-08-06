@@ -146,6 +146,42 @@ class TestRecommendImages:
         assert len(result.errors) == len(tags)
 
     @pytest.mark.asyncio
+    async def test_ignore_file_excludes_cve_from_scoring(self, tags, tmp_path):
+        ignore_file = tmp_path / ".dockerls-ignore.yaml"
+        ignore_file.write_text("ignores:\n  - cve: CVE-IGNORED\n    justification: test\n")
+        vulns = [Vulnerability(cve_id="CVE-IGNORED", severity=Severity.CRITICAL)]
+        uc = RecommendImagesUseCase(
+            repository=MockRepo(tags),
+            scanner=MockScanner(vulns),
+            eol_checker=MockEOL(),
+            ignore_path=ignore_file,
+        )
+        result = await uc.execute("node")
+        assert result.baseline_met is True
+
+    @pytest.mark.asyncio
+    async def test_threat_intel_enrichment_applied(self, tags):
+        from unittest.mock import AsyncMock
+
+        from dockerls.integrations.threat_intel.client import ThreatIntelClient
+
+        vulns = [Vulnerability(cve_id="CVE-2024-0001", severity=Severity.HIGH, fixed_version="1.0")]
+        threat_intel = ThreatIntelClient()
+        threat_intel.known_exploited = AsyncMock(return_value={"CVE-2024-0001"})
+        threat_intel.epss_scores = AsyncMock(return_value={"CVE-2024-0001": 0.95})
+
+        uc = RecommendImagesUseCase(
+            repository=MockRepo(tags),
+            scanner=MockScanner(vulns),
+            eol_checker=MockEOL(),
+            threat_intel=threat_intel,
+        )
+        result = await uc.execute("node")
+        best = (result.recommendations or result.alternatives)[0]
+        assert best.scan.vulnerabilities[0].exploit_known is True
+        assert best.scan.vulnerabilities[0].epss_score == 0.95
+
+    @pytest.mark.asyncio
     async def test_dedup_scans_by_digest(self):
         shared_tags = [
             DockerImage(name="node", tag="22-alpine", digest="sha256:abc", is_official=True),

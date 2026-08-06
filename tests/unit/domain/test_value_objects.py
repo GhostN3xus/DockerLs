@@ -71,6 +71,34 @@ class TestSecurityScore:
         score = SecurityScore(_image(), scan)
         assert score.value > 0
 
+    def test_known_exploited_penalty(self):
+        clean = SecurityScore(_image(), _scan())
+        v = Vulnerability(cve_id="C1", severity=Severity.HIGH, exploit_known=True)
+        exploited = SecurityScore(_image(), _scan([v]))
+        assert exploited.value < clean.value
+
+    def test_high_epss_penalty(self):
+        # Enough HIGH vulns to push the base score well under 100 so the
+        # EPSS penalty isn't hidden by the [0, 100] clamp.
+        base_vulns = [Vulnerability(cve_id=f"H{i}", severity=Severity.HIGH) for i in range(6)]
+        low_epss = SecurityScore(
+            _image(),
+            _scan([*base_vulns, Vulnerability(cve_id="C1", severity=Severity.HIGH, epss_score=0.1)]),
+        )
+        high_epss = SecurityScore(
+            _image(),
+            _scan([*base_vulns, Vulnerability(cve_id="C1", severity=Severity.HIGH, epss_score=0.9)]),
+        )
+        assert high_epss.value < low_epss.value
+
+    def test_hardened_source_bonus_not_double_counted_with_alpine(self):
+        hardened_alpine = _image(name="chainguard/node", tag="22-alpine")
+        alpine_only = _image(name="node", tag="22-alpine")
+        score_hardened = SecurityScore(hardened_alpine, _scan())
+        score_alpine = SecurityScore(alpine_only, _scan())
+        # Both get the same +3 "minimal base" bonus, not stacked +6.
+        assert score_hardened.value == score_alpine.value
+
 
 class TestSecurityTier:
     def test_tier_s(self):

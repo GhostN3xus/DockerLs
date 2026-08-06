@@ -21,6 +21,8 @@ from dockerls.domain.interfaces.scanner import ScannerInterface
 from dockerls.domain.value_objects.remediation_score import RemediationScore
 from dockerls.domain.value_objects.security_score import SecurityScore
 from dockerls.domain.value_objects.security_tier import SecurityTier
+from dockerls.integrations.threat_intel.client import ThreatIntelClient
+from dockerls.utils.ignore_file import active_ignored_cve_ids, load_ignore_rules
 
 
 class RecommendImagesUseCase:
@@ -34,6 +36,8 @@ class RecommendImagesUseCase:
         max_high: int = 0,
         max_medium: int = 5,
         workers: int = 10,
+        ignore_path: Any = None,
+        threat_intel: ThreatIntelClient | None = None,
     ):
         self._repository = repository
         self._scanner = scanner
@@ -43,6 +47,8 @@ class RecommendImagesUseCase:
         self._max_high = max_high
         self._max_medium = max_medium
         self._workers = workers
+        self._ignored_cves = active_ignored_cve_ids(load_ignore_rules(ignore_path))
+        self._threat_intel = threat_intel
 
     async def execute(self, image_name: str, limit: int = 100) -> AnalysisResult:
         refresh_db = getattr(self._scanner, "refresh_db", None)
@@ -97,6 +103,11 @@ class RecommendImagesUseCase:
                         f"({scan.error_message or 'no details'})"
                     )
                     return None
+
+                if self._ignored_cves:
+                    scan = _apply_ignore_rules(scan, self._ignored_cves)
+                if self._threat_intel is not None:
+                    scan = await _enrich_with_threat_intel(scan, self._threat_intel)
 
                 product, version = _extract_product_version(image)
                 is_eol = await self._eol_checker.is_eol(product, version)
@@ -182,6 +193,43 @@ class RecommendImagesUseCase:
             await self._cache.set(
                 f"analysis:{key}", analysis.model_dump(), ttl_seconds=86400
             )
+
+
+async def _enrich_with_threat_intel(scan: Any, threat_intel: ThreatIntelClient) -> Any:
+    """Tag CRITICAL/HIGH vulnerabilities with CISA KEV / EPSS signal so
+    SecurityScore can weigh confirmed-exploited or high-probability CVEs
+    more heavily than an unweighted severity count would."""
+    notable_ids = [
+        v.cve_id
+        for v in scan.vulnerabilities
+        if v.severity.value in ("CRITICAL", "HIGH") and v.cve_id
+    ]
+    if not notable_ids:
+        return scan
+
+    kev_ids = await threat_intel.known_exploited(notable_ids)
+    epss = await threat_intel.epss_scores(notable_ids)
+    if not kev_ids and not epss:
+        return scan
+
+    updated = [
+        v.model_copy(update={
+            "exploit_known": v.cve_id.upper() in kev_ids,
+            "epss_score": epss.get(v.cve_id.upper(), v.epss_score),
+        })
+        for v in scan.vulnerabilities
+    ]
+    return scan.model_copy(update={"vulnerabilities": updated})
+
+
+def _apply_ignore_rules(scan: Any, ignored_cves: set[str]) -> Any:
+    """Return a copy of `scan` with vulnerabilities matching an active
+    .dockerls-ignore.yaml rule removed, so ignored CVEs never affect
+    scoring, tiering, or the baseline decision."""
+    filtered = [v for v in scan.vulnerabilities if v.cve_id.upper() not in ignored_cves]
+    if len(filtered) == len(scan.vulnerabilities):
+        return scan
+    return scan.model_copy(update={"vulnerabilities": filtered})
 
 
 _LEADING_VERSION_RE = re.compile(r"^\d+(?:\.\d+){0,3}")

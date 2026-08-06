@@ -39,9 +39,10 @@ class SecurityScore:
             score += 5
         if self._scan.total_count == 0:
             score += 5
-        # Distroless and Alpine are both "minimal base" signals; an image
-        # matching both must not be double-counted.
-        if self._image.is_distroless:
+        # Distroless, hardened-vendor (Chainguard/Wolfi/Bitnami), and Alpine
+        # are all "minimal base" signals; an image matching more than one
+        # must not be double-counted.
+        if self._image.is_distroless or self._image.is_hardened_source:
             score += 3
         elif self._image.is_alpine:
             score += 3
@@ -53,5 +54,15 @@ class SecurityScore:
             score += 2
         if self._is_eol:
             score -= 20
+
+        # CISA KEV / EPSS threat-intel signal: a vulnerability with a
+        # confirmed real-world exploit (or a high predicted exploitation
+        # probability) is materially worse than an unweighted CVSS count
+        # suggests, so it draws an extra penalty on top of the base
+        # severity penalties above.
+        known_exploited = sum(1 for v in self._scan.vulnerabilities if v.exploit_known)
+        score -= known_exploited * 10
+        high_epss = sum(1 for v in self._scan.vulnerabilities if v.epss_score >= 0.5)
+        score -= high_epss * 5
 
         return max(0.0, min(100.0, round(score, 1)))

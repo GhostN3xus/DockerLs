@@ -5,6 +5,7 @@ from dockerls.exporters.csv_exporter import CSVExporter
 from dockerls.exporters.html_exporter import HTMLExporter
 from dockerls.exporters.json_exporter import JSONExporter
 from dockerls.exporters.markdown_exporter import MarkdownExporter
+from dockerls.exporters.sarif_exporter import SARIFExporter
 
 
 class ExporterFactory:
@@ -14,6 +15,7 @@ class ExporterFactory:
         "html": HTMLExporter,
         "markdown": MarkdownExporter,
         "md": MarkdownExporter,
+        "sarif": SARIFExporter,
     }
 
     @classmethod

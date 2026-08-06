@@ -21,6 +21,33 @@ class TrivyScanner(ScannerInterface):
     async def is_available(self) -> bool:
         return shutil.which("trivy") is not None
 
+    async def generate_sbom(self, image_reference: str, fmt: str = "cyclonedx") -> str | None:
+        """Generate an SBOM for `image_reference` using Trivy's built-in
+        generators. `fmt` is one of "cyclonedx" or "spdx-json"."""
+        if fmt not in ("cyclonedx", "spdx-json"):
+            raise ValueError(f"Unsupported SBOM format: {fmt}")
+
+        safe_ref = sanitize_image_name(image_reference)
+        cmd = ["trivy", "image", "--format", fmt, "--quiet"]
+        if self._skip_db_update:
+            cmd.append("--skip-db-update")
+        cmd.append(safe_ref)
+
+        try:
+            proc = await asyncio.create_subprocess_exec(  # noqa: S603
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
+            if proc.returncode != 0 or not stdout:
+                logger.error(f"SBOM generation failed for {safe_ref}: {stderr.decode()[:300]}")
+                return None
+            return stdout.decode()
+        except (asyncio.TimeoutError, OSError) as e:
+            logger.error(f"SBOM generation failed for {safe_ref}: {e}")
+            return None
+
     async def refresh_db(self) -> bool:
         """Download/refresh the Trivy vulnerability DB once, up front."""
         try:

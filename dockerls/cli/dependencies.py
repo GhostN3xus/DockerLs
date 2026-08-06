@@ -12,6 +12,7 @@ from dockerls.infrastructure.config.settings import Settings
 from dockerls.infrastructure.logging.setup import setup_logging
 from dockerls.integrations.dockerhub.client import DockerHubClient
 from dockerls.integrations.endoflife.checker import EndOfLifeChecker
+from dockerls.integrations.threat_intel.client import ThreatIntelClient
 from dockerls.utils.auth import load_credentials
 
 
@@ -41,6 +42,14 @@ def build_cache() -> SQLiteCache:
     return SQLiteCache(s.db_path)
 
 
+@lru_cache(maxsize=1)
+def _threat_intel() -> ThreatIntelClient | None:
+    s = _settings()
+    if not s.enable_threat_intel:
+        return None
+    return ThreatIntelClient(timeout=s.http_timeout)
+
+
 async def build_recommend_use_case(
     max_critical: int = 0,
     max_high: int = 0,
@@ -62,6 +71,7 @@ async def build_recommend_use_case(
         max_high=max_high,
         max_medium=max_medium,
         workers=workers,
+        threat_intel=_threat_intel(),
     )
 
 
@@ -70,7 +80,9 @@ async def build_analyze_use_case() -> AnalyzeImageUseCase:
     repo = await build_repository()
     scanner = await ScannerFactory.create()
     eol = EndOfLifeChecker(timeout=s.http_timeout)
-    return AnalyzeImageUseCase(repository=repo, scanner=scanner, eol_checker=eol)
+    return AnalyzeImageUseCase(
+        repository=repo, scanner=scanner, eol_checker=eol, threat_intel=_threat_intel(),
+    )
 
 
 async def build_compare_use_case() -> CompareImagesUseCase:

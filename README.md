@@ -99,7 +99,25 @@ Recommend the most secure tags based on vulnerability scanning.
 dockerls recommend node
 dockerls recommend node --max-critical 0 --max-high 0 --max-medium 10
 dockerls recommend nginx --workers 20
+dockerls recommend node --format json
+dockerls recommend node --fail-on high --no-color
 ```
+
+`recommend` and `advisor` accept `--format json` (machine-readable output)
+and `--no-color` (plain text, no ANSI codes), and exit with a status code
+that reflects the outcome so it can be used as a CI gate:
+
+| Exit code | Meaning                                          |
+|-----------|---------------------------------------------------|
+| 0         | An image meeting the baseline was found            |
+| 1         | Hard error, or `--fail-on` threshold was violated  |
+| 2         | No baseline image, but fallback alternatives exist |
+| 3         | Nothing usable was found at all                    |
+
+`--fail-on {critical,high,medium}` forces exit code 1 if the top result
+still carries vulnerabilities at or above that severity, even in fallback
+mode -- useful for failing a CI job on a fallback recommendation you don't
+consider acceptable.
 
 ### advisor
 
@@ -107,10 +125,20 @@ Full security advisor with remediation steps.
 
 ```bash
 dockerls advisor node
+dockerls advisor node --format json
 ```
 
 Output includes: current best image, security score, vulnerability breakdown,
 remediation score, and a step-by-step fix plan.
+
+### sbom
+
+Generate a Software Bill of Materials for an image via Trivy.
+
+```bash
+dockerls sbom node:22-alpine --format cyclonedx
+dockerls sbom node:22-alpine --format spdx --output node.spdx.json
+```
 
 ### analyze
 
@@ -139,7 +167,11 @@ dockerls export node --format json
 dockerls export node --format csv --output report.csv
 dockerls export node --format html --output report.html
 dockerls export node --format markdown --output report.md
+dockerls export node --format sarif --output report.sarif
 ```
+
+The `sarif` format produces SARIF 2.1.0, suitable for upload to GitHub code
+scanning or other SARIF-aware tooling.
 
 ### login
 
@@ -203,21 +235,29 @@ score -= image_age_days / 365
 
 Bonuses:
 
-| Condition              | Bonus |
-|------------------------|-------|
-| Official image         | +5    |
-| Zero vulnerabilities   | +5    |
-| Alpine base            | +3    |
-| Distroless base        | +3    |
-| Updated in last 30 days| +2    |
-| Digitally signed       | +2    |
-| LTS version            | +2    |
+| Condition                                          | Bonus |
+|-----------------------------------------------------|-------|
+| Official image                                       | +5    |
+| Zero vulnerabilities                                 | +5    |
+| Minimal base (Alpine, Distroless, or a hardened vendor image -- Chainguard, Wolfi, Bitnami) | +3 |
+| Updated in last 30 days                              | +2    |
+| Digitally signed                                     | +2    |
+| LTS version                                          | +2    |
 
-Penalty:
+The minimal-base bonus is applied once even if an image matches more than
+one signal (e.g. an Alpine-based Chainguard image does not get +6).
 
-| Condition | Penalty |
-|-----------|---------|
-| EOL       | -20     |
+Penalties:
+
+| Condition                                    | Penalty        |
+|------------------------------------------------|----------------|
+| EOL                                             | -20            |
+| Vulnerability with a confirmed exploit (CISA KEV)| -10 per vuln  |
+| Vulnerability with EPSS >= 0.5 (high predicted exploitation probability) | -5 per vuln |
+
+CISA KEV and EPSS lookups are best-effort: if those feeds are unreachable,
+DockerLs scores without that signal rather than failing the scan. Both are
+only queried when the scan has CRITICAL or HIGH findings to check.
 
 Score is clamped to the range [0, 100].
 
@@ -227,10 +267,30 @@ Score is clamped to the range [0, 100].
 
 | Tier | Criteria                                     | Production Ready |
 |------|----------------------------------------------|------------------|
-| S    | Critical = 0, High = 0                       | Yes              |
-| A    | Critical = 0, High <= 3, all fixable         | Yes              |
-| B    | Critical = 0, High <= 10                     | Conditional      |
+| S    | Critical = 0, High = 0                       | Yes*             |
+| A    | Critical = 0, High <= 3, all fixable         | Yes*             |
+| B    | Critical = 0, High <= 10                     | Conditional*     |
 | C    | Any Critical, or many High                   | No               |
+
+\* An EOL image is never reported production-ready, regardless of tier.
+
+---
+
+## Ignoring Known Findings
+
+Create a `.dockerls-ignore.yaml` in the directory you run `dockerls` from
+to suppress specific CVEs from scoring and recommendations:
+
+```yaml
+ignores:
+  - cve: CVE-2024-0001
+    justification: "Not reachable in our usage of this package"
+    expires: 2026-12-31
+```
+
+`expires` is optional; once the date passes, the rule stops applying and
+the CVE counts again. Malformed or missing ignore files are treated as
+"no rules" rather than failing the scan.
 
 Tier C images are never recommended for production.
 
@@ -456,9 +516,14 @@ DockerLs only queries metadata from Docker Hub.
 
 **Q: Can I use it with private registries?**
 A: `analyze` and `compare` accept any valid reference, including private
-registries with a port (`registry.internal:5000/team/app:tag`) and digest
-references (`node@sha256:...`). `search` and `recommend` still query
-Docker Hub's tag listing API, so they are limited to Docker Hub repositories.
+registries with a port (`registry.internal:5000/team/app:tag`), common
+private registry hosts (GHCR, Harbor, ECR, GAR), and digest references
+(`node@sha256:...`). Scanning still goes through Trivy/Grype, so
+authenticate against the registry the way you normally would for those
+tools (e.g. `TRIVY_USERNAME`/`TRIVY_PASSWORD`, or a logged-in
+`~/.docker/config.json`) -- DockerLs does not manage registry credentials
+itself. `search` and `recommend` still query Docker Hub's tag listing API,
+so they are limited to Docker Hub repositories.
 
 **Q: How accurate is the scoring?**
 A: The score combines vulnerability counts, image age, and base type.

@@ -11,6 +11,7 @@ from dockerls.cli.commands.export import export
 from dockerls.cli.commands.health import health
 from dockerls.cli.commands.login import login
 from dockerls.cli.commands.recommend import recommend
+from dockerls.cli.commands.sbom import sbom
 from dockerls.cli.commands.search import search
 from dockerls.cli.commands.version import version
 
@@ -32,6 +33,7 @@ app.command()(login)
 app.command()(version)
 app.command()(doctor)
 app.command()(health)
+app.command()(sbom)
 app.add_typer(cache_app, name="cache", help="Manage scan cache")
 
 

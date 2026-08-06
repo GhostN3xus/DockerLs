@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import typer
 from rich.console import Console
@@ -16,22 +17,35 @@ console = Console()
 def advisor(
     image: str = typer.Argument(help="Docker image name (e.g., node, python, nginx)"),
     workers: int = typer.Option(10, "--workers", "-w", help="Concurrent workers"),
+    format: str = typer.Option("table", "--format", "-f", help="Output format: table or json"),
+    no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
 ) -> None:
     """Security advisor: analyze and provide actionable remediation plan."""
-    asyncio.run(_advisor(image, workers))
+    if no_color:
+        console.no_color = True
+    asyncio.run(_advisor(image, workers, format))
 
 
-async def _advisor(image: str, workers: int) -> None:
+async def _advisor(image: str, workers: int, format: str) -> None:
     use_case = await build_recommend_use_case(workers=workers)
     result = await use_case.execute(image)
 
     items = result.recommendations or result.alternatives
     if not items:
-        console.print("[red]No images found to advise on.[/red]")
+        if format == "json":
+            console.print(json.dumps({"error": "No images found to advise on", "errors": result.errors}))
+        else:
+            console.print("[red]No images found to advise on.[/red]")
         raise typer.Exit(1)
 
     best = items[0]
     rec = best.recommendation or build_recommendation(best)
+
+    if format == "json":
+        payload = best.model_dump()
+        payload["remediation"] = rec.model_dump()
+        console.print(json.dumps(payload, indent=2, default=str))
+        return
 
     console.print(Panel(f"[bold]Security Advisor: {image}[/bold]", expand=False))
     console.print()

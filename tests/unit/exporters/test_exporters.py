@@ -4,11 +4,13 @@ import pytest
 from dockerls.application.dto.analysis import AnalysisResult, ImageAnalysis
 from dockerls.domain.entities.image import DockerImage
 from dockerls.domain.entities.scan_result import ScanResult
+from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.exporters.factory import ExporterFactory
 from dockerls.exporters.json_exporter import JSONExporter
 from dockerls.exporters.csv_exporter import CSVExporter
 from dockerls.exporters.html_exporter import HTMLExporter
 from dockerls.exporters.markdown_exporter import MarkdownExporter
+from dockerls.exporters.sarif_exporter import SARIFExporter
 
 
 @pytest.fixture
@@ -60,6 +62,35 @@ class TestMarkdownExporter:
         assert "node:22-alpine" in output
 
 
+class TestSARIFExporter:
+    def test_export_string_is_valid_sarif(self):
+        img = DockerImage(name="node", tag="22-alpine", is_official=True)
+        vuln = Vulnerability(
+            cve_id="CVE-2024-0001", severity=Severity.HIGH,
+            package_name="openssl", installed_version="1.0", fixed_version="1.1",
+        )
+        scan = ScanResult(image_reference="node:22-alpine", vulnerabilities=[vuln])
+        analysis = ImageAnalysis(
+            image=img, scan=scan, security_score=80.0, tier="B", remediation_score=100,
+        )
+        result = AnalysisResult(
+            query="node", total_tags_scanned=1, baseline_met=False, alternatives=[analysis],
+        )
+        exporter = SARIFExporter()
+        output = json.loads(exporter.export_string(result))
+        assert output["version"] == "2.1.0"
+        run = output["runs"][0]
+        assert run["tool"]["driver"]["name"] == "DockerLs"
+        assert run["results"][0]["ruleId"] == "CVE-2024-0001"
+
+    def test_export_string_empty_result(self, analysis_result):
+        exporter = SARIFExporter()
+        output = json.loads(exporter.export_string(
+            AnalysisResult(query="x", total_tags_scanned=0, baseline_met=False)
+        ))
+        assert output["runs"][0]["results"] == []
+
+
 class TestExporterFactory:
     def test_create_json(self):
         e = ExporterFactory.create("json")
@@ -80,6 +111,10 @@ class TestExporterFactory:
     def test_create_md(self):
         e = ExporterFactory.create("md")
         assert isinstance(e, MarkdownExporter)
+
+    def test_create_sarif(self):
+        e = ExporterFactory.create("sarif")
+        assert isinstance(e, SARIFExporter)
 
     def test_unsupported(self):
         with pytest.raises(ValueError, match="Unsupported format"):

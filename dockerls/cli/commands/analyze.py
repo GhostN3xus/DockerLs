@@ -13,8 +13,11 @@ console = Console()
 
 def analyze(
     image: str = typer.Argument(help="Full image reference (e.g., node:22-alpine)"),
+    no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
 ) -> None:
     """Deep-analyze a specific Docker image tag."""
+    if no_color:
+        console.no_color = True
     asyncio.run(_analyze(image))
 
 

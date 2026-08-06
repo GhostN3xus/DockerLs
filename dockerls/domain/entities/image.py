@@ -42,6 +42,15 @@ class DockerImage(BaseModel):
     def is_slim(self) -> bool:
         return "slim" in self.tag.lower()
 
+    _HARDENED_MARKERS = ("chainguard", "cgr.dev", "wolfi", "bitnami")
+
+    @property
+    def is_hardened_source(self) -> bool:
+        """True for images from vendors that specialize in minimal,
+        security-hardened bases (Chainguard, Wolfi, Bitnami)."""
+        name = self.name.lower()
+        return any(marker in name for marker in self._HARDENED_MARKERS)
+
     @property
     def recently_updated(self) -> bool:
         return self.age_days <= 30

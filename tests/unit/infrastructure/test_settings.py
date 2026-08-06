@@ -22,3 +22,17 @@ class TestSettings:
         s = Settings()
         assert s.dockerhub_username == "testuser"
         assert s.dockerhub_token == "testtoken"
+
+    def test_nvd_api_key_env_override(self, monkeypatch):
+        monkeypatch.setenv("NVD_API_KEY", "my-key")
+        s = Settings()
+        assert s.nvd_api_key == "my-key"
+
+    def test_threat_intel_enabled_by_default(self):
+        s = Settings()
+        assert s.enable_threat_intel is True
+
+    def test_threat_intel_disable_env_var(self, monkeypatch):
+        monkeypatch.setenv("DOCKERLS_DISABLE_THREAT_INTEL", "1")
+        s = Settings()
+        assert s.enable_threat_intel is False

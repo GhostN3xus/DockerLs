@@ -14,8 +14,11 @@ console = Console()
 
 def compare(
     images: list[str] = typer.Argument(help="Two or more image references to compare"),
+    no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
 ) -> None:
     """Compare security posture of multiple Docker images."""
+    if no_color:
+        console.no_color = True
     if len(images) < 2:
         console.print("[red]Provide at least two images to compare.[/red]")
         raise typer.Exit(1)

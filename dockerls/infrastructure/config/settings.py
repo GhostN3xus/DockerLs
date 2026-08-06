@@ -28,12 +28,18 @@ class Settings(BaseModel):
     http_timeout: int = 30
     retry_max_attempts: int = 3
     retry_backoff_base: float = 2.0
+    enable_threat_intel: bool = True
+    nvd_api_key: str = ""
 
     def model_post_init(self, __context: object) -> None:
         if not self.dockerhub_username:
             self.dockerhub_username = os.environ.get("DOCKERHUB_USERNAME", "")
         if not self.dockerhub_token:
             self.dockerhub_token = os.environ.get("DOCKERHUB_TOKEN", "")
+        if not self.nvd_api_key:
+            self.nvd_api_key = os.environ.get("NVD_API_KEY", "")
+        if os.environ.get("DOCKERLS_DISABLE_THREAT_INTEL"):
+            self.enable_threat_intel = False
 
     @property
     def db_path(self) -> Path:

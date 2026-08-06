@@ -105,6 +105,29 @@ class TestTrivyScanErrorPaths:
         assert "--skip-db-update" in args
 
     @pytest.mark.asyncio
+    async def test_generate_sbom_returns_output(self):
+        scanner = TrivyScanner()
+        proc = _FakeProc(stdout=b'{"bomFormat": "CycloneDX"}', returncode=0)
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            sbom = await scanner.generate_sbom("node:22-alpine", fmt="cyclonedx")
+        assert sbom is not None
+        assert "CycloneDX" in sbom
+
+    @pytest.mark.asyncio
+    async def test_generate_sbom_invalid_format_raises(self):
+        scanner = TrivyScanner()
+        with pytest.raises(ValueError):
+            await scanner.generate_sbom("node:22-alpine", fmt="bogus")
+
+    @pytest.mark.asyncio
+    async def test_generate_sbom_failure_returns_none(self):
+        scanner = TrivyScanner()
+        proc = _FakeProc(stdout=b"", stderr=b"error", returncode=1)
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
+            sbom = await scanner.generate_sbom("node:22-alpine")
+        assert sbom is None
+
+    @pytest.mark.asyncio
     async def test_refresh_db_enables_skip_flag(self):
         scanner = TrivyScanner()
         proc = _FakeProc(stdout=b"", returncode=0)
