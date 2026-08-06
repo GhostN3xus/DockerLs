@@ -26,10 +26,6 @@ class ScanResult(BaseModel):
     evidence_path: str = ""
 
     @property
-    def is_usable(self) -> bool:
-        return self.status in (ScanStatus.OK, ScanStatus.PARTIAL)
-
-    @property
     def is_verified(self) -> bool:
         """A scan that actually completed and produced a parsed result.
 

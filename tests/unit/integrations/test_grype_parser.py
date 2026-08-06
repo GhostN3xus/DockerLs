@@ -64,7 +64,7 @@ class TestGrypeScanErrorPaths:
         with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
             result = await scanner.scan("nginx:latest")
         assert result.status == ScanStatus.ERROR
-        assert result.is_usable is False
+        assert result.is_verified is False
 
     @pytest.mark.asyncio
     async def test_timeout_is_timeout_status(self):

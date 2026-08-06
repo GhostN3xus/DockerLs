@@ -6,7 +6,7 @@ import typer
 from rich.console import Console
 
 from dockerls.integrations.dockerhub.client import DockerHubClient
-from dockerls.utils.auth import store_credentials
+from dockerls.utils.auth import clear_credentials, store_credentials
 
 console = Console()
 
@@ -37,3 +37,16 @@ async def _login(username: str, token: str) -> None:
             "DOCKERHUB_USERNAME and DOCKERHUB_TOKEN environment variables "
             "to persist credentials instead.[/yellow]"
         )
+
+
+def logout() -> None:
+    """Remove stored Docker Hub credentials.
+
+    `login` could store credentials with no supported way to remove them,
+    which left `clear_credentials` implemented and unreachable.
+    """
+    if clear_credentials():
+        console.print("[green]Stored credentials removed.[/green]")
+        return
+    console.print("[yellow]No stored credentials to remove.[/yellow]")
+    raise typer.Exit(1)

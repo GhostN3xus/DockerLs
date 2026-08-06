@@ -6,7 +6,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from dockerls.cli.dependencies import build_repository
+from dockerls.cli.dependencies import build_search_use_case
 
 console = Console()
 
@@ -20,8 +20,8 @@ def search(
 
 
 async def _search(image: str, limit: int) -> None:
-    repo = await build_repository()
-    tags = await repo.search_tags(image, limit=limit)
+    use_case = await build_search_use_case()
+    tags = await use_case.execute(image, limit=limit)
 
     if not tags:
         console.print(f"[red]No tags found for '{image}'[/red]")

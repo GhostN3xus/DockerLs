@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A structural guard against the bug class that kept recurring**
+  (`tests/unit/test_no_dead_configuration.py`). Five times this codebase
+  shipped something declared, documented and never reached at runtime, and
+  twice the fix itself was partial. Catching that by reading code has now
+  failed repeatedly, so it is a test: every `Settings` field must be read
+  outside `settings.py`, every public symbol must be reachable from
+  somewhere in the package, and no module may be orphaned. It found eight
+  more on its first run.
+
 ### Fixed (audit of claims vs. code)
+
+- **`logout` did not exist**, so `login` could store credentials with no
+  supported way to remove them and `clear_credentials` was unreachable.
+- **`search` reached past the application layer** into a repository
+  directly, orphaning `SearchImagesUseCase`. It goes through its use case
+  like every other command now.
+- **`SecurityTier.production_ready` is computed by the domain and carried
+  on `ImageAnalysis`**, so the CLI and `--format json` state the domain's
+  verdict instead of re-deriving the rule from the tier letter.
+- Removed five symbols nothing reached: `build_search_use_case` (dead after
+  `search` bypassed it), `RichScanObserver.failed`, `DockerImage.is_slim`,
+  `ScanResult.is_usable` (superseded by `is_verified`), `EvidenceStore.root`
+  and `with_retry` -- the last one added in this same branch and never used.
 
 - **`export` repeated the shadowed-settings bug** that was fixed only in
   `recommend`: its `--workers` carried a hard-coded default of 10 and it

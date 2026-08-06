@@ -64,7 +64,7 @@ class TestTrivyScanErrorPaths:
         with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
             result = await scanner.scan("node:22-alpine")
         assert result.status == ScanStatus.ERROR
-        assert result.is_usable is False
+        assert result.is_verified is False
 
     @pytest.mark.asyncio
     async def test_timeout_is_timeout_status(self):
@@ -76,7 +76,7 @@ class TestTrivyScanErrorPaths:
         ):
             result = await scanner.scan("node:22-alpine")
         assert result.status == ScanStatus.TIMEOUT
-        assert result.is_usable is False
+        assert result.is_verified is False
 
     @pytest.mark.asyncio
     async def test_malformed_json_is_error_status(self):
@@ -93,7 +93,7 @@ class TestTrivyScanErrorPaths:
         with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
             result = await scanner.scan("node:22-alpine")
         assert result.status == ScanStatus.OK
-        assert result.is_usable is True
+        assert result.is_verified is True
 
     @pytest.mark.asyncio
     async def test_skip_db_update_flag_passed(self):

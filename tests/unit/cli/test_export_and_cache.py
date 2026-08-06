@@ -159,3 +159,23 @@ class TestCacheCommands:
 
         assert result.exit_code == 1
         assert "Cache operation failed" in result.stdout
+
+
+class TestLogout:
+    """`login` could store credentials with no supported way to remove
+    them, which left `clear_credentials` implemented and unreachable."""
+
+    def test_logout_removes_stored_credentials(self):
+        with patch("dockerls.cli.commands.login.clear_credentials", return_value=True) as clear:
+            result = runner.invoke(app, ["logout"])
+
+        clear.assert_called_once()
+        assert result.exit_code == 0
+        assert "removed" in result.stdout
+
+    def test_logout_without_stored_credentials_exits_one(self):
+        with patch("dockerls.cli.commands.login.clear_credentials", return_value=False):
+            result = runner.invoke(app, ["logout"])
+
+        assert result.exit_code == 1
+        assert "No stored credentials" in result.stdout

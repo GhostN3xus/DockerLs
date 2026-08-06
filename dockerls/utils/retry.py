@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, TypeVar
-
 from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
-
-T = TypeVar("T")
 
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_BACKOFF_BASE = 2.0
@@ -33,8 +29,3 @@ def retry_policy(
         ),
         reraise=True,
     )
-
-
-async def with_retry(policy: AsyncRetrying, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
-    """Run `fn(*args, **kwargs)` under `policy`."""
-    return await policy(fn, *args, **kwargs)

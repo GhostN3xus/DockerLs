@@ -225,6 +225,7 @@ class RecommendImagesUseCase:
                     scan=scan,
                     security_score=score.value,
                     tier=tier.tier.value,
+                    production_ready=tier.production_ready,
                     remediation_score=rem_score.value,
                     is_eol=is_eol,
                     is_lts=is_lts,

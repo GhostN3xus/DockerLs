@@ -30,15 +30,6 @@ class TestRichScanObserver:
         obs.finished("node:22-alpine", True)
         assert obs._describe("node:20-alpine") == "Scanning node:20-alpine... [3/24]"
 
-    def test_counts_failures(self):
-        console, _ = _console()
-        obs = RichScanObserver(console)
-        obs.start(3)
-        obs.finished("a", True)
-        obs.finished("b", False)
-        obs.finished("c", False)
-        assert obs.failed == 2
-
     def test_disabled_observer_writes_nothing(self):
         console, buf = _console()
         with RichScanObserver(console, enabled=False) as obs:

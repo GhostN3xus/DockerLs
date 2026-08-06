@@ -40,12 +40,7 @@ class RichScanObserver:
         self._task_id: TaskID | None = None
         self._total = 0
         self._done = 0
-        self._failed = 0
         self._entered = False
-
-    @property
-    def failed(self) -> int:
-        return self._failed
 
     @property
     def progress(self) -> Progress | None:
@@ -113,10 +108,8 @@ class RichScanObserver:
             return
         self._progress.update(self._task_id, description=self._describe(image_reference))
 
-    def finished(self, image_reference: str, ok: bool) -> None:
+    def finished(self, image_reference: str, ok: bool) -> None:  # noqa: ARG002
         self._done += 1
-        if not ok:
-            self._failed += 1
         if self._progress is None or self._task_id is None:
             return
         self._progress.update(self._task_id, completed=self._done)

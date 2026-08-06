@@ -17,6 +17,7 @@ from dockerls.cli.dependencies import (
     resolve_tag_limit,
 )
 from dockerls.cli.progress import RichScanObserver
+from dockerls.domain.value_objects.security_tier import SecurityTier, Tier
 from dockerls.infrastructure.evidence import slugify_reference
 
 if TYPE_CHECKING:
@@ -305,25 +306,23 @@ def _shared_scan_note(analysis: ImageAnalysis, path: str) -> str:
     return "" if Path(path).name.startswith(own_prefix) else "  (shared digest)"
 
 
-# Tier meanings that the reader must act on. Tier C never reaches the table
-# (it fails the baseline and the alternatives filter), but Tier B can, and
-# the README calling it "conditional" is no use to someone reading a
-# terminal.
-_TIER_WARNINGS = {
-    "B": "conditional -- requires human review before production use",
-    "C": "not production ready",
-}
-
-
 def _print_tier_warnings(analyses: list[ImageAnalysis]) -> None:
-    flagged = [a for a in analyses if a.tier in _TIER_WARNINGS]
+    """Surface tiers that oblige the reader to act.
+
+    The advice comes from `SecurityTier`, so the terminal states the
+    domain's rule rather than a copy of it that can drift.
+    """
+    flagged = [
+        (a, SecurityTier.ADVICE.get(Tier(a.tier), ""))
+        for a in analyses
+        if not a.production_ready or a.tier in (Tier.B, Tier.C)
+    ]
+    flagged = [(a, advice) for a, advice in flagged if advice]
     if not flagged:
         return
     console.print("\n[bold yellow]! Requires review[/bold yellow]")
-    for a in flagged:
-        console.print(
-            f"  {a.image.full_reference}  [dim]Tier {a.tier}: {_TIER_WARNINGS[a.tier]}[/dim]"
-        )
+    for a, advice in flagged:
+        console.print(f"  {a.image.full_reference}  [dim]Tier {a.tier}: {advice}[/dim]")
 
 
 def _print_divergences(analyses: list[ImageAnalysis]) -> None:

@@ -206,5 +206,6 @@ async def build_compare_use_case() -> CompareImagesUseCase:
 
 
 async def build_search_use_case() -> SearchImagesUseCase:
-    repo = await build_repository()
-    return SearchImagesUseCase(repository=repo)
+    """`search` goes through its use case like every other command, so the
+    CLI never reaches past the application layer into a repository."""
+    return SearchImagesUseCase(repository=await build_repository())
