@@ -16,10 +16,15 @@ EXIT_DEGRADED = 1
 # Each probe must be an endpoint the tool actually depends on *and* one that
 # answers 2xx when healthy. `https://hub.docker.com/v2/` was neither: it
 # returns 404 by design, so every single run reported the Hub as degraded.
+# The list tracks the real dependencies -- the image catalogues that feed
+# the scan pipeline and the threat-intel feeds that weight the score.
 ENDPOINTS = {
     "Docker Hub API": "https://hub.docker.com/v2/repositories/library/node/",
+    "Chainguard (cgr.dev)": "https://cgr.dev/token?scope=repository:chainguard/node:pull&service=cgr.dev",
+    "Distroless (gcr.io)": "https://gcr.io/v2/distroless/base/tags/list",
     "endoflife.date": "https://endoflife.date/api/python.json",
-    "NVD API": "https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=1",
+    "CISA KEV": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+    "EPSS (FIRST)": "https://api.first.org/data/v1/epss?cve=CVE-2021-44228",
 }
 
 

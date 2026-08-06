@@ -470,7 +470,6 @@ dockerls/
     dockerhub/       # Docker Hub API client
     trivy/           # Trivy scanner integration
     grype/           # Grype scanner integration (fallback)
-    nvd/             # NVD API client (rate-limited CVE lookups)
     endoflife/       # endoflife.date checker
   cache/             # SQLite cache implementation
   exporters/         # JSON, CSV, HTML, Markdown exporters
@@ -494,7 +493,6 @@ then built-in defaults.
 |----------------------------------|-------------------------------------------|
 | DOCKERHUB_USERNAME               | Docker Hub username                       |
 | DOCKERHUB_TOKEN                  | Docker Hub access token                   |
-| NVD_API_KEY                      | Reserved. The NVD client is implemented but not yet wired into any command, so this currently has no effect. |
 | XDG_CACHE_HOME                   | Override cache directory                  |
 | XDG_CONFIG_HOME                  | Override config file directory            |
 | DOCKERLS_DISABLE_THREAT_INTEL    | Disable CISA KEV / EPSS lookups           |
@@ -604,7 +602,7 @@ GitHub Actions workflows included:
 DockerLs operates as a read-only advisory tool. It:
 - Reads from Docker Hub API (public data)
 - Executes Trivy/Grype as local subprocesses
-- Queries NVD and endoflife.date APIs
+- Queries endoflife.date, CISA KEV and EPSS APIs
 - Caches results locally in SQLite
 
 It does not:

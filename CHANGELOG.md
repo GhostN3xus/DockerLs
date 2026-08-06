@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (audit of claims vs. code)
 
+- **No CI had ever run on this repository.** All four workflows triggered
+  on `pull_request: branches: [main]`, and there is no `main` branch -- the
+  default is `claude/docker-secure-finder-q7ikdh`. Lint, mypy and the test
+  matrix had never executed on a single commit or pull request, so every
+  quality claim rested on local runs alone. The branch filter is removed
+  from `pull_request` (fires on any base, and survives the default branch
+  being renamed), `push` ignores dependabot branches, and a concurrency
+  group collapses the duplicate push/PR runs.
+- **The NVD integration was removed rather than advertised.** `NVDClient`
+  was only ever instantiated in tests and nothing under `dockerls/`
+  imported it, so `NVD_API_KEY` never had any effect. Its one real signal
+  -- known-exploited status -- is already provided by `ThreatIntelClient`
+  (CISA KEV + EPSS), which *is* wired in and tested; wiring NVD too would
+  have added a redundant network dependency to make a documentation line
+  true. The module, its setting and its README entries are gone. It
+  remains in git history if it is wanted later.
+- **`health` probed a service the tool no longer uses and missed the ones
+  it does.** It now checks Docker Hub, Chainguard, Distroless,
+  endoflife.date, CISA KEV and EPSS -- the catalogues that feed the scan
+  pipeline and the feeds that weight the score.
+
 - **Credential redaction leaked in 10 of 17 realistic log formats.** The
   key/value pattern required the key name to be followed *immediately* by
   `=` or `:`, and every JSON-shaped line has a quote in between

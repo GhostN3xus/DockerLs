@@ -64,10 +64,15 @@ class TestHealthDetectsOutages:
         assert "degraded" in result.stdout
 
     def test_total_network_outage_is_reported_for_every_service(self, monkeypatch):
-        result = _run_health(
-            monkeypatch,
-            _responder({"hub.docker.com": "error", "endoflife.date": "error", "nist.gov": "error"}),
+        all_hosts = (
+            "hub.docker.com",
+            "cgr.dev",
+            "gcr.io",
+            "endoflife.date",
+            "cisa.gov",
+            "first.org",
         )
+        result = _run_health(monkeypatch, _responder(dict.fromkeys(all_hosts, "error")))
 
         assert result.exit_code == health_cmd.EXIT_DEGRADED
         assert result.stdout.count("Unreachable") == len(health_cmd.ENDPOINTS)
@@ -79,7 +84,7 @@ class TestHealthDetectsOutages:
         assert "HTTP 503" in result.stdout
 
     def test_one_outage_does_not_mask_the_healthy_ones(self, monkeypatch):
-        result = _run_health(monkeypatch, _responder({"nist.gov": "error"}))
+        result = _run_health(monkeypatch, _responder({"cisa.gov": "error"}))
 
         assert "OK (200)" in result.stdout
         assert "Unreachable" in result.stdout

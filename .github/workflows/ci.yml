@@ -1,10 +1,20 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
+  # No branch filter on pull_request: this repository's default branch is
+  # not called "main", so `branches: [main]` meant no workflow had ever run
+  # on any commit or pull request. Firing on every PR regardless of base
+  # keeps working if the default branch is renamed again.
   pull_request:
-    branches: [main]
+  push:
+    branches-ignore:
+      - "dependabot/**"
+
+# A PR branch triggers both `push` and `pull_request`; this collapses them
+# into one run and cancels superseded runs on new pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
