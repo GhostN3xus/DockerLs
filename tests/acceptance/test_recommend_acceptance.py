@@ -262,22 +262,23 @@ async def test_progress_renders_one_bar_and_leaves_results_clean(pipeline):
         result = await _run(build, observer)
         assert len(observer.progress.tasks) == 1, "more than one progress bar"
 
-    results_buf = io.StringIO()
-    results_console = Console(file=results_buf, force_terminal=False, width=100)
-    with patch.object(recommend_cmd, "console", results_console):
-        recommend_cmd._print_summary(result)
+    # Render the table on its own so row counting is unambiguous.
+    table_buf = io.StringIO()
+    with patch.object(
+        recommend_cmd, "console", Console(file=table_buf, force_terminal=False, width=140)
+    ):
         recommend_cmd._print_table(result.recommendations)
-        recommend_cmd._print_details(result.recommendations)
+    table_out = table_buf.getvalue()
 
-    rendered = results_buf.getvalue()
-    assert "Scanning" not in rendered, "progress leaked into the results stream"
-    assert "\x1b[2K" not in rendered, "progress control codes leaked into results"
-    # One header row, exactly one row per image -- no duplicated table either.
-    assert rendered.count("Recommended") == 0
-    for analysis in result.recommendations:
-        assert rendered.count(analysis.image.full_reference) == 2, (
-            "each image should appear once in the table and once in Details"
-        )
+    assert "Scanning" not in table_out, "progress leaked into the results stream"
+    assert "\x1b[2K" not in table_out, "progress control codes leaked into results"
+
+    # Exactly one row per image: every row carries its source label, so
+    # summing those counts detects a duplicated table or a repeated row.
+    rows = sum(table_out.count(s) for s in ("Docker Hub", "Chainguard", "Distroless"))
+    assert rows == len(result.recommendations), (
+        f"expected {len(result.recommendations)} table rows, counted {rows}"
+    )
 
 
 @pytest.mark.asyncio

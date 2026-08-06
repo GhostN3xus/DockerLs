@@ -338,40 +338,56 @@ dockerls version
 Each image receives a security score from 0 to 100:
 
 ```
-score = 100
-score -= critical_vulns * 20
-score -= high_vulns * 5
-score -= medium_vulns * 1
-score -= image_age_days / 365
+score = 96 - penalties + bonuses      # clamped to [0, 100]
 ```
 
-Bonuses:
+Measured vulnerabilities drive the score. Penalties:
+
+| Condition                                        | Penalty       |
+|--------------------------------------------------|---------------|
+| CRITICAL vulnerability                            | -20 each     |
+| HIGH vulnerability                                | -5 each      |
+| MEDIUM vulnerability                              | -1 each      |
+| EOL                                               | -20          |
+| Vulnerability with a confirmed exploit (CISA KEV) | -10 per vuln |
+| Vulnerability with EPSS >= 0.5 (high predicted exploitation probability) | -5 per vuln |
+| Image age                                         | -age_days/365 |
+
+Qualitative signals act as tie-breakers. They total **4.0** -- deliberately
+less than a single HIGH finding, so no combination of them can lift an
+image with an extra HIGH or CRITICAL above a cleaner one:
 
 | Condition                                          | Bonus |
 |-----------------------------------------------------|-------|
-| Official image                                       | +5    |
-| Zero vulnerabilities                                 | +5    |
-| Minimal base (Alpine, Distroless, or a hardened vendor image -- Chainguard, Wolfi, Bitnami) | +3 |
-| Updated in last 30 days                              | +2    |
-| Digitally signed                                     | +2    |
-| LTS version                                          | +2    |
+| Official image                                       | +1    |
+| Minimal base (Alpine, Distroless, or a hardened vendor image -- Chainguard, Wolfi, Bitnami) | +1 |
+| Digitally signed                                     | +1    |
+| LTS version                                          | +0.5  |
+| Updated in last 30 days                              | +0.5  |
 
 The minimal-base bonus is applied once even if an image matches more than
-one signal (e.g. an Alpine-based Chainguard image does not get +6).
+one signal (e.g. an Alpine-based Chainguard image does not get +2).
 
-Penalties:
+They *can* outweigh a MEDIUM or two, which is intended: a signed official
+distroless image with two mediums is a defensible pick over an unremarkable
+image with none.
 
-| Condition                                    | Penalty        |
-|------------------------------------------------|----------------|
-| EOL                                             | -20            |
-| Vulnerability with a confirmed exploit (CISA KEV)| -10 per vuln  |
-| Vulnerability with EPSS >= 0.5 (high predicted exploitation probability) | -5 per vuln |
+Scoring starts at 96 rather than 100 so a fully-decorated clean image lands
+exactly on 100 without being clamped. This matters: with bonuses totalling
++19 against a base of 100, anything reasonably decorated hit the ceiling and
+a clean image, a 1-HIGH image, a 2-HIGH image and a 5-MEDIUM image all
+reported exactly `100.0`. There is no separate "zero vulnerabilities" bonus
+-- zero findings already means zero penalty, and rewarding it again
+double-counted the same fact.
+
+Age only moves the score when the source actually reported a publish date.
+Registries that list tag names only (Chainguard, most OCI catalogues) are
+neither charged the age penalty nor given the recency bonus, so they are not
+punished for metadata the registry does not publish.
 
 CISA KEV and EPSS lookups are best-effort: if those feeds are unreachable,
 DockerLs scores without that signal rather than failing the scan. Both are
 only queried when the scan has CRITICAL or HIGH findings to check.
-
-Score is clamped to the range [0, 100].
 
 ---
 

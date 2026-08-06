@@ -11,6 +11,16 @@ Follow-up to the `recommend` overhaul, driven by a real run of
 `dockerls recommend node`.
 
 ### Fixed
+- **The security score could not tell images apart.** Bonuses totalled +19
+  against a base of 100, so anything reasonably decorated hit the clamp: a
+  clean image, a 1-HIGH image, a 2-HIGH image and a 5-MEDIUM image all
+  reported exactly `100.0` -- the number claimed a vulnerable image was as
+  safe as a clean one. Scoring now starts at 96 with qualitative bonuses
+  capped at 4.0, strictly below a single HIGH penalty, so no combination of
+  "official + minimal + signed + LTS + recent" can lift an image with an
+  extra HIGH or CRITICAL above a cleaner one. Bonuses can still outweigh a
+  MEDIUM or two, which is intended. The redundant "zero vulnerabilities"
+  bonus is gone -- zero findings already means zero penalty.
 - **Cross-validation was pathologically slow** (~4m12s for five images).
   Two causes, both addressed: Grype re-checks its vulnerability DB on every
   invocation, so the batch now runs `grype db update` once and scans with
