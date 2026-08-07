@@ -1,64 +1,67 @@
-# Security Policy
+# Política de Segurança
 
-## Supported Versions
+## Versões suportadas
 
-| Version | Supported |
-|---------|-----------|
-| 1.x     | Yes       |
+| Versão | Suportada |
+|--------|-----------|
+| 1.x    | Sim       |
 
-## Reporting a Vulnerability
+## Reportando uma vulnerabilidade
 
-If you discover a security vulnerability in DockerLs, please report it responsibly.
+Se você descobrir uma vulnerabilidade de segurança no DockerLs, por favor reporte
+de forma responsável.
 
-**Do not open a public issue.**
+**Não abra uma issue pública.**
 
-Instead, email: security@example.com (replace with your actual contact)
+Em vez disso, envie um e-mail para: security@example.com (substitua pelo seu
+contato real)
 
-Or use GitHub's private vulnerability reporting feature on this repository.
+Ou use o recurso de reporte privado de vulnerabilidades do GitHub neste
+repositório.
 
-### What to include
+### O que incluir
 
-- Description of the vulnerability
-- Steps to reproduce
-- Impact assessment
-- Suggested fix (if any)
+- Descrição da vulnerabilidade
+- Passos para reproduzir
+- Avaliação de impacto
+- Correção sugerida (se houver)
 
-### Response timeline
+### Prazos de resposta
 
-- Acknowledgment: within 48 hours
-- Initial assessment: within 1 week
-- Fix and disclosure: coordinated with reporter
+- Confirmação de recebimento: até 48 horas
+- Avaliação inicial: até 1 semana
+- Correção e divulgação: coordenadas com quem reportou
 
-## Security Design
+## Design de segurança
 
-DockerLs follows these security principles:
+O DockerLs segue estes princípios de segurança:
 
-### Input validation
-- All image names are validated against a strict regex pattern
-- Path traversal attacks are blocked
-- Command injection is prevented (no shell=True, no string interpolation in commands)
+### Validação de entrada
+- Todos os nomes de imagem são validados contra um padrão de regex estrito
+- Ataques de path traversal são bloqueados
+- Injeção de comando é impedida (sem `shell=True`, sem interpolação de strings nos comandos)
 
-### Credential handling
-- Credentials are stored in the system keyring (never in plaintext files)
-- Environment variables are supported as an alternative
-- All credentials are masked in log output
-- Bearer tokens and passwords are filtered from structured logging
+### Tratamento de credenciais
+- As credenciais são armazenadas no keyring do sistema (nunca em arquivos de texto puro)
+- Variáveis de ambiente são suportadas como alternativa
+- Todas as credenciais são mascaradas na saída de log
+- Bearer tokens e senhas são filtrados do logging estruturado
 
-### Network security
-- All HTTP requests use HTTPS
-- Timeouts are enforced on all external calls
-- Retry logic uses exponential backoff to avoid overwhelming services
-- Rate limiting is respected
+### Segurança de rede
+- Todas as requisições HTTP usam HTTPS
+- Timeouts são aplicados em todas as chamadas externas
+- A lógica de retry usa backoff exponencial para não sobrecarregar os serviços
+- Rate limiting é respeitado
 
-### Supply chain
-- Dependencies are pinned in pyproject.toml
-- Dependabot monitors for vulnerable dependencies
-- pip-audit runs in CI
-- Docker image uses multi-stage builds with specific version tags
+### Cadeia de suprimentos
+- As dependências são fixadas no `pyproject.toml`
+- O Dependabot monitora dependências vulneráveis
+- O `pip-audit` roda no CI
+- A imagem Docker usa build multi-stage com tags de versão específicas
 
-### Container security
-- Non-root user in Docker image
-- Read-only filesystem support
-- All capabilities dropped
-- No new privileges flag
-- Healthcheck configured
+### Segurança de contêiner
+- Usuário não-root na imagem Docker
+- Suporte a sistema de arquivos somente leitura
+- Todas as capabilities removidas
+- Flag de no-new-privileges
+- Healthcheck configurado

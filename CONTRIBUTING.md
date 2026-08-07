@@ -1,17 +1,17 @@
-# Contributing to DockerLs
+# Contribuindo com o DockerLs
 
-## Getting started
+## Primeiros passos
 
-1. Fork the repository
-2. Clone your fork
-3. Create a feature branch: `git checkout -b feature/my-feature`
-4. Install dev dependencies: `make dev`
-5. Make your changes
-6. Run checks: `make audit`
-7. Commit and push
-8. Open a pull request
+1. Faça um fork do repositório
+2. Clone o seu fork
+3. Crie um branch de funcionalidade: `git checkout -b feature/minha-funcionalidade`
+4. Instale as dependências de desenvolvimento: `make dev`
+5. Faça as suas alterações
+6. Rode as verificações: `make audit`
+7. Faça commit e push
+8. Abra um pull request
 
-## Development setup
+## Preparando o ambiente de desenvolvimento
 
 ```bash
 git clone https://github.com/GhostN3xus/DockerLs.git
@@ -21,27 +21,27 @@ source .venv/bin/activate
 make dev
 ```
 
-## Code standards
+## Padrões de código
 
-- Follow existing code style
-- Run `make lint` before committing
-- Run `make test` to verify all tests pass
-- Add tests for new features
-- Keep functions focused and small
+- Siga o estilo de código já existente
+- Rode `make lint` antes de fazer commit
+- Rode `make test` para verificar que todos os testes passam
+- Adicione testes para funcionalidades novas
+- Mantenha as funções pequenas e com um único propósito
 
-## Pull request process
+## Processo de pull request
 
-1. Update documentation if needed
-2. Add tests for new functionality
-3. Ensure CI passes
-4. One approval required for merge
+1. Atualize a documentação, se necessário
+2. Adicione testes para o comportamento novo
+3. Garanta que o CI está passando
+4. É necessária uma aprovação para o merge
 
-## Reporting issues
+## Reportando problemas
 
-Use GitHub Issues. Include:
+Use as GitHub Issues. Inclua:
 
-- DockerLs version
-- Python version
-- Operating system
-- Steps to reproduce
-- Expected vs actual behavior
+- Versão do DockerLs
+- Versão do Python
+- Sistema operacional
+- Passos para reproduzir
+- Comportamento esperado versus comportamento observado

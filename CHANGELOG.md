@@ -1,336 +1,358 @@
 # Changelog
 
-All notable changes to DockerLs will be documented in this file.
+Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Não lançado]
 
-### Added
+### Adicionado
 
-- **A structural guard against the bug class that kept recurring**
-  (`tests/unit/test_no_dead_configuration.py`). Five times this codebase
-  shipped something declared, documented and never reached at runtime, and
-  twice the fix itself was partial. Catching that by reading code has now
-  failed repeatedly, so it is a test: every `Settings` field must be read
-  outside `settings.py`, every public symbol must be reachable from
-  somewhere in the package, and no module may be orphaned. It found eight
-  more on its first run.
+- **Uma proteção estrutural contra a classe de bug que continuava
+  reaparecendo** (`tests/unit/test_no_dead_configuration.py`). Cinco vezes esta
+  base de código entregou algo declarado, documentado e nunca alcançado em
+  tempo de execução, e duas vezes a própria correção foi parcial. Pegar isso
+  lendo o código já falhou repetidamente, então virou teste: todo campo de
+  `Settings` precisa ser lido fora de `settings.py`, todo símbolo público
+  precisa ser alcançável a partir de algum ponto do pacote, e nenhum módulo
+  pode ficar órfão. Ele encontrou mais oito casos já na primeira execução.
 
-### Fixed (audit of claims vs. code)
+### Corrigido (auditoria: o que é afirmado versus o que o código faz)
 
-- **`logout` did not exist**, so `login` could store credentials with no
-  supported way to remove them and `clear_credentials` was unreachable.
-- **`search` reached past the application layer** into a repository
-  directly, orphaning `SearchImagesUseCase`. It goes through its use case
-  like every other command now.
-- **`SecurityTier.production_ready` is computed by the domain and carried
-  on `ImageAnalysis`**, so the CLI and `--format json` state the domain's
-  verdict instead of re-deriving the rule from the tier letter.
-- Removed five symbols nothing reached: `build_search_use_case` (dead after
-  `search` bypassed it), `RichScanObserver.failed`, `DockerImage.is_slim`,
-  `ScanResult.is_usable` (superseded by `is_verified`), `EvidenceStore.root`
-  and `with_retry` -- the last one added in this same branch and never used.
+- **`logout` não existia**, então `login` conseguia armazenar credenciais sem
+  nenhuma forma suportada de removê-las, e `clear_credentials` era inalcançável.
+- **`search` passava por cima da camada de aplicação** e falava direto com um
+  repositório, deixando `SearchImagesUseCase` órfão. Agora ele passa pelo seu
+  caso de uso como todos os outros comandos.
+- **`SecurityTier.production_ready` é calculado pelo domínio e carregado em
+  `ImageAnalysis`**, então a CLI e o `--format json` afirmam o veredito do
+  domínio em vez de re-derivar a regra a partir da letra do tier.
+- Removidos cinco símbolos que nada alcançava: `build_search_use_case` (morto
+  depois que `search` passou a ignorá-lo), `RichScanObserver.failed`,
+  `DockerImage.is_slim`, `ScanResult.is_usable` (substituído por
+  `is_verified`), `EvidenceStore.root` e `with_retry` — este último adicionado
+  neste mesmo branch e nunca usado.
 
-- **`export` repeated the shadowed-settings bug** that was fixed only in
-  `recommend`: its `--workers` carried a hard-coded default of 10 and it
-  never passed a tag limit at all, so `DOCKERLS_WORKERS` and
-  `DOCKERLS_MAX_TAGS` had no effect there. It also wrote to disk with no
-  error handling, so an unwritable destination produced a traceback. It now
-  delegates both to configuration, creates missing parent directories, and
-  reports a write failure as a message with exit 1.
-- **`cache clear` / `cache cleanup` had no tests and no error handling.** A
-  corrupt cache database crashed the very command a user reaches for to fix
-  it. Storage errors are now reported with exit 1.
+- **`export` repetia o bug de configuração sombreada** que havia sido corrigido
+  apenas em `recommend`: seu `--workers` carregava um default fixo de 10 e ele
+  nunca passava limite de tags, então `DOCKERLS_WORKERS` e `DOCKERLS_MAX_TAGS`
+  não tinham efeito nenhum ali. Ele também escrevia em disco sem tratamento de
+  erro, então um destino não gravável produzia um traceback. Agora delega os
+  dois à configuração, cria diretórios pai ausentes e reporta falha de escrita
+  como mensagem com saída 1.
+- **`cache clear` / `cache cleanup` não tinham testes nem tratamento de erro.**
+  Um banco de cache corrompido derrubava justamente o comando que o usuário
+  procura para consertá-lo. Erros de armazenamento agora são reportados com
+  saída 1.
 
-- **A sustained Docker Hub rate limit crashed the command.** The `@retry`
-  decorator used tenacity's default, so exhausting retries raised
-  `tenacity.RetryError` -- which is *not* an `httpx.HTTPError`, so the
-  `except httpx.HTTPError` handlers in `search_tags` and `tag_exists` never
-  caught it. The retry policy now reraises the original error, and those
-  handlers degrade to partial results as they were written to. The previous
-  test asserted `RetryError` and so codified the bug.
-- **The remaining three shadowed settings are wired.** `cache_ttl_seconds`,
-  `retry_max_attempts` and `retry_backoff_base` were still read by nothing:
-  the TTL was hard-coded `86400` and the retry policy lived in a decorator
-  evaluated once at import, where no configuration could ever reach it.
-  The policy is now built per call from settings. Adds
-  `tag_cache_ttl_seconds`, which was previously a hard-coded 6 hours.
-- **`mypy strict` was nominal.** `pyproject.toml` declared `strict = true`
-  while tolerating 20 errors, 13 of them "cannot subclass BaseModel" from
-  the missing pydantic plugin. With `plugins = ["pydantic.mypy"]` and
-  `types-PyYAML`, the codebase now type-checks clean: 20 errors to 0. CI
-  runs `python -m mypy` so the plugin resolves against the same interpreter.
+- **Um rate limit sustentado do Docker Hub derrubava o comando.** O decorador
+  `@retry` usava o default do tenacity, então esgotar as tentativas levantava
+  `tenacity.RetryError` — que *não* é um `httpx.HTTPError`, de modo que os
+  blocos `except httpx.HTTPError` em `search_tags` e `tag_exists` nunca o
+  capturavam. A política de retry agora relança o erro original, e esses
+  handlers degradam para resultados parciais como foram escritos para fazer. O
+  teste anterior verificava `RetryError` e portanto codificava o bug.
+- **As três configurações sombreadas restantes estão conectadas.**
+  `cache_ttl_seconds`, `retry_max_attempts` e `retry_backoff_base` ainda não
+  eram lidos por ninguém: o TTL era um `86400` fixo e a política de retry vivia
+  em um decorador avaliado uma única vez na importação, onde nenhuma
+  configuração jamais chegaria. A política agora é construída por chamada a
+  partir das settings. Adiciona `tag_cache_ttl_seconds`, que antes era um valor
+  fixo de 6 horas.
+- **O `mypy strict` era nominal.** O `pyproject.toml` declarava `strict = true`
+  enquanto tolerava 20 erros, 13 deles do tipo "cannot subclass BaseModel",
+  vindos da ausência do plugin do pydantic. Com `plugins = ["pydantic.mypy"]` e
+  `types-PyYAML`, a base de código passa na checagem de tipos sem erros: de 20
+  para 0. O CI roda `python -m mypy` para que o plugin seja resolvido no mesmo
+  interpretador.
 
-- **No CI had ever run on this repository.** All four workflows triggered
-  on `pull_request: branches: [main]`, and there is no `main` branch -- the
-  default is `claude/docker-secure-finder-q7ikdh`. Lint, mypy and the test
-  matrix had never executed on a single commit or pull request, so every
-  quality claim rested on local runs alone. The branch filter is removed
-  from `pull_request` (fires on any base, and survives the default branch
-  being renamed), `push` ignores dependabot branches, and a concurrency
-  group collapses the duplicate push/PR runs.
-- **The NVD integration was removed rather than advertised.** `NVDClient`
-  was only ever instantiated in tests and nothing under `dockerls/`
-  imported it, so `NVD_API_KEY` never had any effect. Its one real signal
-  -- known-exploited status -- is already provided by `ThreatIntelClient`
-  (CISA KEV + EPSS), which *is* wired in and tested; wiring NVD too would
-  have added a redundant network dependency to make a documentation line
-  true. The module, its setting and its README entries are gone. It
-  remains in git history if it is wanted later.
-- **`health` probed a service the tool no longer uses and missed the ones
-  it does.** It now checks Docker Hub, Chainguard, Distroless,
-  endoflife.date, CISA KEV and EPSS -- the catalogues that feed the scan
-  pipeline and the feeds that weight the score.
+- **Nenhum CI jamais havia rodado neste repositório.** Todos os quatro
+  workflows disparavam em `pull_request: branches: [main]`, e não existe branch
+  `main` — o default é `claude/docker-secure-finder-q7ikdh`. Lint, mypy e a
+  matriz de testes nunca haviam executado em um único commit ou pull request,
+  então toda afirmação de qualidade se apoiava apenas em execuções locais. O
+  filtro de branch foi removido do `pull_request` (dispara em qualquer base e
+  sobrevive à renomeação do branch default), `push` ignora branches do
+  dependabot, e um grupo de concorrência colapsa as execuções duplicadas de
+  push/PR.
+- **A integração com o NVD foi removida em vez de anunciada.** `NVDClient` só
+  era instanciado em testes e nada sob `dockerls/` o importava, então
+  `NVD_API_KEY` nunca teve efeito algum. Seu único sinal real — status de
+  exploração conhecida — já é fornecido pelo `ThreatIntelClient` (CISA KEV +
+  EPSS), que *está* conectado e testado; conectar o NVD também teria adicionado
+  uma dependência de rede redundante só para tornar verdadeira uma linha de
+  documentação. O módulo, sua configuração e suas entradas no README foram
+  removidos. Ele continua no histórico do git caso venha a ser desejado.
+- **`health` sondava um serviço que a ferramenta não usa mais e deixava de fora
+  os que ela usa.** Agora verifica Docker Hub, Chainguard, Distroless,
+  endoflife.date, CISA KEV e EPSS — os catálogos que alimentam o pipeline de
+  scan e os feeds que ponderam a pontuação.
 
-- **Credential redaction leaked in 10 of 17 realistic log formats.** The
-  key/value pattern required the key name to be followed *immediately* by
-  `=` or `:`, and every JSON-shaped line has a quote in between
-  (`"token": "..."`) -- so the formats an HTTP client is most likely to
-  produce passed straight through. Redaction now covers JSON (nested,
-  compact, single-quoted, multiline), TOML, querystrings, multipart bodies,
-  URL userinfo, `curl -u`, `Settings(...)` reprs and auth schemes, plus
-  self-identifying credential formats (Docker PAT, GitHub token, JWT, AWS
-  key, Slack token) that appear with no key at all. 60 adversarial cases in
-  `test_secret_masking.py`, each asserting the secret is *absent* rather
-  than that some masked form is present.
-- **`health` reported the Docker Hub API as degraded on every healthy
-  run** -- it probed `https://hub.docker.com/v2/`, which answers 404 by
-  design. An alarm that is always on tells you nothing. It also always
-  exited 0, so it could not gate anything; it now exits 1 when any service
-  is unreachable or returns an error status.
-- **Age penalty was uncapped**, growing a point per year, so a 10-year-old
-  image lost as much as two HIGH findings on staleness alone. Capped at 3
-  points, where it can still order equally-clean images without competing
-  with measured severity.
+- **A ocultação de credenciais vazava em 10 de 17 formatos realistas de log.**
+  O padrão de chave/valor exigia que o nome da chave fosse seguido
+  *imediatamente* por `=` ou `:`, e toda linha em formato JSON tem uma aspa no
+  meio (`"token": "..."`) — ou seja, os formatos que um cliente HTTP mais
+  provavelmente produz passavam direto. A ocultação agora cobre JSON (aninhado,
+  compacto, com aspas simples, multilinha), TOML, querystrings, corpos
+  multipart, userinfo em URL, `curl -u`, reprs de `Settings(...)` e esquemas de
+  autenticação, além de formatos de credencial autoidentificáveis (PAT do
+  Docker, token do GitHub, JWT, chave AWS, token do Slack) que aparecem sem
+  chave alguma. São 60 casos adversariais em `test_secret_masking.py`, cada um
+  verificando que o segredo está *ausente*, e não que alguma forma mascarada
+  está presente.
+- **`health` reportava a API do Docker Hub como degradada em toda execução
+  saudável** — ela sondava `https://hub.docker.com/v2/`, que responde 404 por
+  design. Um alarme sempre ligado não informa nada. Ela também sempre saía com
+  0, então não podia servir de gate para nada; agora sai com 1 quando qualquer
+  serviço está inacessível ou retorna status de erro.
+- **A penalidade por idade não tinha teto**, crescendo um ponto por ano, então
+  uma imagem de 10 anos perdia tanto quanto duas descobertas HIGH só por estar
+  desatualizada. Limitada a 3 pontos, onde ainda consegue ordenar imagens
+  igualmente limpas sem competir com severidade medida.
 
-An audit of every README/CHANGELOG claim against the code that implements
-it, checking each is reached on the real execution path. Findings:
+Uma auditoria de cada afirmação do README/CHANGELOG contra o código que a
+implementa, verificando que cada uma é alcançada no caminho real de execução.
+Achados:
 
-- **Documented configuration did nothing.** `Settings` declared
-  `max_tags`, `workers`, `max_critical`, `max_high` and `max_medium`, and
-  the README documented `DOCKERLS_<SETTING>` and `config.toml` as the way
-  to change them -- but the CLI carried hard-coded `typer.Option` defaults
-  that shadowed `Settings` entirely. The README's own example
-  (`DOCKERLS_MAX_TAGS=200`, `max_tags = 200` in config.toml) was a no-op.
-  Flags now default to `None` and fall back to the configured value; an
-  explicit flag still wins. Covered by `test_settings_are_wired.py`, which
-  fails 11 tests against the previous code.
-- **`validate_threshold` was never called.** `--max-critical -5` and
-  `--max-medium 999999` were accepted silently. Thresholds are now
-  validated, and an invalid one prints a message and exits 1 instead of
-  raising a traceback.
-- **`SecurityTier.production_ready` was never read** and "Tier B =
-  conditional" lived only in the README, so a Tier B row in the terminal
-  carried no indication it needs human review. The CLI now prints a
-  `Requires review` section naming each affected image.
-- **The NVD integration is not wired into any command** -- `NVDClient` is
-  only ever instantiated in tests, so `NVD_API_KEY` had no effect despite
-  the README advertising a rate-limit benefit. Documented as reserved
-  rather than removed; wiring it is separate work.
-- README's `--max-medium 10` example read as contradicting the documented
-  default of 5; it is an override and now says so.
+- **A configuração documentada não fazia nada.** `Settings` declarava
+  `max_tags`, `workers`, `max_critical`, `max_high` e `max_medium`, e o README
+  documentava `DOCKERLS_<SETTING>` e `config.toml` como a forma de alterá-los —
+  mas a CLI carregava defaults fixos de `typer.Option` que sombreavam `Settings`
+  por completo. O próprio exemplo do README (`DOCKERLS_MAX_TAGS=200`,
+  `max_tags = 200` no config.toml) era um no-op. As flags agora têm default
+  `None` e caem para o valor configurado; uma flag explícita continua vencendo.
+  Coberto por `test_settings_are_wired.py`, que falha em 11 testes contra o
+  código anterior.
+- **`validate_threshold` nunca era chamada.** `--max-critical -5` e
+  `--max-medium 999999` eram aceitos silenciosamente. Os limiares agora são
+  validados, e um valor inválido imprime uma mensagem e sai com 1 em vez de
+  levantar um traceback.
+- **`SecurityTier.production_ready` nunca era lido** e o "Tier B = condicional"
+  vivia apenas no README, então uma linha Tier B no terminal não trazia
+  nenhuma indicação de que precisa de revisão humana. A CLI agora imprime uma
+  seção `Requires review` nomeando cada imagem afetada.
+- **A integração com o NVD não está conectada a nenhum comando** — `NVDClient`
+  só é instanciado em testes, então `NVD_API_KEY` não tinha efeito apesar de o
+  README anunciar um benefício de rate limit. Documentado como reservado em vez
+  de removido; conectá-lo é um trabalho separado.
+- O exemplo `--max-medium 10` do README parecia contradizer o default
+  documentado de 5; ele é uma sobrescrita, e agora diz isso.
 
-Follow-up to the `recommend` overhaul, driven by a real run of
+Continuação da reformulação do `recommend`, motivada por uma execução real de
 `dockerls recommend node`.
 
-### Fixed
-- **The security score could not tell images apart.** Bonuses totalled +19
-  against a base of 100, so anything reasonably decorated hit the clamp: a
-  clean image, a 1-HIGH image, a 2-HIGH image and a 5-MEDIUM image all
-  reported exactly `100.0` -- the number claimed a vulnerable image was as
-  safe as a clean one. Scoring now starts at 96 with qualitative bonuses
-  capped at 4.0, strictly below a single HIGH penalty, so no combination of
-  "official + minimal + signed + LTS + recent" can lift an image with an
-  extra HIGH or CRITICAL above a cleaner one. Bonuses can still outweigh a
-  MEDIUM or two, which is intended. The redundant "zero vulnerabilities"
-  bonus is gone -- zero findings already means zero penalty.
-- **Cross-validation was pathologically slow** (~4m12s for five images).
-  Two causes, both addressed: Grype re-checks its vulnerability DB on every
-  invocation, so the batch now runs `grype db update` once and scans with
-  `GRYPE_DB_AUTO_UPDATE=false`; and the validations ran in a sequential
-  `for` loop despite being independent, so they now run concurrently under
-  a worker cap (`DOCKERLS_CROSS_VALIDATE_WORKERS`, default 5).
-- Images from registries that list tag names only were charged the maximum
-  age penalty and denied the recency bonus for metadata the registry simply
-  does not publish. Age now moves the score only when the source actually
-  reported a date.
+### Corrigido
+- **A pontuação de segurança não conseguia diferenciar imagens.** Os bônus
+  somavam +19 contra uma base de 100, então qualquer coisa razoavelmente
+  decorada batia no teto: uma imagem limpa, uma com 1 HIGH, uma com 2 HIGH e
+  uma com 5 MEDIUM reportavam exatamente `100.0` — o número afirmava que uma
+  imagem vulnerável era tão segura quanto uma limpa. A pontuação agora começa
+  em 96 com bônus qualitativos limitados a 4,0, estritamente abaixo da
+  penalidade de um único HIGH, de modo que nenhuma combinação de "oficial +
+  minimal + assinada + LTS + recente" consegue elevar uma imagem com um HIGH ou
+  CRITICAL a mais acima de uma mais limpa. Os bônus ainda podem superar um ou
+  dois MEDIUM, o que é intencional. O bônus redundante de "zero
+  vulnerabilidades" foi removido — zero descobertas já significa zero
+  penalidade.
+- **A validação cruzada estava patologicamente lenta** (~4m12s para cinco
+  imagens). Duas causas, ambas tratadas: o Grype revalida seu banco de
+  vulnerabilidades a cada invocação, então o lote agora roda `grype db update`
+  uma vez e escaneia com `GRYPE_DB_AUTO_UPDATE=false`; e as validações rodavam
+  em um `for` sequencial apesar de serem independentes, então agora rodam
+  concorrentemente sob um teto de workers
+  (`DOCKERLS_CROSS_VALIDATE_WORKERS`, default 5).
+- Imagens de registries que listam apenas nomes de tag eram cobradas com a
+  penalidade máxima de idade e ficavam sem o bônus de recência por causa de
+  metadados que o registry simplesmente não publica. A idade agora só move a
+  pontuação quando a fonte de fato reportou uma data.
 
-### Added
-- **Free hardened catalogues are searched alongside Docker Hub**:
-  Chainguard (`cgr.dev/chainguard/<image>`) and Distroless
-  (`gcr.io/distroless/<image>`). Their tags run through the same scan
-  pipeline, so a hardened image wins on measured vulnerabilities rather
-  than reputation. New `Source` column names each row's origin, and the run
-  summary lists which catalogues answered. `--no-hardened` opts out.
-- Registry listings are filtered to actual images: cosign `.sig`/`.att`/
-  `.sbom` artifacts (~1000 per Chainguard repo), single-arch aliases and
-  commit-pinned duplicates are dropped.
-- "No image found matching baseline" now prints the exact criteria that
-  were not met.
-- The `Details` block gives every image its own evidence paths, marking
-  `(shared digest)` where tags sharing a manifest were scanned once.
-- `AnalysisResult.sources_searched` and `AnalysisResult.baseline` expose
-  both facts to `--format json`.
-- Acceptance suite (`tests/acceptance/`) asserting the end-to-end budget
-  (<30s for five images), one progress display with no leakage into the
-  results stream, per-image evidence on disk, and that both hardened
-  sources are consulted.
+### Adicionado
+- **Catálogos endurecidos e gratuitos são pesquisados junto com o Docker Hub**:
+  Chainguard (`cgr.dev/chainguard/<imagem>`) e Distroless
+  (`gcr.io/distroless/<imagem>`). Suas tags passam pelo mesmo pipeline de scan,
+  então uma imagem endurecida vence por vulnerabilidades medidas e não por
+  reputação. Uma nova coluna `Source` nomeia a origem de cada linha, e o resumo
+  da execução lista quais catálogos responderam. `--no-hardened` desativa.
+- As listagens de registry são filtradas para imagens de verdade: artefatos
+  cosign `.sig`/`.att`/`.sbom` (~1000 por repositório do Chainguard), aliases
+  de arquitetura única e duplicatas fixadas em commit são descartados.
+- "No image found matching baseline" agora imprime os critérios exatos que não
+  foram atendidos.
+- O bloco `Details` dá a cada imagem seus próprios caminhos de evidência,
+  marcando `(shared digest)` onde tags que compartilham um manifesto foram
+  escaneadas uma única vez.
+- `AnalysisResult.sources_searched` e `AnalysisResult.baseline` expõem os dois
+  fatos ao `--format json`.
+- Suíte de aceitação (`tests/acceptance/`) verificando o orçamento
+  ponta-a-ponta (<30s para cinco imagens), uma única exibição de progresso sem
+  vazamento para o fluxo de resultados, evidência por imagem em disco, e que
+  ambas as fontes endurecidas são consultadas.
 
-### Changed
-- The progress display renders to **stderr**, results to **stdout**, so the
-  two streams cannot interleave and piping stdout keeps the spinner on the
-  terminal. The observer is single-use and rejects re-entry; a test asserts
-  the package contains exactly one Rich live display.
-- Tag verification generalised beyond Docker Hub: each tag is confirmed by
-  the registry that owns it. The table's `Hub` column is now `Tag`.
+### Alterado
+- A exibição de progresso é renderizada em **stderr**, os resultados em
+  **stdout**, de modo que os dois fluxos não podem se intercalar e redirecionar
+  o stdout mantém o spinner no terminal. O observer é de uso único e rejeita
+  reentrada; um teste verifica que o pacote contém exatamente uma exibição ao
+  vivo do Rich.
+- A verificação de tags foi generalizada para além do Docker Hub: cada tag é
+  confirmada pelo registry que a possui. A coluna `Hub` da tabela agora é `Tag`.
 
 
 
-`dockerls recommend` overhaul: clean terminal output, the root cause of the
-Trivy scan errors removed, and no image recommended without proof it was
-scanned and that its tag exists.
+Reformulação do `dockerls recommend`: saída de terminal limpa, causa raiz dos
+erros de scan do Trivy removida, e nenhuma imagem recomendada sem prova de que
+foi escaneada e de que sua tag existe.
 
-### Fixed
-- **Trivy cache lock contention (root cause of the scan errors).** Parallel
-  scans shared one `--cache-dir` and fought over Trivy's exclusive lock,
-  making the losers exit non-zero with `cache may be in use by another
-  process: timeout`. The DB is now downloaded once up front, then each
-  concurrent worker gets its own cache directory with the DB hard-linked in
-  (no multi-hundred-MB copies), torn down at the end of the run. Where
-  hard-linking is unavailable the pool degrades to a single shared slot,
-  which serializes scans rather than letting them collide.
-- Secret masking leaked credentials when an auth scheme was nested in a
-  key-value pair: in `auth: Bearer <token>` the key-value pattern consumed
-  only the word `Bearer`, leaving the token in the clear. Scheme patterns
-  now run first.
-- A cache hit is no longer taken as proof of a successful scan; a cached
-  analysis whose scan is not verified is discarded and rescanned.
+### Corrigido
+- **Contenção de lock no cache do Trivy (causa raiz dos erros de scan).** Scans
+  paralelos compartilhavam um único `--cache-dir` e disputavam o lock exclusivo
+  do Trivy, fazendo com que os perdedores saíssem com código diferente de zero
+  com `cache may be in use by another process: timeout`. O banco agora é baixado
+  uma vez no início, e então cada worker concorrente recebe seu próprio
+  diretório de cache com o banco vinculado por hardlink (sem cópias de centenas
+  de MB), desmontado ao fim da execução. Onde o hardlink não está disponível, o
+  pool degrada para um único slot compartilhado, o que serializa os scans em vez
+  de deixá-los colidir.
+- A ocultação de segredos vazava credenciais quando um esquema de autenticação
+  estava aninhado em um par chave-valor: em `auth: Bearer <token>` o padrão de
+  chave-valor consumia apenas a palavra `Bearer`, deixando o token exposto. Os
+  padrões de esquema agora rodam primeiro.
+- Um acerto de cache não é mais tomado como prova de um scan bem-sucedido; uma
+  análise em cache cujo scan não está verificado é descartada e reescaneada.
 
-### Added
-- **Verification gate.** `ScanResult.is_verified` requires a completed
-  (`OK`) scan with a timestamp. Anything else -- error, timeout, partial,
-  or a default-constructed placeholder -- is reported in a separate
-  `Unverified (technical error)` section with no score and no tier, and
-  `_assert_verified` raises `UnverifiedRecommendationError` if an unverified
-  image ever reaches the results.
-- **Cross-scanner validation.** The top candidates are re-scanned with the
-  secondary scanner; a material disagreement on CRITICAL/HIGH counts
-  replaces the numeric score with `!disputed` plus the discrepancy.
-- **Scan evidence.** Raw scanner JSON is written to `.dockerls/scans/`, with
-  a per-run manifest linking every displayed score to the output it came
-  from (`DOCKERLS_EVIDENCE_DIR`).
-- **Docker Hub links.** `build_dockerhub_url()` emits the correct form for
-  official (`/_/<repo>?tab=tags&name=<tag>`) and third-party
-  (`/r/<ns>/<repo>/tags?name=<tag>`) images, skipping non-Hub registries.
-  Tags are confirmed against the Hub API (TTL-cached to stay inside the
-  anonymous rate limit) and dropped if confirmed missing.
-- New flags: `--verbose`, `--no-progress`, `--no-cross-validate`,
-  `--no-hub-check`. New settings: `DOCKERLS_LOG_DIR`,
+### Adicionado
+- **Portão de verificação.** `ScanResult.is_verified` exige um scan concluído
+  (`OK`) com timestamp. Qualquer outra coisa — erro, timeout, parcial, ou um
+  placeholder construído por default — é reportada em uma seção separada
+  `Unverified (technical error)` sem pontuação e sem tier, e `_assert_verified`
+  levanta `UnverifiedRecommendationError` se uma imagem não verificada chegar
+  aos resultados.
+- **Validação cruzada entre scanners.** Os principais candidatos são
+  reescaneados com o scanner secundário; uma divergência material nas contagens
+  de CRITICAL/HIGH substitui a pontuação numérica por `!disputed` mais a
+  discrepância.
+- **Evidência de scan.** O JSON bruto do scanner é gravado em `.dockerls/scans/`,
+  com um manifesto por execução ligando cada pontuação exibida à saída de onde
+  ela veio (`DOCKERLS_EVIDENCE_DIR`).
+- **Links do Docker Hub.** `build_dockerhub_url()` emite a forma correta para
+  imagens oficiais (`/_/<repo>?tab=tags&name=<tag>`) e de terceiros
+  (`/r/<ns>/<repo>/tags?name=<tag>`), pulando registries fora do Hub. As tags
+  são confirmadas contra a API do Hub (com cache TTL para ficar dentro do limite
+  anônimo de requisições) e descartadas se confirmadamente ausentes.
+- Novas flags: `--verbose`, `--no-progress`, `--no-cross-validate`,
+  `--no-hub-check`. Novas configurações: `DOCKERLS_LOG_DIR`,
   `DOCKERLS_EVIDENCE_DIR`, `DOCKERLS_TRIVY_CACHE_DIR`,
   `DOCKERLS_CROSS_VALIDATE`, `DOCKERLS_VERIFY_HUB_TAGS`.
 
-### Changed
-- Logging is file-only by default (`logs/dockerls_<timestamp>.log`); the
-  loguru stderr sink is removed so nothing interleaves with the Rich
-  progress display. `--verbose` re-attaches it.
-- Scan progress renders as a single transient Rich spinner line
-  (`Scanning node:26.7-slim... [3/24]`), followed by a run summary
-  (`OK 12/24 analyzed | X 12 skipped (technical error)`) before the table.
-- The results table was narrowed to fit an 80-column terminal without
-  truncating image references: severity counts collapse into one `C/H/M`
-  cell, and full Hub URLs are listed below the table rather than in it.
-- Cache schema bumped to `v2` for the new verification metadata.
+### Alterado
+- O logging é somente para arquivo por default (`logs/dockerls_<timestamp>.log`);
+  o sink do loguru para stderr foi removido para que nada se intercale com a
+  exibição de progresso do Rich. `--verbose` o reativa.
+- O progresso do scan é renderizado como uma única linha transitória de spinner
+  do Rich (`Scanning node:26.7-slim... [3/24]`), seguida de um resumo da
+  execução (`OK 12/24 analyzed | X 12 skipped (technical error)`) antes da
+  tabela.
+- A tabela de resultados foi estreitada para caber em um terminal de 80 colunas
+  sem truncar referências de imagem: as contagens de severidade colapsam em uma
+  única célula `C/H/M`, e as URLs completas do Hub são listadas abaixo da tabela
+  em vez de dentro dela.
+- Esquema de cache elevado para `v2` por causa dos novos metadados de
+  verificação.
 
 ## [1.1.0]
 
-Production-readiness pass covering correctness fixes, functional
-improvements, new production features, and engineering hardening.
+Rodada de preparação para produção cobrindo correções de corretude, melhorias
+funcionais, novos recursos de produção e endurecimento de engenharia.
 
-### Fixed (blockers)
-- Scans that fail or time out are no longer treated as "clean" images.
-  A `ScanStatus` (OK/ERROR/TIMEOUT/PARTIAL) is tracked end-to-end and
-  `SecurityScore` refuses to score anything but OK/PARTIAL scans.
-- Docker Hub authentication is now actually used: `build_repository()`
-  loads keyring credentials and calls `authenticate()`, and `dockerls
-  login` validates credentials before storing them.
-- Tags sharing the same manifest digest are scanned once and share the
-  result instead of being rescanned per tag.
-- Trivy's vulnerability DB is refreshed once per run and individual scans
-  pass `--skip-db-update`.
-- The SQLite cache no longer blocks the event loop (`asyncio.to_thread`);
-  cache keys are schema-versioned and a stale/incompatible cached payload
-  is treated as a miss instead of crashing.
-- EOL detection now maps Docker Hub image names to the correct
-  endoflife.date product slugs and uses SemVer-aware version matching
-  instead of naive string prefixes.
+### Corrigido (bloqueadores)
+- Scans que falham ou dão timeout não são mais tratados como imagens "limpas".
+  Um `ScanStatus` (OK/ERROR/TIMEOUT/PARTIAL) é rastreado ponta a ponta e o
+  `SecurityScore` se recusa a pontuar qualquer coisa que não seja um scan
+  OK/PARTIAL.
+- A autenticação no Docker Hub agora é de fato usada: `build_repository()`
+  carrega as credenciais do keyring e chama `authenticate()`, e o `dockerls
+  login` valida as credenciais antes de armazená-las.
+- Tags que compartilham o mesmo digest de manifesto são escaneadas uma vez e
+  compartilham o resultado, em vez de serem reescaneadas por tag.
+- O banco de vulnerabilidades do Trivy é atualizado uma vez por execução e os
+  scans individuais passam `--skip-db-update`.
+- O cache SQLite não bloqueia mais o event loop (`asyncio.to_thread`); as
+  chaves de cache são versionadas por esquema e um payload em cache
+  obsoleto/incompatível é tratado como miss em vez de causar um crash.
+- A detecção de EOL agora mapeia nomes de imagem do Docker Hub para os slugs
+  corretos de produto do endoflife.date e usa comparação de versão ciente de
+  SemVer em vez de prefixos ingênuos de string.
 
-### Added / Changed (functional and production features)
-- Docker Hub client: per-request retry (not whole-batch), `Retry-After`
-  handling on 429, graceful degradation to partial results on network
-  errors, and multi-arch reporting (`available_architectures`).
-- Image name validation accepts digest references and private-registry
-  prefixes with a port.
-- Deterministic CVSS selection (NVD > vendor > first available, CVSS v4
-  preferred over v3) in both the Trivy and Grype parsers.
-- Full secret masking in logs (no partial values leaked).
-- `recommend`/`advisor` gain CI-friendly exit codes, `--fail-on`,
-  `--format json`, and `--no-color`; `analyze`/`compare` gain `--no-color`.
-- New `sbom` command (CycloneDX/SPDX via Trivy) and `export --format
-  sarif` (SARIF 2.1.0).
-- `.dockerls-ignore.yaml` support for CVE ignores with justification and
-  expiration.
-- CISA KEV + EPSS threat-intel signal factored into `SecurityScore`
-  (best-effort, degrades gracefully if unreachable).
-- Hardened-vendor images (Chainguard, Wolfi, Bitnami) count toward the
-  "minimal base" scoring bonus.
+### Adicionado / Alterado (recursos funcionais e de produção)
+- Cliente do Docker Hub: retry por requisição (não por lote inteiro),
+  tratamento de `Retry-After` em 429, degradação graciosa para resultados
+  parciais em erros de rede, e relatório multi-arquitetura
+  (`available_architectures`).
+- A validação de nome de imagem aceita referências por digest e prefixos de
+  registry privado com porta.
+- Seleção determinística de CVSS (NVD > fabricante > primeiro disponível, CVSS
+  v4 preferido sobre v3) tanto no parser do Trivy quanto no do Grype.
+- Ocultação completa de segredos nos logs (nenhum valor parcial vazado).
+- `recommend`/`advisor` ganham códigos de saída amigáveis a CI, `--fail-on`,
+  `--format json` e `--no-color`; `analyze`/`compare` ganham `--no-color`.
+- Novo comando `sbom` (CycloneDX/SPDX via Trivy) e `export --format sarif`
+  (SARIF 2.1.0).
+- Suporte a `.dockerls-ignore.yaml` para ignorar CVEs com justificativa e
+  expiração.
+- Sinal de threat intel CISA KEV + EPSS incorporado ao `SecurityScore`
+  (best-effort, degrada graciosamente se inacessível).
+- Imagens de fornecedores endurecidos (Chainguard, Wolfi, Bitnami) contam para
+  o bônus de pontuação de "base minimal".
 
-### Engineering
-- `mypy --strict` passes across the whole package (not just the domain
-  layer); `ruff`'s blanket `S603`/`S607` ignores were removed in favor of
-  narrow per-call-site `noqa`s on the two verified-safe subprocess calls.
-- Test suite expanded to 190+ tests covering scanner error/timeout paths,
-  cache versioning, fallback mode, HTTP partial-result handling, EOL
-  parsing, and all CLI commands; coverage raised from the 80% floor to ~89%.
-- Dockerfile hardened: base images pinned by digest, Trivy copied from its
-  official image instead of `curl | sh`.
-- Release workflow now attaches a GitHub-native SLSA build provenance
-  attestation and Sigstore-signed artifacts.
-- `__version__` now reads from installed package metadata
-  (`importlib.metadata`) instead of a hand-maintained string.
-- Settings migrated to `pydantic-settings` with `DOCKERLS_`-prefixed env
-  vars and an optional `~/.config/dockerls/config.toml`.
-- NVD API key support (`NVD_API_KEY`) with correct rate limiting (5 vs 50
-  requests/30s).
-- Removed the unused, never-wired Docker Scout integration stub.
+### Engenharia
+- `mypy --strict` passa em todo o pacote (não apenas na camada de domínio); os
+  ignores genéricos `S603`/`S607` do `ruff` foram removidos em favor de `noqa`s
+  estreitos por local de chamada nas duas chamadas de subprocesso comprovadamente
+  seguras.
+- Suíte de testes expandida para mais de 190 testes cobrindo caminhos de
+  erro/timeout do scanner, versionamento de cache, modo de fallback, tratamento
+  de resultados parciais em HTTP, parsing de EOL e todos os comandos da CLI;
+  cobertura elevada do piso de 80% para ~89%.
+- Dockerfile endurecido: imagens base fixadas por digest, Trivy copiado da sua
+  imagem oficial em vez de `curl | sh`.
+- O workflow de release agora anexa uma atestação nativa de proveniência de
+  build SLSA do GitHub e artefatos assinados com Sigstore.
+- `__version__` agora lê os metadados do pacote instalado
+  (`importlib.metadata`) em vez de uma string mantida à mão.
+- Settings migradas para `pydantic-settings` com variáveis de ambiente
+  prefixadas com `DOCKERLS_` e um `~/.config/dockerls/config.toml` opcional.
+- Suporte a chave de API do NVD (`NVD_API_KEY`) com rate limiting correto (5
+  versus 50 requisições/30s).
+- Removido o stub da integração com Docker Scout, que nunca foi usado nem
+  conectado.
 
 ## [1.0.0] - 2024-01-01
 
-### Added
-- Initial release
-- `search` command: search Docker Hub tags
-- `recommend` command: recommend secure images with scoring
-- `advisor` command: security advisor with remediation plans
-- `analyze` command: deep analysis of a specific image tag
-- `compare` command: side-by-side comparison of images
-- `export` command: export reports in JSON, CSV, HTML, Markdown
-- `login` command: Docker Hub authentication via keyring
-- `doctor` command: system dependency check
-- `health` command: external service connectivity check
-- `cache` subcommands: cache management (clear, cleanup)
-- Trivy integration (primary scanner)
-- Grype integration (fallback scanner)
-- Docker Scout integration (complementary)
-- NVD API integration
-- endoflife.date integration
-- Security scoring algorithm (0-100)
-- Security tier classification (S/A/B/C)
-- Remediation score calculation
-- Intelligent fallback when no image meets baseline
-- SQLite-based scan cache with TTL
-- Structured logging with secret masking
-- Input validation and sanitization
-- Secure Dockerfile (multi-stage, non-root, read-only)
-- CI/CD workflows (lint, test, security, CodeQL)
-- Dependabot configuration
+### Adicionado
+- Lançamento inicial
+- Comando `search`: pesquisa tags no Docker Hub
+- Comando `recommend`: recomenda imagens seguras com pontuação
+- Comando `advisor`: consultor de segurança com planos de remediação
+- Comando `analyze`: análise profunda de uma tag específica
+- Comando `compare`: comparação lado a lado de imagens
+- Comando `export`: exporta relatórios em JSON, CSV, HTML, Markdown
+- Comando `login`: autenticação no Docker Hub via keyring
+- Comando `doctor`: verificação de dependências do sistema
+- Comando `health`: verificação de conectividade com serviços externos
+- Subcomandos `cache`: gerenciamento de cache (clear, cleanup)
+- Integração com Trivy (scanner primário)
+- Integração com Grype (scanner de fallback)
+- Integração com Docker Scout (complementar)
+- Integração com a API do NVD
+- Integração com endoflife.date
+- Algoritmo de pontuação de segurança (0-100)
+- Classificação em níveis de segurança (S/A/B/C)
+- Cálculo de pontuação de remediação
+- Fallback inteligente quando nenhuma imagem atende à baseline
+- Cache de scan baseado em SQLite com TTL
+- Logging estruturado com ocultação de segredos
+- Validação e sanitização de entrada
+- Dockerfile seguro (multi-stage, não-root, somente leitura)
+- Workflows de CI/CD (lint, test, security, CodeQL)
+- Configuração do Dependabot
