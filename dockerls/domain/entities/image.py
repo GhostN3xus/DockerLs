@@ -53,10 +53,6 @@ class DockerImage(BaseModel):
     def is_distroless(self) -> bool:
         return "distroless" in self.tag.lower() or "distroless" in self.name.lower()
 
-    @property
-    def is_slim(self) -> bool:
-        return "slim" in self.tag.lower()
-
     _HARDENED_MARKERS = ("chainguard", "cgr.dev", "wolfi", "bitnami")
 
     @property

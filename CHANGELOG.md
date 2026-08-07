@@ -7,7 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A structural guard against the bug class that kept recurring**
+  (`tests/unit/test_no_dead_configuration.py`). Five times this codebase
+  shipped something declared, documented and never reached at runtime, and
+  twice the fix itself was partial. Catching that by reading code has now
+  failed repeatedly, so it is a test: every `Settings` field must be read
+  outside `settings.py`, every public symbol must be reachable from
+  somewhere in the package, and no module may be orphaned. It found eight
+  more on its first run.
+
 ### Fixed (audit of claims vs. code)
+
+- **`logout` did not exist**, so `login` could store credentials with no
+  supported way to remove them and `clear_credentials` was unreachable.
+- **`search` reached past the application layer** into a repository
+  directly, orphaning `SearchImagesUseCase`. It goes through its use case
+  like every other command now.
+- **`SecurityTier.production_ready` is computed by the domain and carried
+  on `ImageAnalysis`**, so the CLI and `--format json` state the domain's
+  verdict instead of re-deriving the rule from the tier letter.
+- Removed five symbols nothing reached: `build_search_use_case` (dead after
+  `search` bypassed it), `RichScanObserver.failed`, `DockerImage.is_slim`,
+  `ScanResult.is_usable` (superseded by `is_verified`), `EvidenceStore.root`
+  and `with_retry` -- the last one added in this same branch and never used.
+
+- **`export` repeated the shadowed-settings bug** that was fixed only in
+  `recommend`: its `--workers` carried a hard-coded default of 10 and it
+  never passed a tag limit at all, so `DOCKERLS_WORKERS` and
+  `DOCKERLS_MAX_TAGS` had no effect there. It also wrote to disk with no
+  error handling, so an unwritable destination produced a traceback. It now
+  delegates both to configuration, creates missing parent directories, and
+  reports a write failure as a message with exit 1.
+- **`cache clear` / `cache cleanup` had no tests and no error handling.** A
+  corrupt cache database crashed the very command a user reaches for to fix
+  it. Storage errors are now reported with exit 1.
+
+- **A sustained Docker Hub rate limit crashed the command.** The `@retry`
+  decorator used tenacity's default, so exhausting retries raised
+  `tenacity.RetryError` -- which is *not* an `httpx.HTTPError`, so the
+  `except httpx.HTTPError` handlers in `search_tags` and `tag_exists` never
+  caught it. The retry policy now reraises the original error, and those
+  handlers degrade to partial results as they were written to. The previous
+  test asserted `RetryError` and so codified the bug.
+- **The remaining three shadowed settings are wired.** `cache_ttl_seconds`,
+  `retry_max_attempts` and `retry_backoff_base` were still read by nothing:
+  the TTL was hard-coded `86400` and the retry policy lived in a decorator
+  evaluated once at import, where no configuration could ever reach it.
+  The policy is now built per call from settings. Adds
+  `tag_cache_ttl_seconds`, which was previously a hard-coded 6 hours.
+- **`mypy strict` was nominal.** `pyproject.toml` declared `strict = true`
+  while tolerating 20 errors, 13 of them "cannot subclass BaseModel" from
+  the missing pydantic plugin. With `plugins = ["pydantic.mypy"]` and
+  `types-PyYAML`, the codebase now type-checks clean: 20 errors to 0. CI
+  runs `python -m mypy` so the plugin resolves against the same interpreter.
 
 - **No CI had ever run on this repository.** All four workflows triggered
   on `pull_request: branches: [main]`, and there is no `main` branch -- the

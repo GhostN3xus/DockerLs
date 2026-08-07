@@ -167,3 +167,76 @@ class TestInvalidConfigIsAUserErrorNotACrash:
         assert "Invalid configuration" in result.stdout
         assert "must be non-negative" in result.stdout
         assert "Traceback" not in result.stdout
+
+
+class TestCacheTtlAndRetryReachTheirClients:
+    """The second half of the shadowed-settings bug. `cache_ttl_seconds`,
+    `retry_max_attempts` and `retry_backoff_base` were declared, documented
+    and read by nothing: the TTL was hard-coded 86400 and the retry policy
+    lived in an `@retry(...)` decorator evaluated once at import time.
+    """
+
+    def test_cache_ttl_reaches_the_use_case(self, monkeypatch):
+        captured = _resolved(monkeypatch, env={"DOCKERLS_CACHE_TTL_SECONDS": "111"})
+        assert captured["cache_ttl_seconds"] == 111
+
+    def test_retry_settings_reach_the_docker_hub_client(self, monkeypatch):
+        from dockerls.cli import dependencies
+
+        monkeypatch.setenv("DOCKERLS_RETRY_MAX_ATTEMPTS", "7")
+        monkeypatch.setenv("DOCKERLS_RETRY_BACKOFF_BASE", "3.5")
+        monkeypatch.setenv("DOCKERLS_TAG_CACHE_TTL_SECONDS", "42")
+        dependencies._settings.cache_clear()
+
+        import asyncio
+
+        client = asyncio.run(dependencies.build_repository())
+        assert client._max_attempts == 7
+        assert client._backoff_base == 3.5
+        assert client._tag_ttl_seconds == 42
+        dependencies._settings.cache_clear()
+
+    def test_retry_policy_honours_the_attempt_count(self):
+        """Built per call, so configuration can actually change it."""
+        import asyncio
+
+        from dockerls.utils.retry import retry_policy
+
+        attempts = 0
+
+        async def always_fails():
+            nonlocal attempts
+            attempts += 1
+            raise ValueError("boom")
+
+        async def run():
+            with pytest.raises(ValueError):
+                await retry_policy(max_attempts=4, backoff_base=1.1)(always_fails)
+
+        asyncio.run(run())
+        assert attempts == 4
+
+    def test_retry_policy_reraises_the_original_exception(self):
+        """Not tenacity's RetryError: the clients catch httpx errors by
+        type, and RetryError is not one, so wrapping crashed the command."""
+        import asyncio
+
+        import httpx
+        from tenacity import RetryError
+
+        from dockerls.utils.retry import retry_policy
+
+        async def fails():
+            raise httpx.ConnectError("down")
+
+        async def run():
+            with pytest.raises(httpx.HTTPError):
+                await retry_policy(max_attempts=2, backoff_base=1.1)(fails)
+            try:
+                await retry_policy(max_attempts=2, backoff_base=1.1)(fails)
+            except RetryError:  # pragma: no cover - would be the old bug
+                pytest.fail("retry policy wrapped the error in RetryError")
+            except httpx.HTTPError:
+                pass
+
+        asyncio.run(run())

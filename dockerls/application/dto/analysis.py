@@ -14,6 +14,9 @@ class ImageAnalysis(BaseModel):
     security_score: float
     tier: str
     remediation_score: int
+    # The domain's verdict, carried so the CLI and --format json state
+    # it rather than each re-deriving the rule from the tier letter.
+    production_ready: bool = True
     is_eol: bool = False
     is_lts: bool = False
     recommendation: Recommendation | None = None

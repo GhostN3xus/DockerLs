@@ -36,10 +36,6 @@ class EvidenceStore:
     def __init__(self, root: Path):
         self._root = root
 
-    @property
-    def root(self) -> Path:
-        return self._root
-
     async def record_scan(self, image_reference: str, scanner: str, raw: str) -> str:
         """Write one scanner's raw JSON output. Returns the file path, or an
         empty string when the evidence could not be persisted (evidence is

@@ -9,7 +9,7 @@ from dockerls.cli.commands.compare import compare
 from dockerls.cli.commands.doctor import doctor
 from dockerls.cli.commands.export import export
 from dockerls.cli.commands.health import health
-from dockerls.cli.commands.login import login
+from dockerls.cli.commands.login import login, logout
 from dockerls.cli.commands.recommend import recommend
 from dockerls.cli.commands.sbom import sbom
 from dockerls.cli.commands.search import search
@@ -30,6 +30,7 @@ app.command()(analyze)
 app.command()(compare)
 app.command()(export)
 app.command()(login)
+app.command()(logout)
 app.command()(version)
 app.command()(doctor)
 app.command()(health)

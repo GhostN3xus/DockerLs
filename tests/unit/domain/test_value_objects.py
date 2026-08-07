@@ -323,3 +323,32 @@ class TestHardenedVersusOfficial:
         """The bonus is a tie-breaker, and `official` alone should not
         outrank a minimal hardened base at the same severity."""
         assert self._official() >= self._hardened() - 1.0
+
+
+class TestProductionReadyIsCarriedNotReDerived:
+    """`production_ready` was computed by the domain and read by nothing;
+    the CLI restated the rule from the tier letter instead."""
+
+    def _tier(self, critical=0, high=0, is_eol=False):
+        vulns = [Vulnerability(cve_id=f"C{i}", severity=Severity.CRITICAL) for i in range(critical)]
+        vulns += [Vulnerability(cve_id=f"H{i}", severity=Severity.HIGH) for i in range(high)]
+        return SecurityTier(_scan(vulns), is_eol=is_eol)
+
+    def test_clean_image_is_production_ready(self):
+        assert self._tier().production_ready is True
+
+    def test_tier_c_is_not_production_ready(self):
+        tier = self._tier(critical=1)
+        assert tier.tier == Tier.C
+        assert tier.production_ready is False
+
+    def test_eol_is_never_production_ready_whatever_the_tier(self):
+        tier = self._tier(is_eol=True)
+        assert tier.tier == Tier.S
+        assert tier.production_ready is False
+
+    def test_advice_is_given_only_for_tiers_needing_action(self):
+        assert SecurityTier.ADVICE.get(Tier.S, "") == ""
+        assert SecurityTier.ADVICE.get(Tier.A, "") == ""
+        assert "human review" in SecurityTier.ADVICE[Tier.B]
+        assert "not production ready" in SecurityTier.ADVICE[Tier.C]

@@ -24,6 +24,13 @@ class SecurityTier:
     def tier(self) -> Tier:
         return self._tier
 
+    # What each tier obliges the reader to do. Lives with the tier rule so
+    # the CLI states the domain's position rather than restating it.
+    ADVICE = {
+        Tier.B: "conditional -- requires human review before production use",
+        Tier.C: "not production ready",
+    }
+
     @property
     def production_ready(self) -> bool:
         # An EOL base is never production-ready, regardless of its

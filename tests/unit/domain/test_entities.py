@@ -21,10 +21,6 @@ class TestDockerImage:
         img = DockerImage(name="gcr.io/distroless/static", tag="latest")
         assert img.is_distroless is True
 
-    def test_is_slim(self):
-        img = DockerImage(name="python", tag="3.12-slim")
-        assert img.is_slim is True
-
     def test_age_days_no_update(self):
         img = DockerImage(name="node", tag="latest")
         assert img.age_days == 365

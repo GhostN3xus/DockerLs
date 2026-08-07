@@ -6,7 +6,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from dockerls.cli.dependencies import build_recommend_use_case
+from dockerls.cli.dependencies import build_recommend_use_case, resolve_tag_limit
 from dockerls.exporters.factory import ExporterFactory
 
 console = Console()
@@ -18,15 +18,28 @@ def export(
         "json", "--format", "-f", help="Export format: json, csv, html, markdown, sarif"
     ),
     output: str = typer.Option("", "--output", "-o", help="Output file path (default: stdout)"),
-    workers: int = typer.Option(10, "--workers", "-w", help="Concurrent workers"),
+    workers: int | None = typer.Option(
+        None, "--workers", "-w", help="Concurrent workers [config: workers, default 10]"
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", "-l", help="Max tags to scan [config: max_tags, default 100]"
+    ),
 ) -> None:
     """Export analysis results in various formats."""
-    asyncio.run(_export(image, output_format, output, workers))
+    try:
+        asyncio.run(_export(image, output_format, output, workers, limit))
+    except ValueError as e:
+        console.print(f"[red]Invalid configuration:[/red] {e}")
+        raise typer.Exit(1) from e
 
 
-async def _export(image: str, fmt: str, output: str, workers: int) -> None:
+async def _export(
+    image: str, fmt: str, output: str, workers: int | None, limit: int | None
+) -> None:
+    # Same fallback as `recommend`: omitting a flag means "use the
+    # configured value", rather than a hard-coded default shadowing it.
     use_case = await build_recommend_use_case(workers=workers)
-    result = await use_case.execute(image)
+    result = await use_case.execute(image, limit=resolve_tag_limit(limit))
 
     try:
         exporter = ExporterFactory.create(fmt)
@@ -36,7 +49,13 @@ async def _export(image: str, fmt: str, output: str, workers: int) -> None:
 
     if output:
         path = Path(output)
-        exporter.export(result, path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            exporter.export(result, path)
+        except OSError as e:
+            # An unwritable destination is user error, not a crash.
+            console.print(f"[red]Could not write {path}:[/red] {e}")
+            raise typer.Exit(1) from e
         console.print(f"[green]Report exported to {path}[/green]")
     else:
         # soft_wrap avoids Rich reflowing/inserting newlines into

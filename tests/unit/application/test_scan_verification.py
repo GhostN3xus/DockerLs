@@ -187,13 +187,14 @@ class TestPlaceholderScansRejected:
         )
         assert scan.is_verified is False
 
-    def test_partial_status_is_usable_but_not_verified(self):
+    def test_partial_status_is_not_verified(self):
+        """PARTIAL means some targets could not be inspected, so its counts
+        are a lower bound -- not proof the image is clean."""
         scan = ScanResult(
             image_reference="node:22",
             status=ScanStatus.PARTIAL,
             scan_timestamp="2026-01-01T00:00:00Z",
         )
-        assert scan.is_usable is True
         assert scan.is_verified is False
 
     def test_security_score_refuses_failed_scan(self):

@@ -78,6 +78,9 @@ async def build_repository(cache: SQLiteCache | None = None) -> DockerHubClient:
         token=token,
         timeout=s.http_timeout,
         cache=cache,
+        max_attempts=s.retry_max_attempts,
+        backoff_base=s.retry_backoff_base,
+        tag_ttl_seconds=s.tag_cache_ttl_seconds,
     )
     if username and token:
         await client.authenticate()
@@ -149,7 +152,11 @@ async def build_recommend_use_case(
         cache_dir=s.trivy_cache_dir,
         evidence=evidence,
     )
-    eol = EndOfLifeChecker(timeout=s.http_timeout)
+    eol = EndOfLifeChecker(
+        timeout=s.http_timeout,
+        max_attempts=s.retry_max_attempts,
+        backoff_base=s.retry_backoff_base,
+    )
 
     secondary = None
     if s.cross_validate if cross_validate is None else cross_validate:
@@ -172,6 +179,7 @@ async def build_recommend_use_case(
         evidence=evidence,
         verify_hub_tags=s.verify_hub_tags if verify_hub_tags is None else verify_hub_tags,
         log_file=current_log_file(),
+        cache_ttl_seconds=s.cache_ttl_seconds,
     )
 
 
@@ -179,7 +187,11 @@ async def build_analyze_use_case() -> AnalyzeImageUseCase:
     s = _settings()
     repo = await build_repository()
     scanner = await ScannerFactory.create(timeout=s.scanner_timeout)
-    eol = EndOfLifeChecker(timeout=s.http_timeout)
+    eol = EndOfLifeChecker(
+        timeout=s.http_timeout,
+        max_attempts=s.retry_max_attempts,
+        backoff_base=s.retry_backoff_base,
+    )
     return AnalyzeImageUseCase(
         repository=repo,
         scanner=scanner,
@@ -194,5 +206,6 @@ async def build_compare_use_case() -> CompareImagesUseCase:
 
 
 async def build_search_use_case() -> SearchImagesUseCase:
-    repo = await build_repository()
-    return SearchImagesUseCase(repository=repo)
+    """`search` goes through its use case like every other command, so the
+    CLI never reaches past the application layer into a repository."""
+    return SearchImagesUseCase(repository=await build_repository())

@@ -66,6 +66,7 @@ class RecommendImagesUseCase:
         evidence: EvidenceStore | None = None,
         verify_hub_tags: bool = True,
         log_file: Path | None = None,
+        cache_ttl_seconds: int = 86400,
     ):
         self._repository = repository
         self._scanner = scanner
@@ -82,6 +83,7 @@ class RecommendImagesUseCase:
         self._evidence = evidence
         self._verify_hub_tags = verify_hub_tags
         self._log_file = log_file
+        self._cache_ttl_seconds = cache_ttl_seconds
 
     async def execute(self, image_name: str, limit: int = 100) -> AnalysisResult:
         try:
@@ -223,6 +225,7 @@ class RecommendImagesUseCase:
                     scan=scan,
                     security_score=score.value,
                     tier=tier.tier.value,
+                    production_ready=tier.production_ready,
                     remediation_score=rem_score.value,
                     is_eol=is_eol,
                     is_lts=is_lts,
@@ -354,7 +357,9 @@ class RecommendImagesUseCase:
 
     async def _set_cached(self, key: str, analysis: ImageAnalysis) -> None:
         if self._cache:
-            await self._cache.set(f"analysis:{key}", analysis.model_dump(), ttl_seconds=86400)
+            await self._cache.set(
+                f"analysis:{key}", analysis.model_dump(), ttl_seconds=self._cache_ttl_seconds
+            )
 
 
 def _sources_of(tags: list[DockerImage]) -> list[str]:

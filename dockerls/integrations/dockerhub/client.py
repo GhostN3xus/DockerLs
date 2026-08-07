@@ -7,11 +7,15 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 from loguru import logger
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from dockerls.domain.entities.image import DockerImage
 from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
 from dockerls.integrations.dockerhub.urls import build_tag_api_url
+from dockerls.utils.retry import (
+    DEFAULT_BACKOFF_BASE,
+    DEFAULT_MAX_ATTEMPTS,
+    retry_policy,
+)
 from dockerls.utils.validation import sanitize_image_name
 
 if TYPE_CHECKING:
@@ -19,7 +23,9 @@ if TYPE_CHECKING:
 
 # Anonymous Docker Hub requests are rate limited, and a `recommend` run
 # checks one tag per candidate. Existence of a tag changes rarely, so a
-# local TTL cache keeps repeated runs well under the limit.
+# local TTL cache keeps repeated runs well under the limit. Kept shorter
+# than the analysis cache: a tag disappearing matters sooner than a score
+# going slightly stale.
 TAG_EXISTS_TTL_SECONDS = 6 * 3600
 
 
@@ -32,12 +38,18 @@ class DockerHubClient(ImageRepositoryInterface):
         token: str = "",
         timeout: int = 30,
         cache: CacheStoreInterface | None = None,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        backoff_base: float = DEFAULT_BACKOFF_BASE,
+        tag_ttl_seconds: int = TAG_EXISTS_TTL_SECONDS,
     ):
         self._username = username
         self._token = token
         self._timeout = timeout
         self._auth_token: str = ""
         self._cache = cache
+        self._max_attempts = max_attempts
+        self._backoff_base = backoff_base
+        self._tag_ttl_seconds = tag_ttl_seconds
 
     async def _get_client(self) -> httpx.AsyncClient:
         headers = {"Accept": "application/json"}
@@ -65,11 +77,20 @@ class DockerHubClient(ImageRepositoryInterface):
             logger.warning(f"Docker Hub auth failed: {e}")
         return False
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
     async def _get_json(self, client: httpx.AsyncClient, url: str) -> httpx.Response:
         """Perform a single GET with retry scoped to *this* request only, so
         a transient failure deep into a paginated fetch doesn't force the
-        whole listing to restart from page one. Honors Retry-After on 429."""
+        whole listing to restart from page one. Honors Retry-After on 429.
+
+        The policy is built per call so `retry_max_attempts` and
+        `retry_backoff_base` reach it; as a decorator it was fixed at
+        import time and the settings could never apply.
+        """
+        policy = retry_policy(self._max_attempts, self._backoff_base)
+        resp: httpx.Response = await policy(self._get_once, client, url)
+        return resp
+
+    async def _get_once(self, client: httpx.AsyncClient, url: str) -> httpx.Response:
         resp = await client.get(url)
         if resp.status_code == 429:
             retry_after = resp.headers.get("Retry-After")
@@ -190,7 +211,7 @@ class DockerHubClient(ImageRepositoryInterface):
             return None
 
         if self._cache:
-            await self._cache.set(cache_key, exists, ttl_seconds=TAG_EXISTS_TTL_SECONDS)
+            await self._cache.set(cache_key, exists, ttl_seconds=self._tag_ttl_seconds)
         return exists
 
     async def get_image_metadata(self, image_name: str, tag: str) -> DockerImage | None:

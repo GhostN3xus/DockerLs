@@ -6,6 +6,7 @@ import httpx
 from typer.testing import CliRunner
 
 from dockerls.application.dto.analysis import ComparisonResult, ImageAnalysis
+from dockerls.application.use_cases.search_images import SearchImagesUseCase
 from dockerls.cli.app import app
 from dockerls.domain.entities.image import DockerImage
 from dockerls.domain.entities.scan_result import ScanResult
@@ -40,7 +41,10 @@ class TestSearchCommand:
                 DockerImage(name="node", tag="22-alpine", is_official=True),
             ]
         )
-        with patch("dockerls.cli.commands.search.build_repository", AsyncMock(return_value=repo)):
+        with patch(
+            "dockerls.cli.commands.search.build_search_use_case",
+            AsyncMock(return_value=SearchImagesUseCase(repo)),
+        ):
             result = runner.invoke(app, ["search", "node"])
         assert result.exit_code == 0
         assert "22-alpine" in result.stdout
@@ -48,7 +52,10 @@ class TestSearchCommand:
     def test_search_no_tags_exits_one(self):
         repo = AsyncMock()
         repo.search_tags = AsyncMock(return_value=[])
-        with patch("dockerls.cli.commands.search.build_repository", AsyncMock(return_value=repo)):
+        with patch(
+            "dockerls.cli.commands.search.build_search_use_case",
+            AsyncMock(return_value=SearchImagesUseCase(repo)),
+        ):
             result = runner.invoke(app, ["search", "nope"])
         assert result.exit_code == 1
 
