@@ -1,0 +1,61 @@
+# DockerLs -- politica de build do projeto.
+#
+# Copie para `.dockerls-hardening.yaml` na raiz do repositorio. Diferente do
+# `~/.config/dockerls/config.toml` (preferencia da maquina do usuario), este
+# arquivo e a politica do PROJETO: mora no repositorio, e revisado como codigo e
+# vence a configuracao da maquina.
+#
+# Um arquivo malformado REPROVA a execucao. Cair silenciosamente nos padroes
+# transformaria um pipeline com portao num pipeline sem portao.
+
+validation:
+  # strict   -> reprova em CRITICAL, HIGH e MEDIUM
+  # standard -> reprova em CRITICAL e HIGH (padrao)
+  # relaxed  -> reprova apenas em CRITICAL
+  #
+  # O nivel muda apenas a decisao de bloquear. Os achados reportados sao
+  # identicos nos tres.
+  hardening_level: standard
+
+  # Regras que este projeto decidiu nao aplicar, por rule_id. Elas continuam
+  # aparecendo no relatorio como SKIP -- uma renuncia invisivel no artefato que
+  # o auditor le nao seria uma renuncia, seria um esconderijo.
+  skip_rules: []
+  # skip_rules: [healthcheck, dockerignore_present]
+
+scanning:
+  enabled: true
+  # Severidade a partir da qual o build sai com codigo 1.
+  # none | critical | high | medium
+  fail_on: critical
+  sbom: true
+  sbom_formats: [cyclonedx]
+
+reporting:
+  # json | html | sarif | markdown
+  formats: [json]
+  output_dir: .dockerls/reports
+  # Grava uma nota Markdown no vault DevSecOps. A raiz vem de --vault-root ou
+  # da configuracao `vault_root`.
+  vault_push: false
+  vault_path: infraestrutura/builds
+
+buildkit:
+  enabled: true
+  inline_cache: true
+
+# Usado por `dockerls build --batch`: constroi cada projeto listado, e o pior
+# resultado do lote decide o codigo de saida.
+projects: []
+# projects:
+#   - name: api-backend
+#     context: ./api
+#     dockerfile: ./api/Dockerfile
+#     tag: "api:latest"
+#     hardened_template: node
+#     build_args:
+#       NODE_ENV: production
+#   - name: web-frontend
+#     context: ./web
+#     tag: "web:latest"
+#     push: true

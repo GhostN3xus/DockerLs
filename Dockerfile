@@ -19,6 +19,16 @@ FROM aquasec/trivy:0.55.2@${TRIVY_DIGEST} AS trivy
 
 FROM python:3.12.4-slim-bookworm@${PYTHON_DIGEST}
 
+# Ownership and security metadata, so this image can be attributed at
+# incident time. `dockerls build --validate-only` requires them of everyone
+# else; it applies to our own image too.
+LABEL org.opencontainers.image.source="https://github.com/GhostN3xus/DockerLs"
+LABEL org.opencontainers.image.authors="GhostN3xus"
+LABEL maintainer="GhostN3xus"
+LABEL security.scanner="dockerls"
+LABEL security.hardened="true"
+LABEL security.cve-contact="https://github.com/GhostN3xus/DockerLs/blob/main/SECURITY.md"
+
 RUN groupadd --gid 1001 dockerls && \
     useradd --uid 1001 --gid dockerls --shell /bin/false --create-home dockerls
 

@@ -9,6 +9,69 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
 
 ### Adicionado
 
+- **`dockerls build` -- do Dockerfile inseguro à imagem endurecida com relatório
+  de risco.** Até aqui o DockerLs sabia dizer qual imagem base usar, mas não
+  tinha nada a dizer sobre o que o usuário construía em cima dela. O comando
+  valida o Dockerfile contra 15 regras derivadas do OWASP, constrói com BuildKit,
+  escaneia o resultado e emite um relatório em JSON/HTML/SARIF/Markdown.
+
+  A ordem é o ponto central: a validação roda **antes** da construção, de modo
+  que um Dockerfile que assa uma credencial numa camada nunca chega a produzir
+  uma imagem; o scan roda **depois**, para que o relatório descreva o que de fato
+  foi entregue e não o que o Dockerfile prometia.
+
+  Decisões que valem registro:
+
+  - **Uma regra que não pôde ser avaliada reporta `SKIP`, nunca `PASS`.** "Não
+    olhamos" não pode ser renderizado como "nada errado", então o denominador de
+    "12/15 passaram" exclui as puladas.
+  - **O nível de hardening muda apenas a decisão, nunca os achados.** Uma
+    execução `relaxed` mostra o mesmo achado MEDIUM que uma `strict` teria
+    bloqueado; ela o tolera, não o esconde. Há um teste que compara os três
+    níveis exatamente por isso.
+  - **Regras sobre a imagem entregue olham só o estágio final.** O Docker
+    descarta os estágios de builder, e reportar achados neles é como se treina o
+    usuário a ignorar o relatório.
+  - **Quando dois scanners rodam, o pior resultado define a pontuação.** Tirar a
+    média deixaria a ferramenta mais silenciosa puxar a nota para cima, e um
+    relatório de segurança não pode arredondar para o lado tranquilizador.
+  - **Nem a validação nem o scan podem esconder o outro.** A nota combinada pesa
+    40% Dockerfile e 60% scan, mas qualquer CRITICAL na imagem (ou mais de três
+    HIGH) fixa o tier em C independentemente da aritmética. Sem `--scan`, a saída
+    diz explicitamente que a nota avalia só o Dockerfile.
+  - **`--push` só publica uma construção que passou no portão**, e uma recusa é
+    dita por escrito -- um silêncio poderia ser confundido com sucesso.
+  - **Uma regra renunciada em `skip_rules` continua aparecendo no relatório**,
+    como `SKIP`. Descartá-la deixaria a renúncia invisível justamente no artefato
+    que um auditor lê.
+  - **Uma política `.dockerls-hardening.yaml` malformada reprova a execução.**
+    Cair silenciosamente nos padrões transformaria um pipeline com portão num
+    pipeline sem portão -- a falha exata que o arquivo existe para impedir.
+  - **O DockerLs nunca aceita o valor de um segredo, só a sua origem**
+    (`--secret id=x,env=VAR` ou `src=PATH`). `BuildSecret` não tem campo onde o
+    material caberia, o que é o que o mantém fora do argv e fora do log.
+
+- **`dockerls templates` -- Dockerfiles endurecidos para node, python, go e
+  java.** Cada template passa nas 15 regras, verificado em teste: um template
+  endurecido que não cumpre o próprio conjunto de regras seria o pior bug
+  possível nesta funcionalidade, porque ensina os hábitos errados com o nome da
+  ferramenta em cima. `generate` nunca sobrescreve -- o arquivo sai como
+  `Dockerfile.hardened` ao lado do original, para que os dois possam ser
+  comparados antes da troca.
+
+- **Parser de Dockerfile próprio**, e não uma dependência de terceiros. Cada
+  regra precisa de número de linha, escopo por estágio e das flags
+  `--mount=type=secret` / `--from`; os parsers disponíveis descartam pelo menos
+  uma dessas coisas, e uma ferramenta de segurança que perde silenciosamente a
+  flag que procurava reporta como limpo um Dockerfile que não está. Lida com
+  continuações de linha, heredocs, a diretiva `escape`, estágios nomeados e
+  substituição de ARGs globais nas linhas `FROM`.
+
+- **Nenhuma dependência nova de runtime.** O `docker build` é acionado pela CLI,
+  do mesmo jeito que trivy e grype já eram: é o binário que todo usuário e todo
+  runner de CI já têm autenticado, e o SDK adicionaria uma segunda opinião, com
+  versionamento próprio, sobre como falar com o daemon.
+
 - **Uma proteção estrutural contra a classe de bug que continuava
   reaparecendo** (`tests/unit/test_no_dead_configuration.py`). Cinco vezes esta
   base de código entregou algo declarado, documentado e nunca alcançado em

@@ -28,6 +28,14 @@ def _default_evidence_dir() -> Path:
     return Path(".dockerls") / "scans"
 
 
+def _default_report_dir() -> Path:
+    return Path(".dockerls") / "reports"
+
+
+def _default_sbom_dir() -> Path:
+    return Path(".dockerls") / "sboms"
+
+
 def _default_config_path() -> Path:
     """~/.config/dockerls/config.toml (or $XDG_CONFIG_HOME/dockerls/config.toml)."""
     xdg_config = os.environ.get("XDG_CONFIG_HOME")
@@ -82,6 +90,23 @@ class Settings(BaseSettings):
     # listings are unordered, so a wide fetch buys nothing.
     hardened_tag_limit: int = 10
     scanner_timeout: int = 300
+    # -- `dockerls build` -------------------------------------------------
+    # Which rule severities are allowed to stop a build: strict adds
+    # MEDIUM, relaxed drops everything but CRITICAL. The findings reported
+    # are identical at every level.
+    hardening_level: str = "standard"
+    # A cold multi-stage build with a compile step routinely runs longer
+    # than a scan, so this is deliberately not scanner_timeout.
+    build_timeout: int = 1800
+    # Scan severity at or above which `dockerls build` exits non-zero.
+    build_fail_on: str = "critical"
+    buildkit: bool = True
+    build_report_dir: Path = Field(default_factory=_default_report_dir)
+    sbom_dir: Path = Field(default_factory=_default_sbom_dir)
+    generate_sbom: bool = True
+    # Root of the Obsidian/DevSecOps notes vault that `--vault-push` writes
+    # into. Unset means `--vault-push` has nowhere to go and says so.
+    vault_root: Path | None = None
     http_timeout: int = 30
     retry_max_attempts: int = 3
     retry_backoff_base: float = 2.0
@@ -116,9 +141,10 @@ class Settings(BaseSettings):
 
     def ensure_dirs(self) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        # Log and evidence dirs are best-effort: a read-only working
-        # directory must degrade (setup_logging falls back to the cache dir,
-        # evidence recording is skipped) rather than abort the command.
-        for path in (self.log_dir, self.evidence_dir):
+        # Log, evidence, report and SBOM dirs are best-effort: a read-only
+        # working directory must degrade (setup_logging falls back to the
+        # cache dir, artefact writing is skipped) rather than abort the
+        # command.
+        for path in (self.log_dir, self.evidence_dir, self.build_report_dir, self.sbom_dir):
             with contextlib.suppress(OSError):
                 path.mkdir(parents=True, exist_ok=True)

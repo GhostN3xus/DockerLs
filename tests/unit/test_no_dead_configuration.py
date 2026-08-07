@@ -108,6 +108,13 @@ FRAMEWORK_INVOKED = {
     "doctor",
     "health",
     "sbom",
+    "build",
+    # `templates` subcommands, wired by typer decorators rather than by a
+    # call anywhere in the package.
+    "templates_root",
+    "templates_list",
+    "templates_show",
+    "templates_generate",
 }
 
 # Referenced from pyproject.toml's [project.scripts] rather than by an
@@ -120,6 +127,7 @@ DYNAMICALLY_DISPATCHED = {
     "tag_exists",  # getattr(repo, "tag_exists", None) in the use case
     "refresh_db",  # getattr(scanner, "refresh_db", None)
     "close",  # getattr(scanner, "close", None)
+    "server_version",  # getattr(builder, "server_version", None)
 }
 
 

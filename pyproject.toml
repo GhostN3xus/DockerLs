@@ -64,6 +64,11 @@ Issues = "https://github.com/GhostN3xus/DockerLs/issues"
 [tool.setuptools.packages.find]
 include = ["dockerls*"]
 
+# The hardened Dockerfile templates are read at runtime via
+# importlib.resources, so they must ship inside the wheel.
+[tool.setuptools.package-data]
+"dockerls.infrastructure.templates.hardening" = ["*.dockerfile"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100

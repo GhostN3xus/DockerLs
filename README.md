@@ -14,6 +14,7 @@ melhor imagem para produção e diz exatamente como corrigir o que encontra.
 - [Instalação](#instalação)
 - [Início rápido](#início-rápido)
 - [Comandos](#comandos)
+- [Build seguro](#build-seguro-com-hardening-automático)
 - [Algoritmo de pontuação](#algoritmo-de-pontuação)
 - [Níveis de segurança](#níveis-de-segurança)
 - [Modo alternativo](#modo-alternativo)
@@ -76,6 +77,12 @@ dockerls compare node:22-alpine node:22-bookworm-slim
 
 # Exportar relatório em JSON
 dockerls export node --format json --output report.json
+
+# Validar um Dockerfile contra as regras OWASP (não precisa de daemon Docker)
+dockerls build . --validate-only
+
+# Construir uma imagem endurecida, escanear e emitir relatório
+dockerls build . --tag myapp:1.0 --scan --report report.html
 ```
 
 ---
@@ -243,6 +250,28 @@ dockerls advisor node --format json
 A saída inclui: melhor imagem atual, pontuação de segurança, detalhamento de
 vulnerabilidades, pontuação de correção e um plano de correção passo a passo.
 
+### build
+
+Constrói uma imagem endurecida: valida o Dockerfile, constrói, escaneia e emite
+um relatório. Documentado por completo em
+[Build seguro](#build-seguro-com-hardening-automático).
+
+```bash
+dockerls build . --validate-only                       # só valida, nunca constrói
+dockerls build . --tag myapp:1.0 --scan                # valida, constrói, escaneia
+dockerls build . --tag myapp:1.0 --ci-mode --fail-on high
+```
+
+### templates
+
+Templates de Dockerfile prontos para produção (node, python, go, java).
+
+```bash
+dockerls templates                                     # lista os templates
+dockerls templates show go --raw > Dockerfile          # imprime um template
+dockerls templates generate . --base node              # grava Dockerfile.hardened
+```
+
 ### sbom
 
 Gera um inventário de software (SBOM) para uma imagem via Trivy.
@@ -343,6 +372,333 @@ dockerls cache cleanup
 ```bash
 dockerls version
 ```
+
+---
+
+## Build seguro com hardening automático
+
+O DockerLs não apenas **recomenda** imagens seguras -- ele também **constrói**
+imagens seguras, aplicando o conjunto de regras OWASP antes que um `docker build`
+chegue a acontecer.
+
+A ordem é o ponto central: a validação roda **antes** da construção, para que um
+Dockerfile que assa uma credencial numa camada nunca produza uma imagem; o scan
+roda **depois**, para que o relatório descreva o que de fato foi entregue, e não
+o que o Dockerfile prometia.
+
+### Início rápido
+
+```bash
+# Validar o Dockerfile sem construir nada (não precisa de daemon Docker)
+dockerls build . --validate-only
+
+# Ver o que melhorar, sem construir e sem reprovar nada
+dockerls build . --suggest-hardening
+
+# Construir com validação, scan pós-build e relatório
+dockerls build . --tag myapp:1.0 --scan --report report.html
+
+# Construir a partir de um template endurecido em vez do seu Dockerfile
+dockerls build . --tag myapp:1.0 --hardened --base node
+
+# Modo CI/CD: JSON na saída padrão, sem interação, código de saída como portão
+dockerls build . --tag myapp:1.0 --ci-mode --fail-on high
+```
+
+### Validação (fase 1)
+
+O Dockerfile é conferido contra 15 regras derivadas do OWASP. Cada regra tem uma
+severidade, e a severidade decide se o achado **reprova** a construção ou apenas
+pede revisão:
+
+| Regra | Severidade | O que ela impede |
+|-------|------------|------------------|
+| `secrets_not_in_env` | CRITICAL | Credencial em `ENV`/`ARG`, visível para sempre em `docker history` |
+| `no_secret_files_copied` | HIGH | `COPY` de `.env`, `id_rsa`, `*.pem`, `.aws`, `.git` |
+| `non_root_user` | HIGH | Container rodando como root |
+| `base_image_pinned` | HIGH | Base sem tag ou em `:latest` |
+| `no_sudo` | HIGH | `sudo` instalado ou invocado |
+| `no_setuid_binaries` | HIGH | Bit SETUID/SETGID em binário |
+| `minimal_base` | MEDIUM | Distribuição completa onde caberia slim/alpine/distroless |
+| `multi_stage` | MEDIUM | Compiladores e pacotes de build vazando para a imagem final |
+| `package_cache_clean` | MEDIUM | Cache do gerenciador de pacotes preso na camada |
+| `apt_no_install_recommends` | MEDIUM | `apt-get install` sem `--no-install-recommends` |
+| `exec_form_entrypoint` | MEDIUM | `ENTRYPOINT` em forma shell (o processo nunca recebe SIGTERM) |
+| `no_remote_add` | MEDIUM | `ADD` buscando URL remota sem verificação |
+| `dockerignore_present` | MEDIUM | `COPY . .` sem `.dockerignore` excluindo `.git`/`.env` |
+| `healthcheck` | LOW | Container sem `HEALTHCHECK` |
+| `security_labels` | LOW | Imagem sem dono nem contato de segurança |
+
+Regras que inspecionam a imagem entregue (usuário, entrypoint, labels, base)
+olham **apenas o estágio final**. Um achado num estágio de builder é ruído --
+o Docker descarta esse estágio, e reportá-lo é como se treina o usuário a
+ignorar o relatório.
+
+Uma regra que **não pôde** ser avaliada reporta `SKIP`, nunca `PASS`: "não
+olhamos" jamais pode ser renderizado como "nada errado". Por isso o denominador
+de "12/15 passaram" exclui as puladas.
+
+```bash
+$ dockerls build . --validate-only
+
+Dockerfile Validation  (1/15 passed)
+
+  secrets_not_in_env    FAIL  CRIT  3  Credential baked into an image layer: ENV NPM_TOKEN
+  non_root_user         FAIL  HIGH  -  No USER directive in the final stage
+  minimal_base          WARN  MEDI  1  node:latest is a full distribution
+  ...
+
+How to fix
+
+  secrets_not_in_env (line 3)
+    Mount the secret at build time instead:
+      RUN --mount=type=secret,id=npm_token \
+          NPM_TOKEN=$(cat /run/secrets/npm_token) npm ci
+```
+
+### Níveis de hardening
+
+O nível controla **apenas** quais severidades reprovam a construção. Os achados
+reportados são idênticos nos três: uma execução `relaxed` mostra o mesmo achado
+MEDIUM que uma `strict` teria bloqueado -- ela apenas o tolera, nunca o esconde.
+
+| Nível | Reprova em | Quando usar |
+|-------|------------|-------------|
+| `strict` | CRITICAL, HIGH, MEDIUM | Imagens que vão para produção |
+| `standard` (padrão) | CRITICAL, HIGH | Uso diário |
+| `relaxed` | CRITICAL | Base legada em migração |
+
+```bash
+dockerls build . --validate-only --hardening-level strict
+```
+
+Para construir apesar dos achados, use `--force` -- o relatório continua listando
+tudo o que foi aceito.
+
+### Templates endurecidos
+
+```bash
+dockerls templates                            # lista os templates disponíveis
+dockerls templates show go --raw > Dockerfile # imprime um template
+dockerls templates generate . --base node     # grava Dockerfile.hardened
+dockerls templates generate .                 # detecta a linguagem do projeto
+```
+
+Cada template passa nas 15 regras acima -- isso é verificado em teste, porque um
+template endurecido que não cumpre o próprio conjunto de regras é o pior bug
+possível nesta funcionalidade. Todos incluem build multi-estágio, usuário
+não-root, healthcheck, labels de segurança, limpeza de cache e suporte a segredos
+via BuildKit.
+
+| Template | Runtime | Observação |
+|----------|---------|------------|
+| `node` | `node:<versão>-alpine` | `npm ci` com token via `--mount=type=secret` |
+| `python` | `python:<versão>-alpine` | Wheels compiladas no builder, instalação `--user` |
+| `go` | `scratch` | Binário estático: sem shell, sem libc, sem gerenciador de pacotes |
+| `java` | Temurin JRE Alpine | Heap consciente do container |
+
+`generate` **nunca** sobrescreve: o arquivo sai como `Dockerfile.hardened` ao
+lado do original, para que os dois possam ser comparados antes da troca. Um
+`.dockerignore` é criado junto quando o projeto ainda não tem um.
+
+`dockerls build . --hardened --base node` faz a mesma geração e constrói a partir
+dela. O arquivo fica em disco de propósito: uma construção que ninguém consegue
+inspecionar depois é uma construção que ninguém consegue revisar.
+
+### Segredos de build
+
+Um token passado como build arg fica gravado no comando da camada e é reexibido
+por `docker history`. O DockerLs nunca aceita o **valor** de um segredo -- apenas
+sua **origem**:
+
+```bash
+export NPM_TOKEN=...
+dockerls build . --tag myapp:1.0 --secret id=npm_token,env=NPM_TOKEN
+dockerls build . --tag myapp:1.0 --secret id=npm_token,src=/run/secrets/token
+```
+
+No Dockerfile:
+
+```dockerfile
+RUN --mount=type=secret,id=npm_token \
+    NPM_TOKEN=$(cat /run/secrets/npm_token) npm ci
+```
+
+### Scan pós-build (fase 4)
+
+Depois da construção a imagem é escaneada com os mesmos scanners que o
+`recommend` usa. Quando os dois rodam, o **pior** resultado é o que define a
+pontuação: tirar a média deixaria a ferramenta mais silenciosa puxar a nota para
+cima, e um relatório de segurança não pode arredondar para o lado tranquilizador.
+
+```
+Security Scanning
+  trivy   0 critical  2 high  5 medium  9 low  4 fixable
+  grype   0 critical  2 high  6 medium  9 low  4 fixable
+
+Score 77.6/100   Tier B (conditional -- requires human review before production use)
+  dockerfile 83.0 | scan 74.0
+```
+
+A pontuação combina as duas evidências com pesos diferentes (40% Dockerfile, 60%
+scan), porque uma CVE entregue é um fato sobre o artefato enquanto um achado de
+validação é um fato sobre como ele foi escrito. Nenhuma das duas pode esconder a
+outra: qualquer CRITICAL na imagem, ou mais de três HIGH, fixa o tier em C
+independentemente da aritmética.
+
+Sem `--scan`, a saída diz explicitamente que a nota avalia só o Dockerfile --
+um "100/100 Tier S" não pode ser lido como afirmação sobre uma imagem cujo
+conteúdo nunca foi medido.
+
+### Relatórios
+
+```bash
+dockerls build . --tag myapp:1.0 --report report.html   # formato pela extensão
+dockerls build . --tag myapp:1.0 --format json --format sarif
+```
+
+Formatos: `json`, `html`, `sarif`, `markdown`. Todos são renderizados a partir do
+**mesmo** `BuildReport` -- uma construção que imprime "FAILED" para o
+desenvolvedor e envia um SARIF limpo para a aba de segurança seria pior do que
+relatório nenhum.
+
+O relatório traz: validação regra a regra com linha e correção, resultado do
+build (digest, tamanho, camadas, duração), contagens por scanner, CVEs acima do
+limite de `--fail-on`, recomendações de hardening, o SBOM gerado e a procedência
+(SHA do git, quem construiu, versão do Docker, se o BuildKit foi usado).
+
+### Códigos de saída
+
+| Código | Significado |
+|--------|-------------|
+| 0 | Passou em tudo |
+| 1 | Reprovado: falha de build, achado bloqueante, ou `--fail-on` violado |
+| 2 | Construído, mas há achados que exigem revisão humana |
+
+O 2 não é detalhe: é como um pipeline distingue "olhe isso" de "pare".
+
+### Integração com CI/CD
+
+```yaml
+# .github/workflows/secure-build.yml
+name: Build & Scan
+
+on: [push]
+
+jobs:
+  secure-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install DockerLs
+        run: pip install dockerls
+
+      - name: Build securely
+        run: |
+          dockerls build . \
+            --tag ghcr.io/${{ github.repository }}:${{ github.sha }} \
+            --ci-mode \
+            --fail-on high \
+            --report build-report.json
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: .dockerls/reports
+```
+
+`--ci-mode` sempre grava um SARIF, mesmo sem `--format sarif`: é o artefato que a
+aba de segurança do GitHub consome, e não pode depender de o usuário lembrar da
+flag. Os achados são ancorados na linha do Dockerfile, com caminho relativo ao
+repositório -- é assim que viram anotação no pull request.
+
+`--push` só publica uma construção que **passou** no portão. Pedir `--push` numa
+construção reprovada devolve a recusa por escrito, nunca um silêncio que possa
+ser confundido com sucesso.
+
+### Política do projeto (`.dockerls-hardening.yaml`)
+
+Separado do `config.toml` de propósito: o `config.toml` é a preferência da
+máquina do usuário, enquanto este arquivo é a política **do projeto**, mora no
+repositório e é revisado como código. Quando os dois opinam, o arquivo do projeto
+vence -- é o que um pull request consegue mudar.
+
+```yaml
+validation:
+  hardening_level: strict
+  skip_rules: [healthcheck]      # renunciado explicitamente, ainda aparece como SKIP
+
+scanning:
+  enabled: true
+  fail_on: high
+  sbom_formats: [cyclonedx]
+
+reporting:
+  formats: [json, sarif]
+  vault_push: false
+  vault_path: infraestrutura/builds
+
+buildkit:
+  enabled: true
+  inline_cache: true
+
+projects:                        # usado por `dockerls build --batch`
+  - name: api-backend
+    context: ./api
+    tag: "api:latest"
+    hardened_template: node
+  - name: web-frontend
+    context: ./web
+    tag: "web:latest"
+    push: true
+```
+
+O arquivo é procurado ao lado do contexto de build e depois para cima na árvore
+de diretórios (o que importa em monorepos). Uma política malformada **reprova** a
+execução: cair silenciosamente nos padrões transformaria um pipeline com portão
+num pipeline sem portão -- exatamente a falha que o arquivo existe para impedir.
+
+Uma regra em `skip_rules` continua aparecendo no relatório, como `SKIP`.
+Descartá-la deixaria a renúncia invisível justamente no artefato que um auditor lê.
+
+```bash
+dockerls build . --batch                    # constrói todos os projects do arquivo
+dockerls build . --config outra-politica.yaml
+```
+
+### Registro no vault DevSecOps
+
+```bash
+dockerls build . --tag myapp:1.0 \
+  --vault-push --vault-root ~/Vault \
+  --vault-path infraestrutura/containers/myapp
+```
+
+Grava uma nota Markdown com pontuação, tier, validação regra a regra, contagens
+de scan, recomendações e caminhos das evidências. Um vault inacessível registra o
+motivo e segue -- ele nunca reprova uma construção que passou.
+
+### Assistente interativo
+
+```bash
+$ dockerls build . --interactive
+
+Application type (go/java/node/python) [node]:
+Use the bundled hardened template? [Y/n]:
+Image tag (e.g. myapp:1.0): myapp:1.0
+Scan the image after building? [Y/n]:
+Report format (json/html/both/none) [json]:
+Push to the registry after a passing build? [y/N]:
+```
+
+Só pergunta o que ainda não sabe: uma flag já passada na linha de comando nunca é
+perguntada de novo, e `--ci-mode` desliga o assistente por completo (um prompt em
+CI é um pipeline travado).
 
 ---
 
@@ -475,16 +831,25 @@ O DockerLs segue Clean Architecture, com separação clara de camadas:
 dockerls/
   cli/              # Comandos Typer e formatação de saída
   domain/
-    entities/        # DockerImage, Vulnerability, ScanResult, Recommendation
-    value_objects/   # SecurityScore, SecurityTier, RemediationScore
+    entities/        # DockerImage, Vulnerability, ScanResult, Recommendation,
+                     #   ParsedDockerfile, ValidationResult, HardeningRule
+    value_objects/   # SecurityScore, SecurityTier, RemediationScore, BuildScore
     interfaces/      # Interfaces abstratas (portas)
   application/
-    use_cases/       # SearchImages, RecommendImages, AnalyzeImage, CompareImages
-    services/        # ScannerFactory, CrossValidator, CompositeImageRepository
-    dto/             # AnalysisResult, ComparisonResult
+    use_cases/       # SearchImages, RecommendImages, AnalyzeImage, CompareImages,
+                     #   AnalyzeDockerfile, BuildImage, GenerateHardenedDockerfile
+    services/        # ScannerFactory, CrossValidator, CompositeImageRepository,
+                     #   OwaspDockerfileValidator, HardeningSuggester,
+                     #   BuildReportGenerator
+    dto/             # AnalysisResult, ComparisonResult, BuildReport
   infrastructure/
-    config/          # Settings (Pydantic)
+    config/          # Settings (Pydantic) e a política .dockerls-hardening.yaml
     database/        # Modelos SQLAlchemy
+    dockerfile/      # Parser de Dockerfile (estágios, flags, heredocs, ARGs)
+    validators/      # As 15 regras de segurança derivadas do OWASP
+    docker/          # Wrapper do `docker build` com BuildKit e procedência
+    templates/       # Dockerfiles endurecidos (node, python, go, java)
+    vault/           # Escrita dos relatórios no vault DevSecOps
     logging/         # Configuração do Loguru com mascaramento de segredos
     evidence.py      # Persistência do JSON bruto dos scans
   integrations/
@@ -496,8 +861,20 @@ dockerls/
     threat_intel/    # CISA KEV e EPSS
   cache/             # Implementação de cache em SQLite
   exporters/         # Exportadores JSON, CSV, HTML, Markdown, SARIF
+                     #   (+ os exportadores de BuildReport)
   utils/             # Validação de entrada, auxiliares de autenticação e retry
 ```
+
+O parser de Dockerfile é próprio, e não uma dependência de terceiros: cada regra
+precisa de número de linha, escopo por estágio e das flags `--mount=type=secret`
+/ `--from`. Os parsers disponíveis descartam pelo menos uma dessas coisas, e uma
+ferramenta de segurança que perde silenciosamente justamente a flag que estava
+procurando reporta como limpo um Dockerfile que não está.
+
+O `docker build` é acionado pela CLI, do mesmo jeito que os scanners: é o
+binário que todo usuário e todo runner de CI já têm autenticado, e o SDK
+adicionaria uma segunda opinião, com versionamento próprio, sobre como falar com
+o daemon.
 
 Os dados fluem para dentro: CLI -> Casos de uso -> Domínio. As integrações
 externas implementam interfaces do domínio e são injetadas pelo construtor de
@@ -549,6 +926,25 @@ flag explícita sempre vence a configuração.
 | workers       | 10      |
 | limit (tags)  | 100     |
 | TTL do cache  | 24h     |
+
+### Configurações do `build`
+
+```toml
+# ~/.config/dockerls/config.toml
+hardening_level = "standard"        # strict | standard | relaxed
+build_fail_on = "critical"          # none | critical | high | medium
+buildkit = true
+build_timeout = 1800                # segundos; um build a frio leva mais que um scan
+generate_sbom = true
+build_report_dir = ".dockerls/reports"
+sbom_dir = ".dockerls/sboms"
+vault_root = "~/Vault"              # destino de --vault-push
+```
+
+Para a política **do projeto** (nível de hardening, regras renunciadas, limiares
+de scan, lista de projetos para `--batch`), use `.dockerls-hardening.yaml` no
+repositório -- ela vence estas preferências de máquina. Veja
+[Política do projeto](#política-do-projeto-dockerls-hardeningyaml).
 
 ---
 
