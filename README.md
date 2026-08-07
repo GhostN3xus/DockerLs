@@ -1,43 +1,43 @@
 # DockerLs
 
-Enterprise Docker Image Security Advisor. Discovers the most secure Docker images
-available on Docker Hub by scanning vulnerabilities, checking EOL status, and
-producing actionable remediation plans.
+Consultor de segurança de imagens Docker para uso corporativo. Descobre as imagens
+Docker mais seguras disponíveis no Docker Hub escaneando vulnerabilidades,
+verificando status de fim de vida (EOL) e produzindo planos de correção acionáveis.
 
-DockerLs is not just a scanner -- it is a security advisor that recommends the best
-image for production use and tells you exactly how to fix what it finds.
+O DockerLs não é apenas um scanner -- é um consultor de segurança que recomenda a
+melhor imagem para produção e diz exatamente como corrigir o que encontra.
 
 ---
 
-## Table of Contents
+## Índice
 
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Commands](#commands)
-- [Scoring Algorithm](#scoring-algorithm)
-- [Security Tiers](#security-tiers)
-- [Fallback Mode](#fallback-mode)
-- [Architecture](#architecture)
-- [Configuration](#configuration)
-- [Docker Usage](#docker-usage)
-- [Development](#development)
+- [Instalação](#instalação)
+- [Início rápido](#início-rápido)
+- [Comandos](#comandos)
+- [Algoritmo de pontuação](#algoritmo-de-pontuação)
+- [Níveis de segurança](#níveis-de-segurança)
+- [Modo alternativo](#modo-alternativo)
+- [Arquitetura](#arquitetura)
+- [Configuração](#configuração)
+- [Uso com Docker](#uso-com-docker)
+- [Desenvolvimento](#desenvolvimento)
 - [CI/CD](#cicd)
-- [Security Model](#security-model)
-- [Troubleshooting](#troubleshooting)
-- [FAQ](#faq)
-- [License](#license)
+- [Modelo de segurança](#modelo-de-segurança)
+- [Solução de problemas](#solução-de-problemas)
+- [Perguntas frequentes](#perguntas-frequentes)
+- [Licença](#licença)
 
 ---
 
-## Installation
+## Instalação
 
-### From PyPI
+### Pelo PyPI
 
 ```bash
 pip install dockerls
 ```
 
-### From source
+### A partir do código-fonte
 
 ```bash
 git clone https://github.com/GhostN3xus/DockerLs.git
@@ -45,46 +45,46 @@ cd DockerLs
 pip install .
 ```
 
-### With keyring support (for credential storage)
+### Com suporte a keyring (para armazenar credenciais)
 
 ```bash
 pip install "dockerls[keyring]"
 ```
 
-### Requirements
+### Requisitos
 
 - Python 3.11+
-- Trivy (primary scanner) -- install from https://aquasecurity.github.io/trivy
-- Grype (optional fallback) -- install from https://github.com/anchore/grype
+- Trivy (scanner principal) -- instale em https://aquasecurity.github.io/trivy
+- Grype (alternativa opcional) -- instale em https://github.com/anchore/grype
 
 ---
 
-## Quick Start
+## Início rápido
 
 ```bash
-# Find the most secure Node.js image
+# Encontrar a imagem Node.js mais segura
 dockerls recommend node
 
-# Deep-analyze a specific tag
+# Analisar a fundo uma tag específica
 dockerls analyze node:22-alpine
 
-# Get a full remediation plan
+# Obter um plano completo de correção
 dockerls advisor node
 
-# Compare two images side by side
+# Comparar duas imagens lado a lado
 dockerls compare node:22-alpine node:22-bookworm-slim
 
-# Export report as JSON
+# Exportar relatório em JSON
 dockerls export node --format json --output report.json
 ```
 
 ---
 
-## Commands
+## Comandos
 
 ### search
 
-Search Docker Hub for available tags.
+Busca tags disponíveis no Docker Hub.
 
 ```bash
 dockerls search node
@@ -93,60 +93,60 @@ dockerls search python --limit 50
 
 ### recommend
 
-Recommend the most secure tags based on vulnerability scanning.
+Recomenda as tags mais seguras com base no scan de vulnerabilidades.
 
 ```bash
 dockerls recommend node
-dockerls recommend node --max-medium 10          # loosen the default of 5
+dockerls recommend node --max-medium 10          # afrouxa o padrão de 5
 dockerls recommend nginx --workers 20
 dockerls recommend node --format json
 dockerls recommend node --fail-on high --no-color
 ```
 
-`recommend` and `advisor` accept `--format json` (machine-readable output)
-and `--no-color` (plain text, no ANSI codes), and exit with a status code
-that reflects the outcome so it can be used as a CI gate:
+`recommend` e `advisor` aceitam `--format json` (saída legível por máquina) e
+`--no-color` (texto puro, sem códigos ANSI), e terminam com um código de saída
+que reflete o resultado, para servir de portão em CI:
 
-| Exit code | Meaning                                          |
-|-----------|---------------------------------------------------|
-| 0         | An image meeting the baseline was found            |
-| 1         | Hard error, or `--fail-on` threshold was violated  |
-| 2         | No baseline image, but fallback alternatives exist |
-| 3         | Nothing usable was found at all                    |
+| Código de saída | Significado                                             |
+|-----------------|---------------------------------------------------------|
+| 0               | Encontrou imagem que atende ao baseline                  |
+| 1               | Erro grave, ou limite de `--fail-on` foi violado         |
+| 2               | Nenhuma imagem no baseline, mas há alternativas          |
+| 3               | Nada utilizável foi encontrado                           |
 
-`--fail-on {critical,high,medium}` forces exit code 1 if the top result
-still carries vulnerabilities at or above that severity, even in fallback
-mode -- useful for failing a CI job on a fallback recommendation you don't
-consider acceptable.
+`--fail-on {critical,high,medium}` força o código de saída 1 se o melhor
+resultado ainda carregar vulnerabilidades naquela severidade ou acima, mesmo em
+modo alternativo -- útil para reprovar um job de CI diante de uma recomendação
+alternativa que você não considera aceitável.
 
-#### What a recommendation guarantees
+#### O que uma recomendação garante
 
-Every row in the **Recommended Images** table has cleared three gates. If a
-tag cannot clear all three, it is reported separately and never scored:
+Toda linha da tabela **Recommended Images** passou por três portões. Se uma tag
+não passa nos três, ela é reportada à parte e nunca recebe pontuação:
 
-1. **Proven scan.** The scanner process exited cleanly and its JSON was
-   parsed. A failed, timed-out or partial scan sends the tag to the
-   `Unverified (technical error)` section -- it gets no score and no tier.
-2. **Undisputed score.** The top candidates are re-scanned with the second
-   scanner (Grype when Trivy is primary, and vice versa). If the two
-   disagree materially on CRITICAL/HIGH counts, the score is shown as
-   `!disputed` instead of a number, with the discrepancy printed below.
-3. **Tag confirmed in its source registry.** Docker Hub tags are checked
-   against the Hub API (`GET /v2/repositories/<ns>/<repo>/tags/<tag>`);
-   hardened-source tags are checked against that registry's own listing.
-   Either way the `Tag` column reflects a real registry answer, never a
-   constructed string.
+1. **Scan comprovado.** O processo do scanner terminou limpo e o JSON dele foi
+   interpretado. Um scan com falha, timeout ou parcial manda a tag para a seção
+   `Unverified (technical error)` -- ela não recebe pontuação nem nível.
+2. **Pontuação sem contestação.** Os melhores candidatos são reescaneados com o
+   segundo scanner (Grype quando o Trivy é o principal, e vice-versa). Se os dois
+   divergirem de forma relevante na contagem de CRITICAL/HIGH, a pontuação
+   aparece como `!disputed` em vez de um número, com a discrepância logo abaixo.
+3. **Tag confirmada no registry de origem.** Tags do Docker Hub são checadas
+   contra a API do Hub (`GET /v2/repositories/<ns>/<repo>/tags/<tag>`); tags de
+   fontes hardened são checadas contra a listagem do próprio registry. De um
+   jeito ou de outro, a coluna `Tag` reflete uma resposta real do registry, nunca
+   uma string montada.
 
-The run opens with a one-line summary of how many tags were analyzed versus
-skipped, which catalogues were searched, and the path to that run's log file:
+A execução abre com um resumo de uma linha: quantas tags foram analisadas versus
+puladas, quais catálogos foram consultados, e o caminho do arquivo de log:
 
 ```
 OK 12/24 analyzed | X 12 skipped (technical error) | sources: Docker Hub, Chainguard, Distroless
 log: logs/dockerls_2026-08-06_13-36-15.log
 ```
 
-When nothing clears the baseline, the exact criteria are printed rather than
-just the verdict:
+Quando nada atinge o baseline, os critérios exatos são impressos em vez de apenas
+o veredito:
 
 ```
 No image found matching baseline.
@@ -154,35 +154,35 @@ Baseline: 0 Critical, 0 High, 5 Medium (and not EOL).
 No image met it -- showing the closest alternatives.
 ```
 
-#### Image sources
+#### Fontes de imagens
 
-Docker Hub is searched alongside two free, security-hardened catalogues, and
-all of their tags go through the same scan pipeline -- a hardened image wins
-on measured vulnerabilities, not on reputation. The `Source` column says
-where each row came from.
+O Docker Hub é consultado junto com dois catálogos gratuitos e endurecidos
+(hardened), e todas as tags passam pelo mesmo pipeline de scan -- uma imagem
+hardened vence por vulnerabilidades medidas, não por reputação. A coluna `Source`
+informa de onde veio cada linha.
 
-| Source | Registry | Notes |
-|--------|----------|-------|
-| Docker Hub | `docker.io` | Full tag listing with sizes and dates |
-| Chainguard | `cgr.dev/chainguard/<image>` | Free tier tracks moving tags (`latest`, `latest-dev`); pinned versions are a paid feature |
-| Distroless | `gcr.io/distroless/<image>` | GCR reports publish dates and sizes, so these tags are ranked newest-first |
+| Fonte | Registry | Observações |
+|-------|----------|-------------|
+| Docker Hub | `docker.io` | Listagem completa de tags, com tamanhos e datas |
+| Chainguard | `cgr.dev/chainguard/<imagem>` | O nível gratuito acompanha tags móveis (`latest`, `latest-dev`); versões fixadas são recurso pago |
+| Distroless | `gcr.io/distroless/<imagem>` | O GCR informa datas de publicação e tamanhos, então essas tags são ordenadas da mais recente para a mais antiga |
 
-Cosign signatures, attestations, SBOMs, single-arch aliases and
-commit-pinned duplicates are filtered out of registry listings -- they are
-not images anyone would pull. A source that is unreachable is logged and
-skipped; it never takes down a search the other sources can still answer.
-Use `--no-hardened` for Docker Hub only.
+Assinaturas cosign, atestados, SBOMs, apelidos de arquitetura única e duplicatas
+fixadas por commit são filtrados das listagens -- não são imagens que alguém
+baixaria. Uma fonte inacessível é registrada em log e pulada; ela nunca derruba
+uma busca que as outras fontes ainda conseguem responder. Use `--no-hardened`
+para consultar apenas o Docker Hub.
 
-#### Output, logs and evidence
+#### Saída, logs e evidências
 
-The terminal shows only a progress spinner and the results. All diagnostics
--- including scanner stderr -- go to `logs/dockerls_<timestamp>.log`; pass
-`--verbose` to mirror them to stderr as well. Set `DOCKERLS_LOG_DIR` to move
-the log directory.
+O terminal mostra apenas um indicador de progresso e os resultados. Todos os
+diagnósticos -- inclusive o stderr do scanner -- vão para
+`logs/dockerls_<timestamp>.log`; use `--verbose` para espelhá-los também no
+stderr. Defina `DOCKERLS_LOG_DIR` para mudar o diretório de log.
 
-The raw JSON from every scan is written to
-`.dockerls/scans/<image>_<tag>__<scanner>__<timestamp>.json`, and the
-`Details` block under the table points each image at its own files:
+O JSON bruto de cada scan é gravado em
+`.dockerls/scans/<imagem>_<tag>__<scanner>__<timestamp>.json`, e o bloco
+`Details` abaixo da tabela aponta cada imagem para seus próprios arquivos:
 
 ```
 Details
@@ -195,57 +195,57 @@ Details
      trivy:    .dockerls/scans/node_trixie-slim__trivy__20260806T153113154282.json  (shared digest)
 ```
 
-`(shared digest)` marks evidence produced under a sibling tag's name: tags
-pointing at the same manifest digest are scanned once and share the result.
-A per-run manifest linking every displayed score to its evidence is written
-alongside. Set `DOCKERLS_EVIDENCE_DIR` to relocate the directory.
+`(shared digest)` marca evidências produzidas sob o nome de uma tag irmã: tags
+que apontam para o mesmo digest de manifesto são escaneadas uma vez e compartilham
+o resultado. Junto é gravado um manifesto por execução ligando cada pontuação
+exibida à sua evidência. Defina `DOCKERLS_EVIDENCE_DIR` para mudar o diretório.
 
-The progress display renders to **stderr** and results to **stdout**, so
-`dockerls recommend node > out.txt` leaves the spinner on your terminal and
-writes clean results to the file.
+O indicador de progresso é renderizado no **stderr** e os resultados no
+**stdout**, então `dockerls recommend node > out.txt` mantém o indicador no seu
+terminal e grava resultados limpos no arquivo.
 
-| Flag | Effect |
+| Flag | Efeito |
 |------|--------|
-| `--verbose` / `-v` | Also print logs to stderr |
-| `--no-progress` | Disable the progress spinner |
-| `--no-cross-validate` | Skip second-scanner validation (faster) |
-| `--no-hub-check` | Skip registry tag verification (offline use) |
-| `--no-hardened` | Search Docker Hub only |
+| `--verbose` / `-v` | Também imprime logs no stderr |
+| `--no-progress` | Desativa o indicador de progresso |
+| `--no-cross-validate` | Pula a validação com o segundo scanner (mais rápido) |
+| `--no-hub-check` | Pula a verificação de tag no registry (uso offline) |
+| `--no-hardened` | Consulta apenas o Docker Hub |
 
-#### Scan concurrency
+#### Concorrência de scans
 
-Trivy takes an exclusive lock on its cache directory, so parallel scans
-sharing one cache dir fail with `cache may be in use by another process:
-timeout`. DockerLs downloads the vulnerability DB once up front, then gives
-each concurrent worker its own cache directory with the DB hard-linked in,
-and removes those directories when the run ends. If hard-linking is not
-possible, it falls back to a single shared cache dir and serializes scans --
-slower, but never lock-contended. `DOCKERLS_TRIVY_CACHE_DIR` overrides the
-cache root.
+O Trivy trava com exclusividade o diretório de cache dele, então scans paralelos
+que compartilham um mesmo cache falham com `cache may be in use by another
+process: timeout`. O DockerLs baixa o banco de vulnerabilidades uma única vez no
+início, depois dá a cada worker concorrente o seu próprio diretório de cache com
+o banco vinculado por hard link, e remove esses diretórios ao fim da execução. Se
+o hard link não for possível, ele recorre a um único cache compartilhado e
+serializa os scans -- mais lento, porém nunca em disputa de trava.
+`DOCKERLS_TRIVY_CACHE_DIR` sobrescreve a raiz do cache.
 
-Grype checks its vulnerability DB for updates on *every* invocation, which
-is a network round trip per image. Cross-validation therefore runs
-`grype db update` once for the batch and then scans with
-`GRYPE_DB_AUTO_UPDATE=false`, and the validations themselves run
-concurrently (`DOCKERLS_CROSS_VALIDATE_WORKERS`, default 5) since they are
-independent. The acceptance suite holds the whole command to a 30-second
-budget for five images.
+O Grype verifica atualizações do banco de vulnerabilidades a *cada* invocação, o
+que é uma ida à rede por imagem. Por isso a validação cruzada roda
+`grype db update` uma vez para o lote e depois escaneia com
+`GRYPE_DB_AUTO_UPDATE=false`, e as validações em si rodam concorrentemente
+(`DOCKERLS_CROSS_VALIDATE_WORKERS`, padrão 5), já que são independentes. A suíte
+de aceitação limita o comando inteiro a um orçamento de 30 segundos para cinco
+imagens.
 
 ### advisor
 
-Full security advisor with remediation steps.
+Consultor de segurança completo, com passos de correção.
 
 ```bash
 dockerls advisor node
 dockerls advisor node --format json
 ```
 
-Output includes: current best image, security score, vulnerability breakdown,
-remediation score, and a step-by-step fix plan.
+A saída inclui: melhor imagem atual, pontuação de segurança, detalhamento de
+vulnerabilidades, pontuação de correção e um plano de correção passo a passo.
 
 ### sbom
 
-Generate a Software Bill of Materials for an image via Trivy.
+Gera um inventário de software (SBOM) para uma imagem via Trivy.
 
 ```bash
 dockerls sbom node:22-alpine --format cyclonedx
@@ -254,17 +254,18 @@ dockerls sbom node:22-alpine --format spdx --output node.spdx.json
 
 ### analyze
 
-Deep analysis of a specific image tag.
+Análise profunda de uma tag específica.
 
 ```bash
 dockerls analyze node:22-alpine
 ```
 
-Shows all CVEs found, CVSS scores, affected packages, fix availability.
+Mostra todas as CVEs encontradas, pontuações CVSS, pacotes afetados e
+disponibilidade de correção.
 
 ### compare
 
-Side-by-side comparison of two or more images.
+Comparação lado a lado de duas ou mais imagens.
 
 ```bash
 dockerls compare node:22-alpine node:22-bookworm-slim
@@ -272,7 +273,7 @@ dockerls compare node:22-alpine node:22-bookworm-slim
 
 ### export
 
-Export analysis results.
+Exporta os resultados da análise.
 
 ```bash
 dockerls export node --format json
@@ -282,27 +283,36 @@ dockerls export node --format markdown --output report.md
 dockerls export node --format sarif --output report.sarif
 ```
 
-The `sarif` format produces SARIF 2.1.0, suitable for upload to GitHub code
-scanning or other SARIF-aware tooling.
+O formato `sarif` produz SARIF 2.1.0, adequado para envio ao code scanning do
+GitHub ou a outras ferramentas que entendem SARIF.
 
 ### login
 
-Authenticate with Docker Hub (increases rate limits).
+Autentica no Docker Hub (aumenta os limites de requisição).
 
 ```bash
 dockerls login
 ```
 
-Credentials are stored in your system keyring. Alternatively, set environment variables:
+As credenciais são guardadas no keyring do sistema. Alternativamente, defina
+variáveis de ambiente:
 
 ```bash
-export DOCKERHUB_USERNAME=myuser
-export DOCKERHUB_TOKEN=mytoken
+export DOCKERHUB_USERNAME=meuusuario
+export DOCKERHUB_TOKEN=meutoken
+```
+
+### logout
+
+Remove as credenciais armazenadas.
+
+```bash
+dockerls logout
 ```
 
 ### doctor
 
-Check system dependencies.
+Verifica as dependências do sistema.
 
 ```bash
 dockerls doctor
@@ -310,7 +320,10 @@ dockerls doctor
 
 ### health
 
-Check connectivity to external services.
+Verifica a conectividade com os serviços externos dos quais a ferramenta depende:
+Docker Hub, Chainguard, Distroless, endoflife.date, CISA KEV e EPSS. Termina com
+código 1 se algum estiver inacessível ou responder com erro, para servir de
+portão em CI.
 
 ```bash
 dockerls health
@@ -318,7 +331,7 @@ dockerls health
 
 ### cache
 
-Manage the scan cache.
+Gerencia o cache de scans.
 
 ```bash
 dockerls cache clear
@@ -333,172 +346,183 @@ dockerls version
 
 ---
 
-## Scoring Algorithm
+## Algoritmo de pontuação
 
-Each image receives a security score from 0 to 100:
+Cada imagem recebe uma pontuação de segurança de 0 a 100:
 
 ```
-score = 96 - penalties + bonuses      # clamped to [0, 100]
+pontuação = 96 - penalidades + bônus      # limitada a [0, 100]
 ```
 
-Measured vulnerabilities drive the score. Penalties:
+As vulnerabilidades medidas é que determinam a pontuação. Penalidades:
 
-| Condition                                        | Penalty       |
-|--------------------------------------------------|---------------|
-| CRITICAL vulnerability                            | -20 each     |
-| HIGH vulnerability                                | -5 each      |
-| MEDIUM vulnerability                              | -1 each      |
-| EOL                                               | -20          |
-| Vulnerability with a confirmed exploit (CISA KEV) | -10 per vuln |
-| Vulnerability with EPSS >= 0.5 (high predicted exploitation probability) | -5 per vuln |
-| Image age                                         | -age_days/365 |
+| Condição                                             | Penalidade      |
+|------------------------------------------------------|-----------------|
+| Vulnerabilidade CRITICAL                              | -20 cada        |
+| Vulnerabilidade HIGH                                  | -5 cada         |
+| Vulnerabilidade MEDIUM                                | -1 cada         |
+| EOL (fim de vida)                                     | -20             |
+| Vulnerabilidade com exploit confirmado (CISA KEV)     | -10 por vuln    |
+| Vulnerabilidade com EPSS >= 0,5 (alta probabilidade prevista de exploração) | -5 por vuln |
+| Idade da imagem                                       | -dias_de_idade/365 (teto de 3) |
 
-Qualitative signals act as tie-breakers. They total **4.0** -- deliberately
-less than a single HIGH finding, so no combination of them can lift an
-image with an extra HIGH or CRITICAL above a cleaner one:
+Sinais qualitativos funcionam como critério de desempate. Somam **4,0** --
+deliberadamente menos que um único achado HIGH, para que nenhuma combinação deles
+consiga colocar uma imagem com um HIGH ou CRITICAL a mais acima de uma imagem
+mais limpa:
 
-| Condition                                          | Bonus |
-|-----------------------------------------------------|-------|
-| Official image                                       | +1    |
-| Minimal base (Alpine, Distroless, or a hardened vendor image -- Chainguard, Wolfi, Bitnami) | +1 |
-| Digitally signed                                     | +1    |
-| LTS version                                          | +0.5  |
-| Updated in last 30 days                              | +0.5  |
+| Condição                                             | Bônus  |
+|------------------------------------------------------|--------|
+| Imagem oficial                                        | +1     |
+| Base mínima (Alpine, Distroless ou imagem de fornecedor hardened -- Chainguard, Wolfi, Bitnami) | +1 |
+| Assinada digitalmente                                 | +1     |
+| Versão LTS                                            | +0,5   |
+| Atualizada nos últimos 30 dias                        | +0,5   |
 
-The minimal-base bonus is applied once even if an image matches more than
-one signal (e.g. an Alpine-based Chainguard image does not get +2).
+O bônus de base mínima é aplicado uma única vez, mesmo que a imagem atenda a mais
+de um sinal (por exemplo, uma imagem Chainguard baseada em Alpine não recebe +2).
 
-They *can* outweigh a MEDIUM or two, which is intended: a signed official
-distroless image with two mediums is a defensible pick over an unremarkable
-image with none.
+Os bônus *podem* superar um ou dois MEDIUM, e isso é intencional: uma imagem
+distroless oficial e assinada com dois medium é uma escolha defensável frente a
+uma imagem sem nada de especial e sem nenhum.
 
-Scoring starts at 96 rather than 100 so a fully-decorated clean image lands
-exactly on 100 without being clamped. This matters: with bonuses totalling
-+19 against a base of 100, anything reasonably decorated hit the ceiling and
-a clean image, a 1-HIGH image, a 2-HIGH image and a 5-MEDIUM image all
-reported exactly `100.0`. There is no separate "zero vulnerabilities" bonus
--- zero findings already means zero penalty, and rewarding it again
-double-counted the same fact.
+A pontuação começa em 96 e não em 100 para que uma imagem limpa e com todos os
+bônus chegue exatamente a 100 sem ser truncada. Isso importa: com bônus somando
++19 sobre uma base de 100, qualquer imagem razoavelmente bem qualificada batia no
+teto, e uma imagem limpa, uma com 1 HIGH, uma com 2 HIGH e uma com 5 MEDIUM
+reportavam todas exatamente `100.0`. Não existe bônus separado de "zero
+vulnerabilidades" -- zero achados já significa zero penalidade, e premiar de novo
+contava o mesmo fato duas vezes.
 
-Age only moves the score when the source actually reported a publish date.
-Registries that list tag names only (Chainguard, most OCI catalogues) are
-neither charged the age penalty nor given the recency bonus, so they are not
-punished for metadata the registry does not publish.
+A idade só move a pontuação quando a fonte de fato informou uma data de
+publicação. Registries que listam apenas nomes de tags (Chainguard e a maioria
+dos catálogos OCI) não são penalizados pela idade nem recebem o bônus de
+atualidade, para não serem punidos por metadados que o registry não publica.
 
-CISA KEV and EPSS lookups are best-effort: if those feeds are unreachable,
-DockerLs scores without that signal rather than failing the scan. Both are
-only queried when the scan has CRITICAL or HIGH findings to check.
+As consultas a CISA KEV e EPSS são feitas em regime de melhor esforço: se esses
+feeds estiverem inacessíveis, o DockerLs pontua sem esse sinal em vez de falhar o
+scan. Ambos só são consultados quando o scan tem achados CRITICAL ou HIGH a
+verificar.
 
 ---
 
-## Security Tiers
+## Níveis de segurança
 
-| Tier | Criteria                                     | Production Ready |
-|------|----------------------------------------------|------------------|
-| S    | Critical = 0, High = 0                       | Yes*             |
-| A    | Critical = 0, High <= 3, all fixable         | Yes*             |
-| B    | Critical = 0, High <= 10                     | Conditional*     |
-| C    | Any Critical, or many High                   | No               |
+| Nível | Critério                                     | Pronto para produção |
+|-------|----------------------------------------------|----------------------|
+| S     | Critical = 0, High = 0                       | Sim*                 |
+| A     | Critical = 0, High <= 3, todas corrigíveis   | Sim*                 |
+| B     | Critical = 0, High <= 10                     | Condicional*         |
+| C     | Qualquer Critical, ou muitos High            | Não                  |
 
-\* An EOL image is never reported production-ready, regardless of tier.
+\* Uma imagem em EOL nunca é reportada como pronta para produção, qualquer que
+seja o nível.
+
+Níveis que exigem ação aparecem numa seção `Requires review` na saída do
+`recommend`, nomeando cada imagem afetada -- um nível B na tabela não passa
+despercebido.
 
 ---
 
-## Ignoring Known Findings
+## Ignorando achados conhecidos
 
-Create a `.dockerls-ignore.yaml` in the directory you run `dockerls` from
-to suppress specific CVEs from scoring and recommendations:
+Crie um `.dockerls-ignore.yaml` no diretório de onde você executa o `dockerls`
+para suprimir CVEs específicas da pontuação e das recomendações:
 
 ```yaml
 ignores:
   - cve: CVE-2024-0001
-    justification: "Not reachable in our usage of this package"
+    justification: "Não alcançável no nosso uso deste pacote"
     expires: 2026-12-31
 ```
 
-`expires` is optional; once the date passes, the rule stops applying and
-the CVE counts again. Malformed or missing ignore files are treated as
-"no rules" rather than failing the scan.
+`expires` é opcional; passada a data, a regra deixa de valer e a CVE volta a
+contar. Arquivos de ignore malformados ou ausentes são tratados como "sem regras"
+em vez de falhar o scan.
 
-Tier C images are never recommended for production.
-
----
-
-## Fallback Mode
-
-When no image meets the baseline (Critical=0, High=0), DockerLs does not return
-an empty result. Instead it:
-
-1. Finds all images with Critical = 0
-2. Sorts by fewest HIGH vulnerabilities
-3. Evaluates fix availability
-4. Calculates a Remediation Score
-5. Presents the best alternative with a fix plan
-
-### Remediation Score
-
-| Score | Meaning                      |
-|-------|------------------------------|
-| 100   | All vulns have fixes         |
-| 80    | Most vulns have fixes        |
-| 60    | About half have fixes        |
-| 40    | Few have fixes               |
-| 20    | No fixes available           |
+Imagens de nível C nunca são recomendadas para produção.
 
 ---
 
-## Architecture
+## Modo alternativo
 
-DockerLs follows Clean Architecture with clear layer separation:
+Quando nenhuma imagem atende ao baseline (Critical=0, High=0), o DockerLs não
+retorna resultado vazio. Em vez disso, ele:
+
+1. Encontra todas as imagens com Critical = 0
+2. Ordena pelo menor número de vulnerabilidades HIGH
+3. Avalia a disponibilidade de correções
+4. Calcula uma pontuação de correção
+5. Apresenta a melhor alternativa com um plano de correção
+
+### Pontuação de correção
+
+| Pontuação | Significado                           |
+|-----------|---------------------------------------|
+| 100       | Todas as vulns têm correção           |
+| 80        | A maioria tem correção                |
+| 60        | Cerca de metade tem correção          |
+| 40        | Poucas têm correção                   |
+| 20        | Nenhuma correção disponível           |
+
+---
+
+## Arquitetura
+
+O DockerLs segue Clean Architecture, com separação clara de camadas:
 
 ```
 dockerls/
-  cli/              # Typer CLI commands and output formatting
+  cli/              # Comandos Typer e formatação de saída
   domain/
     entities/        # DockerImage, Vulnerability, ScanResult, Recommendation
     value_objects/   # SecurityScore, SecurityTier, RemediationScore
-    interfaces/      # Abstract interfaces (ports)
+    interfaces/      # Interfaces abstratas (portas)
   application/
     use_cases/       # SearchImages, RecommendImages, AnalyzeImage, CompareImages
-    services/        # ScannerFactory
+    services/        # ScannerFactory, CrossValidator, CompositeImageRepository
     dto/             # AnalysisResult, ComparisonResult
   infrastructure/
     config/          # Settings (Pydantic)
-    database/        # SQLAlchemy models
-    logging/         # Loguru setup with secret masking
+    database/        # Modelos SQLAlchemy
+    logging/         # Configuração do Loguru com mascaramento de segredos
+    evidence.py      # Persistência do JSON bruto dos scans
   integrations/
-    dockerhub/       # Docker Hub API client
-    trivy/           # Trivy scanner integration
-    grype/           # Grype scanner integration (fallback)
-    endoflife/       # endoflife.date checker
-  cache/             # SQLite cache implementation
-  exporters/         # JSON, CSV, HTML, Markdown exporters
-  utils/             # Input validation, auth helpers
+    dockerhub/       # Cliente da API do Docker Hub
+    trivy/           # Integração com o scanner Trivy
+    grype/           # Integração com o scanner Grype (alternativa)
+    registry/        # Catálogos hardened via OCI (Chainguard, Distroless)
+    endoflife/       # Verificador endoflife.date
+    threat_intel/    # CISA KEV e EPSS
+  cache/             # Implementação de cache em SQLite
+  exporters/         # Exportadores JSON, CSV, HTML, Markdown, SARIF
+  utils/             # Validação de entrada, auxiliares de autenticação e retry
 ```
 
-Data flows inward: CLI -> Use Cases -> Domain. External integrations implement
-domain interfaces and are injected via the dependency builder.
+Os dados fluem para dentro: CLI -> Casos de uso -> Domínio. As integrações
+externas implementam interfaces do domínio e são injetadas pelo construtor de
+dependências.
 
 ---
 
-## Configuration
+## Configuração
 
-Settings are resolved in priority order: environment variables, then
-`~/.config/dockerls/config.toml` (or `$XDG_CONFIG_HOME/dockerls/config.toml`),
-then built-in defaults.
+As configurações são resolvidas nesta ordem de prioridade: variáveis de ambiente,
+depois `~/.config/dockerls/config.toml` (ou
+`$XDG_CONFIG_HOME/dockerls/config.toml`), depois os padrões embutidos.
 
-### Environment variables
+### Variáveis de ambiente
 
-| Variable                        | Description                              |
-|----------------------------------|-------------------------------------------|
-| DOCKERHUB_USERNAME               | Docker Hub username                       |
-| DOCKERHUB_TOKEN                  | Docker Hub access token                   |
-| XDG_CACHE_HOME                   | Override cache directory                  |
-| XDG_CONFIG_HOME                  | Override config file directory            |
-| DOCKERLS_DISABLE_THREAT_INTEL    | Disable CISA KEV / EPSS lookups           |
-| DOCKERLS_<SETTING_NAME>          | Override any other setting below (e.g. `DOCKERLS_MAX_TAGS=200`) |
+| Variável                        | Descrição                                  |
+|---------------------------------|--------------------------------------------|
+| DOCKERHUB_USERNAME              | Usuário do Docker Hub                      |
+| DOCKERHUB_TOKEN                 | Token de acesso do Docker Hub              |
+| XDG_CACHE_HOME                  | Sobrescreve o diretório de cache           |
+| XDG_CONFIG_HOME                 | Sobrescreve o diretório do arquivo de config |
+| DOCKERLS_DISABLE_THREAT_INTEL   | Desativa as consultas a CISA KEV / EPSS    |
+| DOCKERLS_<NOME_DA_CONFIG>       | Sobrescreve qualquer outra configuração abaixo (ex.: `DOCKERLS_MAX_TAGS=200`) |
 
-### Config file
+### Arquivo de configuração
 
 ```toml
 # ~/.config/dockerls/config.toml
@@ -507,27 +531,28 @@ workers = 20
 log_level = "DEBUG"
 ```
 
-Keys match the setting names in the table below (snake_case, no prefix).
+As chaves correspondem aos nomes das configurações da tabela abaixo (snake_case,
+sem prefixo).
 
-Every threshold flag (`--max-critical`, `--max-high`, `--max-medium`,
-`--workers`, `--limit`) falls back to its configured value when omitted, so
-`DOCKERLS_MAX_MEDIUM=10` and a `config.toml` entry both take effect. An
-explicit flag always wins over configuration.
+Toda flag de limite (`--max-critical`, `--max-high`, `--max-medium`,
+`--workers`, `--limit`) recorre ao valor configurado quando omitida, então tanto
+`DOCKERLS_MAX_MEDIUM=10` quanto uma entrada no `config.toml` fazem efeito. Uma
+flag explícita sempre vence a configuração.
 
-### Default thresholds
+### Limites padrão
 
-| Parameter     | Default |
+| Parâmetro     | Padrão  |
 |---------------|---------|
 | max-critical  | 0       |
 | max-high      | 0       |
 | max-medium    | 5       |
 | workers       | 10      |
 | limit (tags)  | 100     |
-| cache TTL     | 24h     |
+| TTL do cache  | 24h     |
 
 ---
 
-## Docker Usage
+## Uso com Docker
 
 ### Build
 
@@ -535,7 +560,7 @@ explicit flag always wins over configuration.
 docker build -t dockerls:latest .
 ```
 
-### Run securely
+### Execução segura
 
 ```bash
 docker run --rm \
@@ -551,32 +576,32 @@ docker run --rm \
 docker compose run dockerls recommend node
 ```
 
-The Docker image follows OWASP Docker Security best practices: multi-stage
-build, base images pinned by digest (Python and Trivy), Trivy copied from
-its official image rather than installed via `curl | sh`, a non-root user,
-read-only filesystem support, and all capabilities dropped.
+A imagem Docker segue as boas práticas de segurança Docker da OWASP: build
+multi-estágio, imagens base fixadas por digest (Python e Trivy), Trivy copiado da
+imagem oficial em vez de instalado via `curl | sh`, usuário não-root, suporte a
+sistema de arquivos somente leitura e todas as capabilities removidas.
 
 ---
 
-## Development
+## Desenvolvimento
 
 ```bash
-# Install dev dependencies
+# Instalar dependências de desenvolvimento
 make dev
 
-# Run linter
+# Rodar o linter
 make lint
 
-# Run type checker
+# Rodar o verificador de tipos
 make type-check
 
-# Run tests
+# Rodar os testes
 make test
 
-# Run full audit (lint + type-check + test + security)
+# Rodar a auditoria completa (lint + tipos + testes + segurança)
 make audit
 
-# Format code
+# Formatar o código
 make format
 ```
 
@@ -584,74 +609,85 @@ make format
 
 ## CI/CD
 
-GitHub Actions workflows included:
+Workflows do GitHub Actions incluídos:
 
-- **CI**: Ruff linting, Mypy type checking, Pytest across Python 3.11/3.12/3.13
-- **Security**: Bandit SAST, pip-audit dependency check, Trivy container scan
-- **CodeQL**: GitHub code scanning
-- **Release**: Automated PyPI publish on tag push, with a GitHub-native SLSA
-  build provenance attestation and Sigstore-signed artifacts attached to the release
-- **Dependabot**: Weekly dependency updates
+- **CI**: linting com Ruff, verificação de tipos com Mypy, Pytest em Python
+  3.11/3.12/3.13
+- **Security**: SAST com Bandit, checagem de dependências com pip-audit, scan de
+  contêiner com Trivy
+- **CodeQL**: code scanning do GitHub
+- **Release**: publicação automatizada no PyPI ao enviar uma tag, com atestado
+  nativo de proveniência SLSA do GitHub e artefatos assinados via Sigstore
+  anexados ao release
+- **Dependabot**: atualizações semanais de dependências
 
----
-
-## Security Model
-
-### Threat model
-
-DockerLs operates as a read-only advisory tool. It:
-- Reads from Docker Hub API (public data)
-- Executes Trivy/Grype as local subprocesses
-- Queries endoflife.date, CISA KEV and EPSS APIs
-- Caches results locally in SQLite
-
-It does not:
-- Pull or run Docker images
-- Modify any Docker configuration
-- Access private registries without explicit credentials
-- Transmit user data to third parties
-
-### OWASP alignment
-
-- Input validation on all image names (injection prevention)
-- No shell=True in subprocess calls (command injection prevention)
-- Credential masking in all log output
-- Path traversal detection in image names
-- Secure credential storage via system keyring
-- Dependency scanning in CI (pip-audit, Dependabot)
-- SAST scanning (Bandit, CodeQL)
-- Container scanning (Trivy)
+Os workflows disparam em qualquer pull request (sem filtro de branch de destino)
+e em pushes fora das branches do Dependabot. Um grupo de concorrência junta as
+execuções duplicadas de push e pull request e cancela as superadas.
 
 ---
 
-## Troubleshooting
+## Modelo de segurança
+
+### Modelo de ameaças
+
+O DockerLs opera como ferramenta consultiva somente leitura. Ele:
+- Lê da API do Docker Hub (dados públicos)
+- Executa Trivy/Grype como subprocessos locais
+- Consulta as APIs endoflife.date, CISA KEV e EPSS
+- Faz cache dos resultados localmente em SQLite
+
+Ele não:
+- Baixa nem executa imagens Docker
+- Modifica qualquer configuração do Docker
+- Acessa registries privados sem credenciais explícitas
+- Transmite dados do usuário a terceiros
+
+### Alinhamento com a OWASP
+
+- Validação de entrada em todos os nomes de imagem (prevenção de injeção)
+- Sem `shell=True` nas chamadas de subprocesso (prevenção de injeção de comando)
+- Mascaramento de credenciais em toda saída de log, cobrindo JSON, TOML,
+  querystrings, corpos multipart, credenciais embutidas em URL, `curl -u` e
+  formatos de credencial autoidentificáveis (PAT do Docker, token do GitHub,
+  JWT, chave AWS, token do Slack)
+- Detecção de path traversal em nomes de imagem
+- Armazenamento seguro de credenciais via keyring do sistema
+- Scan de dependências em CI (pip-audit, Dependabot)
+- Scan SAST (Bandit, CodeQL)
+- Scan de contêiner (Trivy)
+
+---
+
+## Solução de problemas
 
 ### "No scanner available"
 
-Install Trivy:
+Instale o Trivy:
 ```bash
 curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
 ```
 
-Or install Grype as fallback:
+Ou instale o Grype como alternativa:
 ```bash
 curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
 ```
 
 ### "Rate limited by Docker Hub"
 
-Authenticate to increase rate limits:
+Autentique-se para aumentar os limites de requisição:
 ```bash
 dockerls login
 ```
 
-### Slow scans
+### Scans lentos
 
-- Reduce tag count: `--limit 20`
-- Increase workers: `--workers 20`
-- Results are cached for 24 hours
+- Reduza a quantidade de tags: `--limit 20`
+- Aumente os workers: `--workers 20`
+- Os resultados ficam em cache por 24 horas
+- Pule a validação cruzada com `--no-cross-validate`
 
-### Cache issues
+### Problemas de cache
 
 ```bash
 dockerls cache clear
@@ -659,32 +695,35 @@ dockerls cache clear
 
 ---
 
-## FAQ
+## Perguntas frequentes
 
-**Q: Does DockerLs pull Docker images?**
-A: No. Trivy/Grype handle image pulling internally for scanning.
-DockerLs only queries metadata from Docker Hub.
+**P: O DockerLs baixa imagens Docker?**
+R: Não. O Trivy/Grype cuidam do download da imagem internamente, para escanear.
+O DockerLs só consulta metadados no Docker Hub.
 
-**Q: Can I use it with private registries?**
-A: `analyze` and `compare` accept any valid reference, including private
-registries with a port (`registry.internal:5000/team/app:tag`), common
-private registry hosts (GHCR, Harbor, ECR, GAR), and digest references
-(`node@sha256:...`). Scanning still goes through Trivy/Grype, so
-authenticate against the registry the way you normally would for those
-tools (e.g. `TRIVY_USERNAME`/`TRIVY_PASSWORD`, or a logged-in
-`~/.docker/config.json`) -- DockerLs does not manage registry credentials
-itself. `search` and `recommend` still query Docker Hub's tag listing API,
-so they are limited to Docker Hub repositories.
+**P: Dá para usar com registries privados?**
+R: `analyze` e `compare` aceitam qualquer referência válida, inclusive registries
+privados com porta (`registry.internal:5000/team/app:tag`), hosts comuns de
+registry privado (GHCR, Harbor, ECR, GAR) e referências por digest
+(`node@sha256:...`). O scan continua passando pelo Trivy/Grype, então autentique
+no registry do jeito que você normalmente faria para essas ferramentas (por
+exemplo, `TRIVY_USERNAME`/`TRIVY_PASSWORD`, ou um `~/.docker/config.json` já
+autenticado) -- o DockerLs não gerencia credenciais de registry por conta
+própria. `search` e `recommend` continuam consultando a API de listagem de tags
+do Docker Hub, então ficam limitados a repositórios do Docker Hub (mais os
+catálogos hardened do Chainguard e Distroless).
 
-**Q: How accurate is the scoring?**
-A: The score combines vulnerability counts, image age, and base type.
-It is a heuristic -- always review the detailed CVE list for critical decisions.
+**P: Quão precisa é a pontuação?**
+R: A pontuação combina contagem de vulnerabilidades, idade da imagem e tipo de
+base. É uma heurística -- sempre revise a lista detalhada de CVEs para decisões
+críticas.
 
-**Q: What if Trivy and Grype are both unavailable?**
-A: DockerLs will report the issue. Run `dockerls doctor` to check dependencies.
+**P: E se o Trivy e o Grype estiverem ambos indisponíveis?**
+R: O DockerLs reporta o problema. Rode `dockerls doctor` para checar as
+dependências.
 
 ---
 
-## License
+## Licença
 
-MIT License. See [LICENSE](LICENSE).
+Licença MIT. Veja [LICENSE](LICENSE).

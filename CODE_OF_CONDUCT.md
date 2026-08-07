@@ -1,31 +1,31 @@
-# Code of Conduct
+# Código de Conduta
 
-## Our Pledge
+## Nosso compromisso
 
-We pledge to make participation in our project a harassment-free experience for
-everyone, regardless of age, body size, disability, ethnicity, sex
-characteristics, gender identity and expression, level of experience,
-education, socio-economic status, nationality, personal appearance, race,
-religion, or sexual identity and orientation.
+Comprometemo-nos a tornar a participação neste projeto uma experiência livre de
+assédio para todas as pessoas, independentemente de idade, tamanho corporal,
+deficiência, etnia, características sexuais, identidade e expressão de gênero,
+nível de experiência, escolaridade, condição socioeconômica, nacionalidade,
+aparência pessoal, raça, religião ou identidade e orientação sexual.
 
-## Our Standards
+## Nossos padrões
 
-Positive behavior includes:
-- Using welcoming and inclusive language
-- Being respectful of differing viewpoints
-- Accepting constructive criticism
-- Focusing on what is best for the community
+Comportamentos positivos incluem:
+- Usar linguagem acolhedora e inclusiva
+- Respeitar pontos de vista divergentes
+- Aceitar críticas construtivas
+- Focar no que é melhor para a comunidade
 
-Unacceptable behavior includes:
-- Trolling, insulting comments, or personal attacks
-- Public or private harassment
-- Publishing others' private information without permission
+Comportamentos inaceitáveis incluem:
+- Provocações, comentários ofensivos ou ataques pessoais
+- Assédio público ou privado
+- Divulgar informações privadas de terceiros sem autorização
 
-## Enforcement
+## Aplicação
 
-Instances of unacceptable behavior may be reported to the project maintainers.
-All complaints will be reviewed and investigated.
+Casos de comportamento inaceitável podem ser reportados aos mantenedores do
+projeto. Todas as denúncias serão analisadas e investigadas.
 
-## Attribution
+## Atribuição
 
-This Code of Conduct is adapted from the Contributor Covenant, version 2.1.
+Este Código de Conduta é adaptado do Contributor Covenant, versão 2.1.
