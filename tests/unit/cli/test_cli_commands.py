@@ -72,6 +72,47 @@ class TestAnalyzeCommand:
         assert result.exit_code == 0
         assert "CVE-2024-0001" in result.stdout
 
+    def test_cve_id_is_never_truncated_in_a_narrow_terminal(self):
+        """The CVE ID is the primary key of a finding.
+
+        At 80 columns the table used to render `CVE-2026…`, which identifies
+        nothing and cannot be looked up. Package and version may be shortened
+        instead; the ID may not.
+        """
+        analysis = _analysis()
+        analysis.scan.vulnerabilities[0].cve_id = "CVE-2026-12345"
+        analysis.scan.vulnerabilities[0].package_name = "perl-base-with-a-very-long-name"
+        analysis.scan.vulnerabilities[0].installed_version = "5.36.0-7+deb12u2-longsuffix"
+
+        use_case = AsyncMock()
+        use_case.execute = AsyncMock(return_value=analysis)
+        with patch(
+            "dockerls.cli.commands.analyze.build_analyze_use_case",
+            AsyncMock(return_value=use_case),
+        ):
+            result = CliRunner(env={"COLUMNS": "80"}).invoke(app, ["analyze", "node:22-alpine"])
+
+        assert result.exit_code == 0
+        assert "CVE-2026-12345" in result.stdout
+
+    def test_wide_does_not_truncate_any_column(self):
+        analysis = _analysis()
+        analysis.scan.vulnerabilities[0].package_name = "perl-base-with-a-very-long-name"
+
+        use_case = AsyncMock()
+        use_case.execute = AsyncMock(return_value=analysis)
+        with patch(
+            "dockerls.cli.commands.analyze.build_analyze_use_case",
+            AsyncMock(return_value=use_case),
+        ):
+            result = CliRunner(env={"COLUMNS": "80"}).invoke(
+                app, ["analyze", "node:22-alpine", "--wide"]
+            )
+
+        assert result.exit_code == 0
+        assert "perl-base-with-a-very-long-name" in result.stdout
+        assert "…" not in result.stdout
+
     def test_analyze_scan_failure_exits_one(self):
         use_case = AsyncMock()
         use_case.execute = AsyncMock(side_effect=ValueError("scan ERROR"))

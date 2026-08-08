@@ -264,10 +264,16 @@ Análise profunda de uma tag específica.
 
 ```bash
 dockerls analyze node:22-alpine
+dockerls analyze node:22-alpine --wide
 ```
 
 Mostra todas as CVEs encontradas, pontuações CVSS, pacotes afetados e
 disponibilidade de correção.
+
+O ID da CVE nunca é truncado: ele é a chave primária do achado, e `CVE-2026…`
+não pode ser consultado em lugar nenhum. Num terminal estreito quem cede
+largura são as colunas de pacote e versão. Use `--wide` para renderizar a
+tabela na largura que ela pedir, sem truncar coluna alguma.
 
 ### compare
 

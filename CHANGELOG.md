@@ -18,6 +18,8 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
   que o teste esperava como `1`, e nada estava escrito em lugar nenhum. A
   distinção entre `1` e `2` é o que permite a um pipeline separar "o scanner
   não rodou" de "a imagem reprovou".
+- **`dockerls analyze --wide`**, que renderiza a tabela de vulnerabilidades na
+  largura que ela pedir, sem truncar coluna alguma.
 - **`dockerls build --list-templates`**, que expõe os templates hardened
   aceitos por `--base`. `list_templates()` existia na interface de domínio
   desde o início e nada o chamava.
@@ -70,6 +72,12 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
   infraestrutura.
 - `datetime.utcnow()` (deprecado, sem timezone) e `subprocess.os.environ`
   (acesso a `os` por dentro de outro módulo) em `build_image.py`.
+- **A tabela do `analyze` truncava o ID da CVE** num terminal de 80 colunas
+  (`CVE-2026…`), que é justamente o campo que não pode ser encurtado — sem
+  ele o achado não é consultável em lugar nenhum. A coluna passou a reservar
+  largura para `CVE-YYYY-NNNNN`, e pacote/versões viraram as colunas
+  flexíveis que cedem espaço. De quebra, a tabela deixou de ser cortada na
+  borda direita quando não cabia.
 - **Os testes de `build_image` mockavam a camada errada.** Os fixtures
   faziam `validator.validate()` devolver um objeto no formato de
   `AnalyzeDockerfileResponse`, mas a interface devolve um
