@@ -1,0 +1,2 @@
+[console_scripts]
+dockerls = dockerls.cli.app:main
