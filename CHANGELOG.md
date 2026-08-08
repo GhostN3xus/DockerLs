@@ -70,6 +70,18 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
   infraestrutura.
 - `datetime.utcnow()` (deprecado, sem timezone) e `subprocess.os.environ`
   (acesso a `os` por dentro de outro módulo) em `build_image.py`.
+- **Os testes de `build_image` mockavam a camada errada.** Os fixtures
+  faziam `validator.validate()` devolver um objeto no formato de
+  `AnalyzeDockerfileResponse`, mas a interface devolve um
+  `DockerfileValidationResult` direto — e como o caso de uso instancia um
+  `AnalyzeDockerfileUseCase` internamente, esse retorno era envelopado numa
+  segunda camada e `response.validation.errors` caía num `MagicMock`, que
+  nunca é igual a `0`. Todo cenário "sem erros" chegava reprovado. Os
+  fixtures passaram a devolver os tipos de domínio corretos.
+- `--hardened --validate-only` deixou de ser esperado escrevendo em disco:
+  dry-run não tem efeito colateral. O teste antigo cobrava o oposto; agora
+  há um caso verificando que **nada** é escrito com `--validate-only` e
+  outro, sem a flag, verificando a geração de verdade.
 
 - **`logout` não existia**, então `login` conseguia armazenar credenciais sem
   nenhuma forma suportada de removê-las, e `clear_credentials` era inalcançável.
