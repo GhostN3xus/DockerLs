@@ -24,6 +24,7 @@ from dockerls.domain.interfaces.dockerfile_validator import (
     HardeningTemplateProvider,
 )
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY
+from dockerls.utils.executables import ExecutableNotFoundError, resolve_executable
 
 if TYPE_CHECKING:
     from dockerls.application.use_cases.analyze_dockerfile import AnalyzeDockerfileResponse
@@ -432,11 +433,11 @@ class BuildImageUseCase:
         warnings: List[str] = []
 
         try:
-            # Comando docker build
-            cmd = ["docker", "build"]
-
-            if options.buildkit:
-                cmd = ["docker", "build"]  # BuildKit é ativado via env var
+            # Comando docker build. O binário é resolvido para caminho
+            # absoluto: deixar a escolha para o $PATH é o próprio PATH
+            # hijacking que esta ferramenta reporta nas imagens dos outros.
+            # BuildKit é ativado via variável de ambiente, não por argumento.
+            cmd = [resolve_executable("docker"), "build"]
 
             cmd.extend(["-t", tag])
             cmd.extend(["-f", dockerfile_path])
@@ -471,12 +472,13 @@ class BuildImageUseCase:
             if options.buildkit:
                 env["DOCKER_BUILDKIT"] = "1"
 
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S603 -- argv, sem shell; argv[0] resolvido
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=3600,  # 1 hora timeout
                 env={**os.environ, **env},
+                check=False,
             )
 
             logs.append(result.stdout)
@@ -510,6 +512,8 @@ class BuildImageUseCase:
                 warnings=warnings,
             )
 
+        except ExecutableNotFoundError as e:
+            return BuildResult(success=False, error_message=str(e), logs=logs)
         except subprocess.TimeoutExpired:
             return BuildResult(
                 success=False,
@@ -527,11 +531,12 @@ class BuildImageUseCase:
     def _get_image_info(self, tag: str) -> Dict[str, Any]:
         """Obtém informações da imagem construída."""
         try:
-            result = subprocess.run(
-                ["docker", "image", "inspect", tag],
+            result = subprocess.run(  # noqa: S603 -- argv, sem shell; argv[0] resolvido
+                [resolve_executable("docker"), "image", "inspect", tag],
                 capture_output=True,
                 text=True,
                 timeout=30,
+                check=False,
             )
 
             if result.returncode == 0:
@@ -551,9 +556,9 @@ class BuildImageUseCase:
 
         try:
             # Tentar usar Trivy
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S603 -- argv, sem shell; argv[0] resolvido
                 [
-                    "trivy",
+                    resolve_executable("trivy"),
                     "image",
                     "--format",
                     "json",
@@ -564,6 +569,7 @@ class BuildImageUseCase:
                 capture_output=True,
                 text=True,
                 timeout=600,  # 10 minutos
+                check=False,
             )
 
             if result.returncode == 0:
@@ -614,16 +620,16 @@ class BuildImageUseCase:
                     vulnerabilities=vulnerabilities[:100],  # Limitar a 100
                 )
 
-        except FileNotFoundError:
+        except ExecutableNotFoundError:
             logger.warning("Trivy não encontrado, tentando Grype...")
         except Exception as e:
             logger.warning(f"Erro no scan com Trivy: {e}")
 
         # Fallback: tentar Grype
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S603 -- argv, sem shell; argv[0] resolvido
                 [
-                    "grype",
+                    resolve_executable("grype"),
                     image_tag,
                     "-o",
                     "json",
@@ -631,6 +637,7 @@ class BuildImageUseCase:
                 capture_output=True,
                 text=True,
                 timeout=600,
+                check=False,
             )
 
             if result.returncode == 0:
@@ -743,31 +750,39 @@ class BuildImageUseCase:
             return "F"
 
     def _get_git_sha(self) -> Optional[str]:
-        """Obtém SHA do git atual."""
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except Exception:
-            pass
-        return None
+        """Obtém SHA do git atual.
+
+        Metadado opcional do relatório: fora de um repositório, ou sem git
+        instalado, o relatório sai sem ele em vez de falhar o build.
+        """
+        return self._capture_output(["git", "rev-parse", "HEAD"], "git SHA")
 
     def _get_docker_version(self) -> str:
         """Obtém versão do Docker."""
+        return self._capture_output(["docker", "--version"], "versão do Docker") or "unknown"
+
+    @staticmethod
+    def _capture_output(argv: List[str], what: str) -> Optional[str]:
+        """Roda `argv` e devolve seu stdout, ou None se não der.
+
+        A falha é registrada em DEBUG em vez de engolida em silêncio: um
+        `except: pass` esconde exatamente o caso que a gente quer investigar
+        quando o metadado sai vazio.
+        """
         try:
-            result = subprocess.run(
-                ["docker", "--version"],
+            resolved = [resolve_executable(argv[0]), *argv[1:]]
+            result = subprocess.run(  # noqa: S603 -- argv, sem shell; argv[0] resolvido
+                resolved,
                 capture_output=True,
                 text=True,
                 timeout=10,
+                check=False,
             )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except Exception:
-            pass
-        return "unknown"
+        except (ExecutableNotFoundError, OSError, subprocess.SubprocessError) as e:
+            logger.debug(f"Não foi possível obter {what}: {e}")
+            return None
+
+        if result.returncode != 0:
+            logger.debug(f"Não foi possível obter {what}: exit {result.returncode}")
+            return None
+        return result.stdout.strip()

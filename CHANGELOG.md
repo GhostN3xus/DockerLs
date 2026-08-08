@@ -72,6 +72,17 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
   infraestrutura.
 - `datetime.utcnow()` (deprecado, sem timezone) e `subprocess.os.environ`
   (acesso a `os` por dentro de outro módulo) em `build_image.py`.
+- **Todo `subprocess` invocava o binário pelo nome puro** (`docker`, `trivy`,
+  `grype`, `git`), entregando a escolha do que executar ao `$PATH` — qualquer
+  diretório gravável mais cedo na ordem de busca decidia. É PATH hijacking, a
+  mesma classe de achado que esta ferramenta reporta nas imagens dos outros, e
+  um scanner de segurança é um alvo especialmente bom porque é o veredito dele
+  que o pipeline confia. Agora tudo passa por `resolve_executable()`
+  (`dockerls/utils/executables.py`), que resolve para caminho absoluto via
+  `shutil.which` e falha nomeando a ferramenta ausente.
+- **Dois `try/except/pass` silenciosos** em `build_image.py` engoliam
+  exatamente o erro que se quer ver quando o metadado do relatório sai vazio.
+  Passaram a logar em DEBUG, com a exceção capturada estreitada.
 - **A tabela do `analyze` truncava o ID da CVE** num terminal de 80 colunas
   (`CVE-2026…`), que é justamente o campo que não pode ser encurtado — sem
   ele o achado não é consultável em lugar nenhum. A coluna passou a reservar

@@ -12,6 +12,7 @@ from loguru import logger
 from dockerls.domain.entities.scan_result import ScanResult, ScanStatus
 from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.scanner import ScannerInterface
+from dockerls.utils.executables import ExecutableNotFoundError, resolve_executable
 from dockerls.utils.validation import sanitize_image_name
 
 if TYPE_CHECKING:
@@ -49,8 +50,8 @@ class GrypeScanner(ScannerInterface):
         GRYPE_DB_AUTO_UPDATE=false so they go straight to matching.
         """
         try:
-            proc = await asyncio.create_subprocess_exec(  # noqa: S603
-                "grype",
+            proc = await asyncio.create_subprocess_exec(  # noqa: S603 -- argv[0] resolvido
+                resolve_executable("grype"),
                 "db",
                 "update",
                 stdout=asyncio.subprocess.PIPE,
@@ -60,7 +61,7 @@ class GrypeScanner(ScannerInterface):
             if proc.returncode != 0:
                 logger.warning(f"Grype DB refresh failed: {stderr.decode()[:200]}")
                 return False
-        except (TimeoutError, OSError) as e:
+        except (TimeoutError, OSError, ExecutableNotFoundError) as e:
             logger.warning(f"Grype DB refresh failed: {e}")
             return False
 
@@ -74,8 +75,8 @@ class GrypeScanner(ScannerInterface):
         timestamp = datetime.now(tz=UTC).isoformat()
 
         try:
-            proc = await asyncio.create_subprocess_exec(  # noqa: S603
-                "grype",
+            proc = await asyncio.create_subprocess_exec(  # noqa: S603 -- argv[0] resolvido
+                resolve_executable("grype"),
                 safe_ref,
                 "-o",
                 "json",
@@ -122,7 +123,7 @@ class GrypeScanner(ScannerInterface):
                 status=ScanStatus.TIMEOUT,
                 error_message=f"Scan exceeded {self._timeout}s timeout",
             )
-        except (json.JSONDecodeError, OSError) as e:
+        except (json.JSONDecodeError, OSError, ExecutableNotFoundError) as e:
             logger.error(f"Grype scan failed for {safe_ref}: {e}")
             return ScanResult(
                 image_reference=safe_ref,

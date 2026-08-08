@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
 
-from loguru import logger
 
 from dockerls.domain.entities.dockerfile_analysis import (
     DockerfileAnalysis,
@@ -161,7 +159,6 @@ class DockerfileParser:
         # ENV
         elif match := self.ENV_PATTERN.match(line):
             env_name = match.group(1)
-            env_value = match.group(2)
             if self._is_secret_name(env_name):
                 self._info.has_secrets_in_env = True
                 self._info.secret_env_vars.append(env_name)
