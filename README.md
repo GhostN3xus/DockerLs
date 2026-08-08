@@ -14,6 +14,7 @@ melhor imagem para produção e diz exatamente como corrigir o que encontra.
 - [Instalação](#instalação)
 - [Início rápido](#início-rápido)
 - [Comandos](#comandos)
+- [Exit codes](#exit-codes)
 - [Algoritmo de pontuação](#algoritmo-de-pontuação)
 - [Níveis de segurança](#níveis-de-segurança)
 - [Modo alternativo](#modo-alternativo)
@@ -180,6 +181,11 @@ diagnósticos -- inclusive o stderr do scanner -- vão para
 `logs/dockerls_<timestamp>.log`; use `--verbose` para espelhá-los também no
 stderr. Defina `DOCKERLS_LOG_DIR` para mudar o diretório de log.
 
+Nenhum comando emite log de nível `INFO` no stderr em uso normal: o piso do sink
+de console é `WARNING`, independente de `DOCKERLS_LOG_LEVEL` (que controla o
+nível do **arquivo** de log). `--verbose` reabre o stderr no nível configurado —
+`INFO` por padrão, `DEBUG` com `DOCKERLS_LOG_LEVEL=DEBUG`.
+
 O JSON bruto de cada scan é gravado em
 `.dockerls/scans/<imagem>_<tag>__<scanner>__<timestamp>.json`, e o bloco
 `Details` abaixo da tabela aponta cada imagem para seus próprios arquivos:
@@ -343,6 +349,71 @@ dockerls cache cleanup
 ```bash
 dockerls version
 ```
+
+### analyze-dockerfile
+
+Valida um Dockerfile contra as regras de hardening da OWASP e mostra a tabela de
+checks, o score e as sugestões de correção.
+
+```bash
+dockerls analyze-dockerfile .
+dockerls analyze-dockerfile ./app/Dockerfile --no-suggestions
+dockerls analyze-dockerfile . --format json
+```
+
+Termina com código `2` se algum check falhar (`errors > 0`). Avisos não reprovam.
+
+### build
+
+Constrói imagens Docker passando pela validação do Dockerfile antes e pelo scan
+de vulnerabilidades depois.
+
+```bash
+# Só valida, não constrói nada -- é o modo indicado para portão de CI
+dockerls build --validate-only .
+
+# Mesma validação, saída JSON em stdout para o pipeline consumir
+dockerls build --validate-only --ci-mode .
+
+# Só as sugestões de hardening
+dockerls build --suggest-hardening .
+
+# Build de verdade, reprovando se o scan achar CRITICAL
+dockerls build -t minha-app:1.0 --fail-on critical .
+
+# Templates hardened disponíveis para --base
+dockerls build --list-templates
+```
+
+`--validate-only` e `--suggest-hardening` renderizam a mesma tabela de checks que
+`analyze-dockerfile`, com o resumo das regras violadas ao final. Em `--ci-mode` a
+saída é JSON estruturado em stdout, sem cores e sem tabela, contendo o relatório
+completo — inclusive quando a validação reprova, que é exatamente quando o CI
+precisa saber qual regra falhou.
+
+Uma validação com `errors > 0` barra o build (`--force` ignora e constrói assim
+mesmo).
+
+#### `--hardened` é gerado no build, não na validação
+
+`--hardened`/`--base` escrevem `Dockerfile.hardened` no diretório de contexto.
+Combinado com `--validate-only`, **nada é escrito em disco**: um dry-run não tem
+efeito colateral. Para gerar o arquivo, rode o build sem `--validate-only`.
+
+### Exit codes
+
+Todo comando da CLI segue a mesma tabela. É o contrato do qual um pipeline pode
+depender:
+
+| Código | Significado | Quando acontece |
+| --- | --- | --- |
+| `0` | Sucesso | O comando rodou e nada violou política. |
+| `1` | Erro de execução | Dependência ausente, falha de rede, Dockerfile inexistente, `--tag` faltando, JSON inválido em `--build-args`/`--labels`, erro do `docker build`. Nada foi medido, então o resultado não diz nada sobre segurança. |
+| `2` | Política violada | O comando rodou bem e o resultado reprova: validação com `errors > 0`, ou `--fail-on` acionado. É o código que um portão de CI deve tratar como "essa imagem não passa". |
+
+A distinção entre `1` e `2` importa: `1` significa "não sei", `2` significa "sei,
+e reprovou". Um pipeline que trata os dois como falha genérica não consegue
+diferenciar uma indisponibilidade do scanner de uma imagem realmente insegura.
 
 ---
 

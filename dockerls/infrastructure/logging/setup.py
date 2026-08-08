@@ -121,10 +121,17 @@ def _resolve_log_file(log_dir: Path) -> Path | None:
     return None
 
 
+# Nothing below this level ever reaches the terminal on its own. Normal CLI
+# use is not a debugging session: an INFO line on stderr is noise a pipeline
+# has to filter out, and it corrupts the Rich progress display.
+DEFAULT_CONSOLE_LEVEL = "WARNING"
+
+
 def setup_logging(
     level: str = "INFO",
     log_dir: Path | None = None,
     console: bool = False,
+    console_level: str | None = None,
 ) -> Path | None:
     """Route diagnostics to a rotating log file instead of the terminal.
 
@@ -133,6 +140,11 @@ def setup_logging(
     debug chatter would otherwise interleave with -- and corrupt -- the
     progress display. Set `console=True` (``--verbose``) to opt back into
     stderr logging on top of the file sink.
+
+    `level` is the file sink's level; `console_level` is the stderr sink's
+    and defaults to WARNING regardless of `level`, so raising
+    DOCKERLS_LOG_LEVEL to DEBUG for the log file never starts spraying the
+    terminal. ``--verbose`` passes `console_level` explicitly to raise it.
 
     Returns the active log file path so callers can point the user at it.
     """
@@ -153,7 +165,7 @@ def setup_logging(
     if console or log_file is None:
         logger.add(
             sys.stderr,
-            level=level.upper(),
+            level=(console_level or DEFAULT_CONSOLE_LEVEL).upper(),
             format=_CONSOLE_FORMAT,
             filter=_log_filter,
         )

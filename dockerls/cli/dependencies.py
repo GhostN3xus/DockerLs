@@ -49,11 +49,28 @@ def current_log_file() -> Path | None:
     return _LOG_FILE
 
 
+def configure_logging() -> None:
+    """Detach loguru's default stderr sink before any command runs.
+
+    Until a sink is configured, loguru logs everything from DEBUG up to
+    stderr. Commands that never touched Settings -- `build` was one --
+    inherited that default and leaked INFO lines into the terminal.
+    """
+    _settings()
+
+
 def enable_console_logging() -> None:
-    """Re-attach the stderr sink (``--verbose``) on top of the file sink."""
+    """Re-attach the stderr sink (``--verbose``) on top of the file sink.
+
+    The stderr sink runs at the configured `log_level` here (INFO by
+    default, DEBUG via DOCKERLS_LOG_LEVEL) rather than the WARNING floor
+    that applies without ``--verbose``.
+    """
     s = _settings()
     global _LOG_FILE
-    _LOG_FILE = setup_logging(s.log_level, log_dir=s.log_dir, console=True)
+    _LOG_FILE = setup_logging(
+        s.log_level, log_dir=s.log_dir, console=True, console_level=s.log_level
+    )
 
 
 def resolve_tag_limit(limit: int | None) -> int:

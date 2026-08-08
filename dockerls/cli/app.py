@@ -16,6 +16,7 @@ from dockerls.cli.commands.recommend import recommend
 from dockerls.cli.commands.sbom import sbom
 from dockerls.cli.commands.search import search
 from dockerls.cli.commands.version import version
+from dockerls.cli.dependencies import configure_logging
 
 app = typer.Typer(
     name="dockerls",
@@ -24,6 +25,13 @@ app = typer.Typer(
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
+
+@app.callback()
+def _bootstrap() -> None:
+    """Runs before every subcommand, so no command can start with loguru's
+    default DEBUG-to-stderr sink still attached."""
+    configure_logging()
+
 
 app.command()(search)
 app.command()(recommend)

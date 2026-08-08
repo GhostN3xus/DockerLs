@@ -4,25 +4,29 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
-import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from loguru import logger
 
 from dockerls.domain.entities.dockerfile_analysis import (
     DockerfileAnalysis,
-    DockerfileValidationResult as ValidationResult,
+    DockerfileValidationResult,
     HardeningRule,
-    ValidationCheck,
+    ValidationStatus,
 )
 from dockerls.domain.interfaces.dockerfile_validator import (
     DockerfileValidatorInterface,
     HardeningTemplateProvider,
 )
+from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY
+
+if TYPE_CHECKING:
+    from dockerls.application.use_cases.analyze_dockerfile import AnalyzeDockerfileResponse
 
 
 @dataclass
@@ -117,15 +121,22 @@ class BuildImageRequest:
 
 @dataclass
 class BuildImageResponse:
-    """Resposta do build de imagem."""
+    """Resposta do build de imagem.
+
+    `validation` e `analysis` carregam o resultado bruto da validação para
+    que a camada CLI possa renderizar a tabela de checks. Sem eles o
+    comando só sabia dizer "falhou", sem qual regra falhou.
+    """
 
     success: bool
     image_tag: Optional[str] = None
     image_sha256: Optional[str] = None
     report: Optional[BuildReport] = None
+    validation: Optional[DockerfileValidationResult] = None
+    analysis: Optional[DockerfileAnalysis] = None
     recommendations: List[HardeningRule] = field(default_factory=list)
     error: Optional[str] = None
-    exit_code: int = 0
+    exit_code: int = EXIT_OK
 
 
 class BuildImageUseCase:
@@ -141,16 +152,18 @@ class BuildImageUseCase:
 
     def execute(self, request: BuildImageRequest) -> BuildImageResponse:
         """Executa o build seguro da imagem."""
-        logger.info(f"Iniciando build seguro: {request.context_path}")
+        logger.debug(f"Iniciando build seguro: {request.context_path}")
 
         try:
-            # 1. Validar Dockerfile
+            # 1. Validar Dockerfile. Uma falha aqui (Dockerfile ausente,
+            #    ilegível) é erro de execução, não violação de política, e
+            #    --force não cria um Dockerfile que não existe.
             validation_result = self._validate_dockerfile(request)
-            if not validation_result and not request.force:
+            if not validation_result.success:
                 return BuildImageResponse(
                     success=False,
-                    error="Dockerfile validation failed",
-                    exit_code=1,
+                    error=validation_result.error or "Dockerfile validation could not run",
+                    exit_code=EXIT_ERROR,
                 )
 
             # 2. Modo validate-only
@@ -160,6 +173,12 @@ class BuildImageUseCase:
             # 3. Modo suggest-only
             if request.suggest_only:
                 return self._format_suggestions_response(validation_result)
+
+            # 3b. Validação com erros barra o build (a menos que --force).
+            #     A resposta carrega os checks para o CLI dizer o que falhou.
+            validation = validation_result.validation
+            if validation is not None and validation.errors > 0 and not request.force:
+                return self._format_validation_response(validation_result)
 
             # 4. Gerar Dockerfile hardened se solicitado
             dockerfile_path = request.dockerfile_path
@@ -189,7 +208,7 @@ class BuildImageUseCase:
                 return BuildImageResponse(
                     success=False,
                     error=build_result.error_message,
-                    exit_code=1,
+                    exit_code=EXIT_ERROR,
                 )
 
             # 6. Scan pós-build
@@ -204,8 +223,10 @@ class BuildImageUseCase:
                         success=False,
                         image_tag=request.tag,
                         image_sha256=build_result.image_sha256,
+                        validation=validation,
+                        analysis=validation_result.analysis,
                         error=f"Vulnerabilities exceed threshold ({request.fail_on})",
-                        exit_code=1,
+                        exit_code=EXIT_POLICY,
                     )
 
             # 8. Gerar relatório
@@ -222,8 +243,10 @@ class BuildImageUseCase:
                 image_tag=request.tag,
                 image_sha256=build_result.image_sha256,
                 report=report,
-                recommendations=validation_result.analysis.recommendations if validation_result.analysis else [],
-                exit_code=0,
+                validation=validation,
+                analysis=validation_result.analysis,
+                recommendations=list(validation_result.suggestions or []),
+                exit_code=EXIT_OK,
             )
 
         except Exception as e:
@@ -231,10 +254,10 @@ class BuildImageUseCase:
             return BuildImageResponse(
                 success=False,
                 error=str(e),
-                exit_code=1,
+                exit_code=EXIT_ERROR,
             )
 
-    def _validate_dockerfile(self, request: BuildImageRequest) -> Optional[Any]:
+    def _validate_dockerfile(self, request: BuildImageRequest) -> AnalyzeDockerfileResponse:
         """Valida o Dockerfile."""
         from dockerls.application.use_cases.analyze_dockerfile import (
             AnalyzeDockerfileRequest,
@@ -250,30 +273,150 @@ class BuildImageUseCase:
         analyze_use_case = AnalyzeDockerfileUseCase(self.validator, self.template_provider)
         return analyze_use_case.execute(analyze_request)
 
-    def _format_validation_response(self, validation_result: Any) -> BuildImageResponse:
-        """Formata resposta apenas de validação."""
+    def _format_validation_response(
+        self, validation_result: AnalyzeDockerfileResponse
+    ) -> BuildImageResponse:
+        """Formata resposta apenas de validação.
+
+        Propaga o `DockerfileValidationResult` inteiro -- checks, contagens e
+        score -- porque é ele que a CLI renderiza. Devolver só `success` e
+        `exit_code` deixava o comando sem nada para imprimir.
+        """
+        validation = validation_result.validation
+        if validation is None:
+            return BuildImageResponse(
+                success=False,
+                error="Dockerfile validation produced no result",
+                exit_code=EXIT_ERROR,
+            )
+
+        analysis = validation_result.analysis
+        suggestions = list(validation_result.suggestions or [])
+        failed = validation.errors > 0
+
         return BuildImageResponse(
-            success=validation_result.validation.errors == 0,
-            exit_code=0 if validation_result.validation.errors == 0 else 2,
+            success=not failed,
+            report=self._build_validation_report(validation_result, validation, analysis),
+            validation=validation,
+            analysis=analysis,
+            recommendations=suggestions,
+            error=self._validation_error_summary(validation) if failed else None,
+            exit_code=EXIT_POLICY if failed else EXIT_OK,
         )
 
-    def _format_suggestions_response(self, validation_result: Any) -> BuildImageResponse:
-        """Formata resposta apenas com sugestões."""
-        suggestions = validation_result.suggestions or []
+    def _format_suggestions_response(
+        self, validation_result: AnalyzeDockerfileResponse
+    ) -> BuildImageResponse:
+        """Formata resposta apenas com sugestões.
+
+        Carrega também a validação: mostrar as sugestões sem dizer quais
+        checks as motivaram não é acionável.
+        """
+        validation = validation_result.validation
+        analysis = validation_result.analysis
         return BuildImageResponse(
             success=True,
-            recommendations=suggestions,
-            exit_code=0,
+            report=self._build_validation_report(validation_result, validation, analysis)
+            if validation is not None
+            else None,
+            validation=validation,
+            analysis=analysis,
+            recommendations=list(validation_result.suggestions or []),
+            exit_code=EXIT_OK,
         )
 
+    def _build_validation_report(
+        self,
+        validation_result: AnalyzeDockerfileResponse,
+        validation: DockerfileValidationResult,
+        analysis: Optional[DockerfileAnalysis],
+    ) -> BuildReport:
+        """Relatório de um run que só validou -- sem imagem, sem scan.
+
+        Existe para que `--ci-mode` emita o mesmo JSON estruturado nos dois
+        modos, em vez de um objeto vazio quando nada foi construído.
+        """
+        score = (
+            analysis.security_score
+            if analysis is not None
+            else self._calculate_security_score(validation_result, None)
+        )
+        tier = analysis.security_tier if analysis is not None else self._calculate_security_tier(score)
+        return BuildReport(
+            build_id=self._new_build_id(validation.dockerfile_path),
+            timestamp=datetime.now(tz=UTC).isoformat(),
+            image="",
+            dockerfile_path=validation.dockerfile_path,
+            validation=self._validation_dict(validation),
+            security_score=score,
+            security_tier=tier,
+            recommendations=self._recommendation_dicts(validation_result.suggestions or []),
+        )
+
+    @staticmethod
+    def _validation_error_summary(validation: DockerfileValidationResult) -> str:
+        """Resumo textual das regras violadas, para `error` e para logs de CI."""
+        failures = [c for c in validation.checks if c.status == ValidationStatus.FAIL]
+        header = f"Dockerfile validation failed: {validation.errors} error(s)"
+        if not failures:
+            return header
+        details = "; ".join(
+            f"{check.check}"
+            f"{f' (line {check.line})' if check.line is not None else ''}: {check.message}"
+            for check in failures
+        )
+        return f"{header} -- {details}"
+
+    @staticmethod
+    def _validation_dict(validation: DockerfileValidationResult) -> Dict[str, Any]:
+        return {
+            "dockerfile_path": validation.dockerfile_path,
+            "passed": validation.passed,
+            "warnings": validation.warnings,
+            "errors": validation.errors,
+            "checks": [
+                {
+                    "check": check.check,
+                    "status": check.status.value,
+                    "message": check.message,
+                    "severity": check.severity.value,
+                    "line": check.line,
+                }
+                for check in validation.checks
+            ],
+        }
+
+    @staticmethod
+    def _recommendation_dicts(rules: List[HardeningRule]) -> List[Dict[str, Any]]:
+        return [
+            {
+                "priority": rule.priority.value,
+                "title": rule.title,
+                "current": rule.current_state,
+                "suggested": rule.suggested_fix,
+                "reason": rule.reason,
+            }
+            for rule in rules
+        ]
+
+    @staticmethod
+    def _new_build_id(seed: str) -> str:
+        stamp = datetime.now(tz=UTC).isoformat()
+        return hashlib.sha256(f"{seed}{stamp}".encode()).hexdigest()[:16]
+
     def _generate_hardened_dockerfile(self, context_path: str, template: str) -> str:
-        """Gera Dockerfile hardened baseado em template."""
-        template_content = self.template_provider.get_template(template)
-        
-        output_path = Path(context_path) / f"Dockerfile.hardened"
-        output_path.write_text(template_content)
-        
-        logger.info(f"Dockerfile hardened gerado: {output_path}")
+        """Gera Dockerfile hardened delegando à infraestrutura.
+
+        Escrever arquivo é responsabilidade do provider, não do caso de uso:
+        aqui só decidimos onde ele deve sair.
+        """
+        output_path = Path(context_path) / "Dockerfile.hardened"
+        self.template_provider.generate_hardened_dockerfile(
+            dockerfile_path=Path(context_path),
+            base_image=template,
+            output_path=output_path,
+        )
+        logger.debug(f"Dockerfile hardened gerado: {output_path}")
         return str(output_path)
 
     def _build_image(
@@ -333,7 +476,7 @@ class BuildImageUseCase:
                 capture_output=True,
                 text=True,
                 timeout=3600,  # 1 hora timeout
-                env={**subprocess.os.environ, **env},
+                env={**os.environ, **env},
             )
 
             logs.append(result.stdout)
@@ -518,29 +661,15 @@ class BuildImageUseCase:
         dockerfile_path: str,
     ) -> BuildReport:
         """Gera relatório completo do build."""
-        now = datetime.utcnow()
-        build_id = hashlib.sha256(f"{image_tag}{now.isoformat()}".encode()).hexdigest()[:16]
+        now = datetime.now(tz=UTC)
+        build_id = self._new_build_id(image_tag)
 
         # Calcular score de segurança
         security_score = self._calculate_security_score(validation, scan)
         security_tier = self._calculate_security_tier(security_score)
 
         # Extrair checks de validação
-        validation_dict = {
-            "passed": validation.validation.passed,
-            "warnings": validation.validation.warnings,
-            "errors": validation.validation.errors,
-            "checks": [
-                {
-                    "check": check.check,
-                    "status": check.status.value,
-                    "message": check.message,
-                    "severity": check.severity.value,
-                    "line": check.line,
-                }
-                for check in validation.validation.checks
-            ],
-        }
+        validation_dict = self._validation_dict(validation.validation)
 
         # Resultados do scan
         scan_dict = None
@@ -559,24 +688,15 @@ class BuildImageUseCase:
         metadata = {
             "timestamp": now.isoformat(),
             "git_sha": git_sha,
-            "built_by": subprocess.os.environ.get("USER", "unknown"),
+            "built_by": os.environ.get("USER", "unknown"),
             "docker_version": self._get_docker_version(),
             "buildkit": True,
         }
 
-        # Recomendações
-        recommendations = []
-        if validation.analysis and validation.analysis.recommendations:
-            recommendations = [
-                {
-                    "priority": rec.priority.value,
-                    "title": rec.title,
-                    "current": rec.current_state,
-                    "suggested": rec.suggested_fix,
-                    "reason": rec.reason,
-                }
-                for rec in validation.analysis.recommendations
-            ]
+        # Recomendações: vêm das sugestões de hardening. `DockerfileAnalysis`
+        # nunca teve um atributo `recommendations` -- o acesso antigo só não
+        # explodia porque `analysis` era sempre None nos testes.
+        recommendations = self._recommendation_dicts(list(validation.suggestions or []))
 
         return BuildReport(
             build_id=build_id,
