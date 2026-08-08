@@ -9,7 +9,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -19,15 +19,15 @@ from dockerls.domain.entities.dockerfile_analysis import (
     HardeningRule,
     ValidationStatus,
 )
-from dockerls.domain.interfaces.dockerfile_validator import (
-    DockerfileValidatorInterface,
-    HardeningTemplateProvider,
-)
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY
 from dockerls.utils.executables import ExecutableNotFoundError, resolve_executable
 
 if TYPE_CHECKING:
     from dockerls.application.use_cases.analyze_dockerfile import AnalyzeDockerfileResponse
+    from dockerls.domain.interfaces.dockerfile_validator import (
+        DockerfileValidatorInterface,
+        HardeningTemplateProvider,
+    )
 
 
 @dataclass
@@ -38,14 +38,14 @@ class BuildOptions:
     dockerfile_path: str = "Dockerfile"
     context_path: str = "."
     no_cache: bool = False
-    build_args: Optional[Dict[str, str]] = None
-    labels: Optional[Dict[str, str]] = None
-    platform: Optional[str] = None
-    target: Optional[str] = None
+    build_args: dict[str, str] | None = None
+    labels: dict[str, str] | None = None
+    platform: str | None = None
+    target: str | None = None
     pull: bool = True
     buildkit: bool = True
-    secrets: Optional[Dict[str, str]] = None  # id -> file_path
-    ssh: Optional[List[str]] = None  # SSH agents
+    secrets: dict[str, str] | None = None  # id -> file_path
+    ssh: list[str] | None = None  # SSH agents
 
 
 @dataclass
@@ -53,15 +53,15 @@ class BuildResult:
     """Resultado do build."""
 
     success: bool
-    image_tag: Optional[str] = None
-    image_id: Optional[str] = None
-    image_sha256: Optional[str] = None
+    image_tag: str | None = None
+    image_id: str | None = None
+    image_sha256: str | None = None
     build_time_seconds: float = 0.0
     layers_count: int = 0
     image_size_bytes: int = 0
-    error_message: Optional[str] = None
-    logs: List[str] = field(default_factory=list)
-    warnings: List[str] = field(default_factory=list)
+    error_message: str | None = None
+    logs: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -77,7 +77,7 @@ class ScanResult:
     fixable: int = 0
     scan_tool: str = "trivy"
     scan_time_seconds: float = 0.0
-    vulnerabilities: List[Dict[str, Any]] = field(default_factory=list)
+    vulnerabilities: list[dict[str, Any]] = field(default_factory=list)
     sbom_components_count: int = 0
 
 
@@ -89,14 +89,14 @@ class BuildReport:
     timestamp: str
     image: str
     dockerfile_path: str
-    validation: Dict[str, Any]
-    scan_results: Optional[Dict[str, Any]] = None
+    validation: dict[str, Any]
+    scan_results: dict[str, Any] | None = None
     security_score: int = 0
     security_tier: str = "F"
-    layers: List[Dict[str, Any]] = field(default_factory=list)
-    recommendations: List[Dict[str, Any]] = field(default_factory=list)
-    sbom: Optional[Dict[str, Any]] = None
-    build_metadata: Optional[Dict[str, Any]] = None
+    layers: list[dict[str, Any]] = field(default_factory=list)
+    recommendations: list[dict[str, Any]] = field(default_factory=list)
+    sbom: dict[str, Any] | None = None
+    build_metadata: dict[str, Any] | None = None
 
 
 @dataclass
@@ -107,14 +107,14 @@ class BuildImageRequest:
     tag: str
     dockerfile_path: str = "Dockerfile"
     hardened: bool = False
-    base_template: Optional[str] = None
+    base_template: str | None = None
     scan: bool = True
     validate_only: bool = False
     suggest_only: bool = False
     no_cache: bool = False
-    build_args: Optional[Dict[str, str]] = None
-    labels: Optional[Dict[str, str]] = None
-    fail_on: Optional[str] = None  # "critical", "high"
+    build_args: dict[str, str] | None = None
+    labels: dict[str, str] | None = None
+    fail_on: str | None = None  # "critical", "high"
     ci_mode: bool = False
     verbose: bool = False
     force: bool = False
@@ -130,13 +130,13 @@ class BuildImageResponse:
     """
 
     success: bool
-    image_tag: Optional[str] = None
-    image_sha256: Optional[str] = None
-    report: Optional[BuildReport] = None
-    validation: Optional[DockerfileValidationResult] = None
-    analysis: Optional[DockerfileAnalysis] = None
-    recommendations: List[HardeningRule] = field(default_factory=list)
-    error: Optional[str] = None
+    image_tag: str | None = None
+    image_sha256: str | None = None
+    report: BuildReport | None = None
+    validation: DockerfileValidationResult | None = None
+    analysis: DockerfileAnalysis | None = None
+    recommendations: list[HardeningRule] = field(default_factory=list)
+    error: str | None = None
     exit_code: int = EXIT_OK
 
 
@@ -218,17 +218,16 @@ class BuildImageUseCase:
                 scan_result = self._scan_image(request.tag)
 
             # 7. Verificar thresholds de falha
-            if request.fail_on and scan_result:
-                if self._should_fail(scan_result, request.fail_on):
-                    return BuildImageResponse(
-                        success=False,
-                        image_tag=request.tag,
-                        image_sha256=build_result.image_sha256,
-                        validation=validation,
-                        analysis=validation_result.analysis,
-                        error=f"Vulnerabilities exceed threshold ({request.fail_on})",
-                        exit_code=EXIT_POLICY,
-                    )
+            if request.fail_on and scan_result and self._should_fail(scan_result, request.fail_on):
+                return BuildImageResponse(
+                    success=False,
+                    image_tag=request.tag,
+                    image_sha256=build_result.image_sha256,
+                    validation=validation,
+                    analysis=validation_result.analysis,
+                    error=f"Vulnerabilities exceed threshold ({request.fail_on})",
+                    exit_code=EXIT_POLICY,
+                )
 
             # 8. Gerar relatório
             report = self._generate_report(
@@ -330,7 +329,7 @@ class BuildImageUseCase:
         self,
         validation_result: AnalyzeDockerfileResponse,
         validation: DockerfileValidationResult,
-        analysis: Optional[DockerfileAnalysis],
+        analysis: DockerfileAnalysis | None,
     ) -> BuildReport:
         """Relatório de um run que só validou -- sem imagem, sem scan.
 
@@ -342,7 +341,11 @@ class BuildImageUseCase:
             if analysis is not None
             else self._calculate_security_score(validation_result, None)
         )
-        tier = analysis.security_tier if analysis is not None else self._calculate_security_tier(score)
+        tier = (
+            analysis.security_tier
+            if analysis is not None
+            else self._calculate_security_tier(score)
+        )
         return BuildReport(
             build_id=self._new_build_id(validation.dockerfile_path),
             timestamp=datetime.now(tz=UTC).isoformat(),
@@ -369,7 +372,7 @@ class BuildImageUseCase:
         return f"{header} -- {details}"
 
     @staticmethod
-    def _validation_dict(validation: DockerfileValidationResult) -> Dict[str, Any]:
+    def _validation_dict(validation: DockerfileValidationResult) -> dict[str, Any]:
         return {
             "dockerfile_path": validation.dockerfile_path,
             "passed": validation.passed,
@@ -388,7 +391,7 @@ class BuildImageUseCase:
         }
 
     @staticmethod
-    def _recommendation_dicts(rules: List[HardeningRule]) -> List[Dict[str, Any]]:
+    def _recommendation_dicts(rules: list[HardeningRule]) -> list[dict[str, Any]]:
         return [
             {
                 "priority": rule.priority.value,
@@ -429,8 +432,8 @@ class BuildImageUseCase:
     ) -> BuildResult:
         """Executa o build da imagem Docker."""
         start_time = datetime.now()
-        logs: List[str] = []
-        warnings: List[str] = []
+        logs: list[str] = []
+        warnings: list[str] = []
 
         try:
             # Comando docker build. O binário é resolvido para caminho
@@ -528,7 +531,7 @@ class BuildImageUseCase:
                 logs=logs,
             )
 
-    def _get_image_info(self, tag: str) -> Dict[str, Any]:
+    def _get_image_info(self, tag: str) -> dict[str, Any]:
         """Obtém informações da imagem construída."""
         try:
             result = subprocess.run(  # noqa: S603 -- argv, sem shell; argv[0] resolvido
@@ -549,7 +552,7 @@ class BuildImageUseCase:
             logger.warning(f"Não foi possível obter info da imagem: {e}")
             return {}
 
-    def _scan_image(self, image_tag: str) -> Optional[ScanResult]:
+    def _scan_image(self, image_tag: str) -> ScanResult | None:
         """Executa scan de segurança na imagem."""
         logger.info(f"Iniciando scan da imagem: {image_tag}")
         start_time = datetime.now()
@@ -574,7 +577,7 @@ class BuildImageUseCase:
 
             if result.returncode == 0:
                 scan_data = json.loads(result.stdout)
-                
+
                 # Parsear resultados do Trivy
                 critical = high = medium = low = unknown = fixable = 0
                 vulnerabilities = []
@@ -663,7 +666,7 @@ class BuildImageUseCase:
         self,
         validation: Any,
         build: BuildResult,
-        scan: Optional[ScanResult],
+        scan: ScanResult | None,
         image_tag: str,
         dockerfile_path: str,
     ) -> BuildReport:
@@ -718,7 +721,7 @@ class BuildImageUseCase:
             build_metadata=metadata,
         )
 
-    def _calculate_security_score(self, validation: Any, scan: Optional[ScanResult]) -> int:
+    def _calculate_security_score(self, validation: Any, scan: ScanResult | None) -> int:
         """Calcula score de segurança (0-100)."""
         score = 100
 
@@ -749,7 +752,7 @@ class BuildImageUseCase:
         else:
             return "F"
 
-    def _get_git_sha(self) -> Optional[str]:
+    def _get_git_sha(self) -> str | None:
         """Obtém SHA do git atual.
 
         Metadado opcional do relatório: fora de um repositório, ou sem git
@@ -762,7 +765,7 @@ class BuildImageUseCase:
         return self._capture_output(["docker", "--version"], "versão do Docker") or "unknown"
 
     @staticmethod
-    def _capture_output(argv: List[str], what: str) -> Optional[str]:
+    def _capture_output(argv: list[str], what: str) -> str | None:
         """Roda `argv` e devolve seu stdout, ou None se não der.
 
         A falha é registrada em DEBUG em vez de engolida em silêncio: um

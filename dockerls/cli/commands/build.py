@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -26,26 +26,40 @@ console = Console()
 
 def build(
     path: str = typer.Argument(".", help="Diretório com Dockerfile"),
-    tag: Optional[str] = typer.Option(None, "--tag", "-t", help="Tag da imagem (obrigatório)"),
-    base: Optional[str] = typer.Option(None, "--base", help="Imagem base recomendada (node, python, go)"),
+    tag: str | None = typer.Option(None, "--tag", "-t", help="Tag da imagem (obrigatório)"),
+    base: str | None = typer.Option(
+        None, "--base", help="Imagem base recomendada (node, python, go)"
+    ),
     hardened: bool = typer.Option(False, "--hardened", help="Usa templates Dockerfile hardened"),
     list_templates: bool = typer.Option(
         False, "--list-templates", help="Lista os templates hardened disponíveis e sai"
     ),
-    interactive: bool = typer.Option(False, "--interactive", "-i", help="Wizard de segurança passo a passo"),
+    interactive: bool = typer.Option(
+        False, "--interactive", "-i", help="Wizard de segurança passo a passo"
+    ),
     scan: bool = typer.Option(True, "--scan/--no-scan", help="Executa Trivy/Grype após build"),
-    fail_on: Optional[str] = typer.Option(None, "--fail-on", help="Reprova build se tiver critical/high"),
-    report: Optional[str] = typer.Option(None, "--report", "-r", help="Salva relatório de segurança (JSON/HTML)"),
+    fail_on: str | None = typer.Option(
+        None, "--fail-on", help="Reprova build se tiver critical/high"
+    ),
+    report: str | None = typer.Option(
+        None, "--report", "-r", help="Salva relatório de segurança (JSON/HTML)"
+    ),
     no_cache: bool = typer.Option(False, "--no-cache", help="Desativa cache do Docker"),
-    build_args: Optional[str] = typer.Option(None, "--build-args", help="Argumentos de build (JSON)"),
-    labels: Optional[str] = typer.Option(None, "--labels", help="Labels de segurança (JSON)"),
-    ci_mode: bool = typer.Option(False, "--ci-mode", help="Modo CI/CD (output JSON, sem interação)"),
+    build_args: str | None = typer.Option(None, "--build-args", help="Argumentos de build (JSON)"),
+    labels: str | None = typer.Option(None, "--labels", help="Labels de segurança (JSON)"),
+    ci_mode: bool = typer.Option(
+        False, "--ci-mode", help="Modo CI/CD (output JSON, sem interação)"
+    ),
     validate_only: bool = typer.Option(False, "--validate-only", help="Apenas valida Dockerfile"),
-    suggest_hardening: bool = typer.Option(False, "--suggest-hardening", help="Sugere melhorias sem build"),
-    config: Optional[str] = typer.Option(None, "--config", help="Arquivo de config .dockerls-hardening.yaml"),
+    suggest_hardening: bool = typer.Option(
+        False, "--suggest-hardening", help="Sugere melhorias sem build"
+    ),
+    config: str | None = typer.Option(
+        None, "--config", help="Arquivo de config .dockerls-hardening.yaml"
+    ),
     push: bool = typer.Option(False, "--push", help="Push para registry após build"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug detalhado"),
-    output: Optional[str] = typer.Option(None, "--output", "-o", help="Arquivo de saída do relatório"),
+    output: str | None = typer.Option(None, "--output", "-o", help="Arquivo de saída do relatório"),
     force: bool = typer.Option(False, "--force", help="Força build mesmo com erros de validação"),
 ) -> None:
     """Constrói imagens Docker seguras com validação e scanning."""
@@ -91,10 +105,9 @@ def build(
     )
 
     # Executar
-    if interactive:
-        response = _run_interactive_wizard(use_case, path)
-    else:
-        response = use_case.execute(request)
+    response = (
+        _run_interactive_wizard(use_case, path) if interactive else use_case.execute(request)
+    )
 
     # Output
     if ci_mode or output:
@@ -184,7 +197,7 @@ def _run_interactive_wizard(use_case: BuildImageUseCase, path: str) -> BuildImag
     return use_case.execute(request)
 
 
-def _print_table_output(response: BuildImageResponse, report_file: Optional[str] = None) -> None:
+def _print_table_output(response: BuildImageResponse, report_file: str | None = None) -> None:
     """Imprime resultado formatado em tabela."""
     # Nenhuma imagem construída: o resultado é a validação, e é ela que
     # precisa aparecer -- com os checks, não só com um veredito.
@@ -195,7 +208,7 @@ def _print_table_output(response: BuildImageResponse, report_file: Optional[str]
     _print_build_output(response, report_file)
 
 
-def _print_validation_output(response: BuildImageResponse, report_file: Optional[str]) -> None:
+def _print_validation_output(response: BuildImageResponse, report_file: str | None) -> None:
     if response.validation is not None:
         render_validation_report(
             console,
@@ -226,7 +239,7 @@ def _print_validation_output(response: BuildImageResponse, report_file: Optional
     console.print()
 
 
-def _print_build_output(response: BuildImageResponse, report_file: Optional[str]) -> None:
+def _print_build_output(response: BuildImageResponse, report_file: str | None) -> None:
     if not response.success:
         console.print(
             Panel(
@@ -303,7 +316,7 @@ def _print_report(report: BuildReport) -> None:
         console.print()
 
 
-def _write_report_file(report: Optional[BuildReport], report_file: Optional[str]) -> None:
+def _write_report_file(report: BuildReport | None, report_file: str | None) -> None:
     if report is None or not report_file:
         return
     _save_report(report, report_file)
@@ -325,7 +338,7 @@ def _report_dict(report: BuildReport) -> dict[str, Any]:
     }
 
 
-def _print_json_output(response: BuildImageResponse, output_file: Optional[str] = None) -> None:
+def _print_json_output(response: BuildImageResponse, output_file: str | None = None) -> None:
     """Imprime saída JSON (CI mode).
 
     Vai para stdout via `typer.echo`, não pelo console do Rich: em CI o

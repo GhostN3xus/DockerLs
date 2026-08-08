@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-
 from dockerls.domain.entities.dockerfile_analysis import (
     DockerfileAnalysis,
     DockerfileInfo,
@@ -23,7 +22,7 @@ from dockerls.domain.interfaces.dockerfile_validator import (
 
 class DockerfileParser:
     """Parser simples para Dockerfiles.
-    
+
     Extrai informações estruturais de um Dockerfile sem depender
     de bibliotecas externas complexas.
     """
@@ -123,9 +122,8 @@ class DockerfileParser:
             # Check package managers
             pkg_managers = ["apt-get", "apt", "apk", "yum", "dnf", "pip", "npm", "yarn"]
             for pm in pkg_managers:
-                if pm in cmd:
-                    if pm not in self._info.package_managers_used:
-                        self._info.package_managers_used.append(pm)
+                if pm in cmd and pm not in self._info.package_managers_used:
+                    self._info.package_managers_used.append(pm)
 
             # Check cache cleaning
             cache_clean_patterns = [
@@ -203,10 +201,7 @@ class DockerfileParser:
 
     def _is_secret_name(self, name: str) -> bool:
         """Verifica se um nome de variável parece ser um segredo."""
-        for pattern in self.SECRET_ENV_PATTERNS:
-            if re.search(pattern, name):
-                return True
-        return False
+        return any(re.search(pattern, name) for pattern in self.SECRET_ENV_PATTERNS)
 
 
 class DockerfileValidator(DockerfileValidatorInterface):
@@ -291,7 +286,10 @@ class DockerfileValidator(DockerfileValidatorInterface):
                     description="Use a pinned, minimal base image",
                     current_state=base,
                     suggested_fix="FROM node:22-alpine or FROM chainguard/node:latest-dev",
-                    reason="Pinned versions ensure reproducibility; minimal bases reduce attack surface",
+                    reason=(
+                        "Pinned versions ensure reproducibility; "
+                        "minimal bases reduce attack surface"
+                    ),
                 )
             )
 
@@ -342,8 +340,14 @@ class DockerfileValidator(DockerfileValidatorInterface):
                     title="Add security labels",
                     description="Labels improve traceability and incident response",
                     current_state="Missing security labels",
-                    suggested_fix='LABEL security.scanner="dockerls"\nLABEL security.cve-contact="security@company.com"',
-                    reason="Labels enable automated policy enforcement and contact during incidents",
+                    suggested_fix=(
+                        'LABEL security.scanner="dockerls"\n'
+                        'LABEL security.cve-contact="security@company.com"'
+                    ),
+                    reason=(
+                        "Labels enable automated policy enforcement "
+                        "and contact during incidents"
+                    ),
                 )
             )
 
@@ -355,7 +359,9 @@ class DockerfileValidator(DockerfileValidatorInterface):
                     title="Clean package manager cache",
                     description="Package caches increase image size unnecessarily",
                     current_state="Cache not cleaned",
-                    suggested_fix="Add && rm -rf /var/cache/apk/* || rm -rf /var/cache/apt/archives",
+                    suggested_fix=(
+                        "Add && rm -rf /var/cache/apk/* || rm -rf /var/cache/apt/archives"
+                    ),
                     reason="Smaller images have smaller attack surface and faster pulls",
                 )
             )
@@ -401,7 +407,9 @@ class DockerfileValidator(DockerfileValidatorInterface):
                 )
             )
 
-    def _check_non_root_user(self, info: DockerfileInfo, result: DockerfileValidationResult) -> None:
+    def _check_non_root_user(
+        self, info: DockerfileInfo, result: DockerfileValidationResult
+    ) -> None:
         """Verifica se o container roda como usuário não-root."""
         if info.has_user_directive and info.user_name and info.user_name.lower() != "root":
             result.add_check(
@@ -451,7 +459,9 @@ class DockerfileValidator(DockerfileValidatorInterface):
                 )
             )
 
-    def _check_secrets_in_env(self, info: DockerfileInfo, result: DockerfileValidationResult) -> None:
+    def _check_secrets_in_env(
+        self, info: DockerfileInfo, result: DockerfileValidationResult
+    ) -> None:
         """Verifica se há segredos em variáveis ENV."""
         if info.has_secrets_in_env:
             result.add_check(
@@ -476,7 +486,9 @@ class DockerfileValidator(DockerfileValidatorInterface):
                 )
             )
 
-    def _check_package_cache(self, info: DockerfileInfo, result: DockerfileValidationResult) -> None:
+    def _check_package_cache(
+        self, info: DockerfileInfo, result: DockerfileValidationResult
+    ) -> None:
         """Verifica se o cache do package manager foi limpo."""
         if info.package_managers_used:
             if info.cache_cleaned:
@@ -497,7 +509,10 @@ class DockerfileValidator(DockerfileValidatorInterface):
                         message="Package manager cache not cleaned",
                         severity=SeverityLevel.MEDIUM,
                         rule_id="DF005",
-                        fix_suggestion="Add: && rm -rf /var/cache/apk/* || rm -rf /var/cache/apt/archives",
+                        fix_suggestion=(
+                            "Add: && rm -rf /var/cache/apk/* "
+                            "|| rm -rf /var/cache/apt/archives"
+                        ),
                     )
                 )
 
@@ -525,7 +540,9 @@ class DockerfileValidator(DockerfileValidatorInterface):
                 )
             )
 
-    def _check_security_labels(self, info: DockerfileInfo, result: DockerfileValidationResult) -> None:
+    def _check_security_labels(
+        self, info: DockerfileInfo, result: DockerfileValidationResult
+    ) -> None:
         """Verifica se existem labels de segurança."""
         required_labels = ["security.scanner", "maintainer"]
         missing = [lbl for lbl in required_labels if lbl not in info.labels]
@@ -548,7 +565,10 @@ class DockerfileValidator(DockerfileValidatorInterface):
                     message=f"Missing security labels: {', '.join(missing)}",
                     severity=SeverityLevel.LOW,
                     rule_id="DF007",
-                    fix_suggestion='LABEL security.scanner="dockerls"\nLABEL maintainer="team@company.com"',
+                    fix_suggestion=(
+                        'LABEL security.scanner="dockerls"\n'
+                        'LABEL maintainer="team@company.com"'
+                    ),
                 )
             )
 
@@ -608,7 +628,9 @@ class DockerfileValidator(DockerfileValidatorInterface):
                 )
             )
 
-    def _check_entrypoint_form(self, info: DockerfileInfo, result: DockerfileValidationResult) -> None:
+    def _check_entrypoint_form(
+        self, info: DockerfileInfo, result: DockerfileValidationResult
+    ) -> None:
         """Verifica se ENTRYPOINT usa forma exec (não shell)."""
         if info.entrypoint:
             # Exec form starts with [
@@ -829,8 +851,7 @@ ENTRYPOINT ["./app"]
         # Aplicar cada sugestão
         for suggestion in suggestions:
             # Lógica simples de aplicação - em produção seria mais sofisticado
-            if "non-root user" in suggestion.title.lower():
-                if "USER" not in content:
-                    content += "\nUSER appuser\n"
+            if "non-root user" in suggestion.title.lower() and "USER" not in content:
+                content += "\nUSER appuser\n"
 
         return content
