@@ -83,6 +83,12 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
 - **Dois `try/except/pass` silenciosos** em `build_image.py` engoliam
   exatamente o erro que se quer ver quando o metadado do relatório sai vazio.
   Passaram a logar em DEBUG, com a exceção capturada estreitada.
+- **`analyze-dockerfile --format json` emitia JSON inválido** num terminal
+  estreito: a saída ia pelo console do Rich, que quebra a linha na largura do
+  terminal, e uma quebra no meio de uma string do documento o torna
+  imparseável. Em 80 colunas era o caso comum. Passou a sair por
+  `typer.echo`. (`recommend` e `advisor` já haviam sido corrigidos com
+  `soft_wrap=True`; este ficou para trás.)
 - **A tabela do `analyze` truncava o ID da CVE** num terminal de 80 colunas
   (`CVE-2026…`), que é justamente o campo que não pode ser encurtado — sem
   ele o achado não é consultável em lugar nenhum. A coluna passou a reservar

@@ -545,7 +545,8 @@ class BuildImageUseCase:
             if result.returncode == 0:
                 images = json.loads(result.stdout)
                 if images:
-                    return images[0]
+                    info: dict[str, Any] = images[0]
+                    return info
 
             return {}
         except Exception as e:

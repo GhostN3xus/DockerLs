@@ -57,7 +57,7 @@ class DockerfileParser:
         r"(?i)access[_-]?key",
     ]
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._lines: list[str] = []
         self._info = DockerfileInfo()
 

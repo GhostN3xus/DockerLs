@@ -10,6 +10,8 @@ segunda camada e `response.validation.errors` caía num `MagicMock`, que nunca
 
 from __future__ import annotations
 
+import json
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,6 +20,7 @@ from dockerls.application.use_cases.analyze_dockerfile import AnalyzeDockerfileR
 from dockerls.application.use_cases.build_image import (
     BuildImageRequest,
     BuildImageUseCase,
+    BuildOptions,
     BuildResult,
     ScanResult,
 )
@@ -36,6 +39,7 @@ from dockerls.domain.interfaces.dockerfile_validator import (
 )
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY
 from dockerls.infrastructure.dockerfile_validator import HardeningTemplates
+from dockerls.utils.executables import ExecutableNotFoundError
 
 
 def _validation(
@@ -433,6 +437,242 @@ class TestBuildImageUseCase:
     def test_docker_version_extraction(self, use_case):
         """Testa extração da versão do Docker."""
         assert isinstance(use_case._get_docker_version(), str)
+
+
+class _CompletedProcess:
+    """Substituto de `subprocess.CompletedProcess` para os testes."""
+
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+TRIVY_OUTPUT = json.dumps(
+    {
+        "Results": [
+            {
+                "Vulnerabilities": [
+                    {
+                        "VulnerabilityID": "CVE-2026-0001",
+                        "PkgName": "openssl",
+                        "Severity": "CRITICAL",
+                        "InstalledVersion": "3.0.11",
+                        "FixedVersion": "3.0.12",
+                    },
+                    {
+                        "VulnerabilityID": "CVE-2026-0002",
+                        "PkgName": "perl-base",
+                        "Severity": "HIGH",
+                        "InstalledVersion": "5.36.0",
+                    },
+                    {
+                        "VulnerabilityID": "CVE-2026-0003",
+                        "PkgName": "zlib",
+                        "Severity": "MEDIUM",
+                        "InstalledVersion": "1.2",
+                        "FixedVersion": "1.3",
+                    },
+                    {
+                        "VulnerabilityID": "CVE-2026-0004",
+                        "PkgName": "bash",
+                        "Severity": "LOW",
+                        "InstalledVersion": "5.1",
+                    },
+                    {
+                        "VulnerabilityID": "CVE-2026-0005",
+                        "PkgName": "misc",
+                        "Severity": "SOMETHING-ELSE",
+                        "InstalledVersion": "1.0",
+                    },
+                ]
+            }
+        ]
+    }
+)
+
+
+@pytest.fixture
+def bare_use_case():
+    return BuildImageUseCase(
+        MagicMock(spec=DockerfileValidatorInterface), MagicMock(spec=HardeningTemplateProvider)
+    )
+
+
+class TestDockerBuildInvocation:
+    """`docker build` é montado à mão; um argumento errado silenciosamente
+    constrói a imagem errada."""
+
+    def _run(self, use_case, options, **kwargs):
+        with (
+            patch("dockerls.application.use_cases.build_image.resolve_executable") as resolve,
+            patch("dockerls.application.use_cases.build_image.subprocess.run") as run,
+            patch.object(use_case, "_get_image_info", return_value={}),
+        ):
+            resolve.side_effect = lambda name: f"/usr/bin/{name}"
+            run.return_value = _CompletedProcess(returncode=kwargs.get("returncode", 0))
+            result = use_case._build_image(
+                context_path=options.context_path,
+                dockerfile_path=options.dockerfile_path,
+                tag=options.tag,
+                options=options,
+            )
+        return result, run
+
+    def test_passes_tag_dockerfile_and_context(self, bare_use_case):
+        options = BuildOptions(tag="app:1.0", dockerfile_path="Dockerfile", context_path="./ctx")
+        _, run = self._run(bare_use_case, options)
+
+        argv = run.call_args.args[0]
+        assert argv[0] == "/usr/bin/docker"
+        assert argv[1] == "build"
+        assert argv[argv.index("-t") + 1] == "app:1.0"
+        assert argv[argv.index("-f") + 1] == "Dockerfile"
+        assert argv[-1] == "./ctx"
+
+    def test_forwards_build_args_labels_and_no_cache(self, bare_use_case):
+        options = BuildOptions(
+            tag="app:1.0",
+            no_cache=True,
+            build_args={"NODE_ENV": "production"},
+            labels={"org.opencontainers.image.source": "repo"},
+        )
+        _, run = self._run(bare_use_case, options)
+
+        argv = run.call_args.args[0]
+        assert "--no-cache" in argv
+        assert "NODE_ENV=production" in argv
+        assert "org.opencontainers.image.source=repo" in argv
+
+    def test_enables_buildkit_through_the_environment(self, bare_use_case):
+        """BuildKit é ligado por variável de ambiente; a flag antiga que o
+        código montava e descartava nunca fez nada."""
+        _, run = self._run(bare_use_case, BuildOptions(tag="app:1.0", buildkit=True))
+
+        assert run.call_args.kwargs["env"]["DOCKER_BUILDKIT"] == "1"
+
+    def test_non_zero_exit_is_a_failure_carrying_stderr(self, bare_use_case):
+        with (
+            patch("dockerls.application.use_cases.build_image.resolve_executable") as resolve,
+            patch("dockerls.application.use_cases.build_image.subprocess.run") as run,
+        ):
+            resolve.side_effect = lambda name: f"/usr/bin/{name}"
+            run.return_value = _CompletedProcess(returncode=1, stderr="no such file")
+            result = bare_use_case._build_image(".", "Dockerfile", "app:1", BuildOptions(tag="app:1"))
+
+        assert result.success is False
+        assert "no such file" in result.error_message
+
+    def test_missing_docker_fails_with_a_named_message(self, bare_use_case):
+        with patch("dockerls.application.use_cases.build_image.resolve_executable") as resolve:
+            resolve.side_effect = ExecutableNotFoundError("docker")
+            result = bare_use_case._build_image(".", "Dockerfile", "app:1", BuildOptions(tag="app:1"))
+
+        assert result.success is False
+        assert "docker" in result.error_message
+
+    def test_timeout_is_reported_as_such(self, bare_use_case):
+        with (
+            patch("dockerls.application.use_cases.build_image.resolve_executable") as resolve,
+            patch("dockerls.application.use_cases.build_image.subprocess.run") as run,
+        ):
+            resolve.side_effect = lambda name: f"/usr/bin/{name}"
+            run.side_effect = subprocess.TimeoutExpired(cmd="docker", timeout=3600)
+            result = bare_use_case._build_image(".", "Dockerfile", "app:1", BuildOptions(tag="app:1"))
+
+        assert result.success is False
+        assert "timeout" in result.error_message.lower()
+
+
+class TestScanParsing:
+    """As contagens que saem daqui são as que `--fail-on` usa para reprovar
+    um build. Um erro de parsing deixa passar a imagem que deveria barrar."""
+
+    def test_counts_each_severity_and_the_fixable_ones(self, bare_use_case):
+        with (
+            patch("dockerls.application.use_cases.build_image.resolve_executable") as resolve,
+            patch("dockerls.application.use_cases.build_image.subprocess.run") as run,
+        ):
+            resolve.side_effect = lambda name: f"/usr/bin/{name}"
+            run.return_value = _CompletedProcess(returncode=0, stdout=TRIVY_OUTPUT)
+            scan = bare_use_case._scan_image("app:1.0")
+
+        assert scan is not None
+        assert (scan.critical, scan.high, scan.medium, scan.low) == (1, 1, 1, 1)
+        # Severidade desconhecida não pode ser descartada nem contada como LOW.
+        assert scan.unknown == 1
+        assert scan.total_vulnerabilities == 5
+        assert scan.fixable == 2
+        assert scan.scan_tool == "trivy"
+
+    def test_falls_back_to_grype_when_trivy_is_absent(self, bare_use_case):
+        def resolve(name):
+            if name == "trivy":
+                raise ExecutableNotFoundError("trivy")
+            return f"/usr/bin/{name}"
+
+        with (
+            patch(
+                "dockerls.application.use_cases.build_image.resolve_executable", side_effect=resolve
+            ),
+            patch("dockerls.application.use_cases.build_image.subprocess.run") as run,
+        ):
+            run.return_value = _CompletedProcess(returncode=0, stdout='{"matches": []}')
+            scan = bare_use_case._scan_image("app:1.0")
+
+        assert scan is not None
+        assert scan.scan_tool == "grype"
+
+    def test_returns_none_when_no_scanner_is_installed(self, bare_use_case):
+        with patch("dockerls.application.use_cases.build_image.resolve_executable") as resolve:
+            resolve.side_effect = ExecutableNotFoundError("trivy")
+            assert bare_use_case._scan_image("app:1.0") is None
+
+    def test_malformed_scanner_output_does_not_raise(self, bare_use_case):
+        with (
+            patch("dockerls.application.use_cases.build_image.resolve_executable") as resolve,
+            patch("dockerls.application.use_cases.build_image.subprocess.run") as run,
+        ):
+            resolve.side_effect = lambda name: f"/usr/bin/{name}"
+            run.return_value = _CompletedProcess(returncode=0, stdout="not json")
+            assert bare_use_case._scan_image("app:1.0") is None
+
+
+class TestFailOnThreshold:
+    @pytest.mark.parametrize(
+        ("threshold", "scan", "expected"),
+        [
+            ("critical", ScanResult(critical=1), True),
+            ("critical", ScanResult(high=9), False),
+            ("high", ScanResult(high=1), True),
+            ("high", ScanResult(critical=1), True),
+            ("high", ScanResult(medium=50), False),
+            ("medium", ScanResult(critical=1), False),
+        ],
+    )
+    def test_threshold_semantics(self, bare_use_case, threshold, scan, expected):
+        """`--fail-on high` também reprova em CRITICAL: um limiar que ignora
+        o que é pior que ele não é um limiar."""
+        assert bare_use_case._should_fail(scan, threshold) is expected
+
+
+class TestImageInfo:
+    def test_parses_docker_inspect_output(self, bare_use_case):
+        payload = json.dumps([{"Id": "sha256:abc", "Size": 1234, "RootFS": {"Layers": ["a", "b"]}}])
+        with (
+            patch("dockerls.application.use_cases.build_image.resolve_executable") as resolve,
+            patch("dockerls.application.use_cases.build_image.subprocess.run") as run,
+        ):
+            resolve.side_effect = lambda name: f"/usr/bin/{name}"
+            run.return_value = _CompletedProcess(returncode=0, stdout=payload)
+            info = bare_use_case._get_image_info("app:1.0")
+
+        assert info["Id"] == "sha256:abc"
+
+    def test_missing_docker_degrades_to_empty_info(self, bare_use_case):
+        with patch("dockerls.application.use_cases.build_image.resolve_executable") as resolve:
+            resolve.side_effect = ExecutableNotFoundError("docker")
+            assert bare_use_case._get_image_info("app:1.0") == {}
 
 
 if __name__ == "__main__":

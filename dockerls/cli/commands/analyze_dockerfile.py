@@ -54,7 +54,11 @@ def analyze(
         raise typer.Exit(EXIT_ERROR)
 
     if output_format == "json":
-        console.print(json.dumps(response.model_dump(), indent=2))
+        # Via `typer.echo`, não pelo console do Rich: o consumidor é um
+        # parser. O Rich quebra a linha na largura do terminal, e uma quebra
+        # no meio de uma string do JSON produz um documento inválido -- num
+        # terminal de 80 colunas era exatamente o que saía daqui.
+        typer.echo(json.dumps(response.model_dump(), indent=2))
         return
 
     _print_table_output(response)
