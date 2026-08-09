@@ -116,7 +116,8 @@ class TestCiMode:
         assert result.exit_code == EXIT_POLICY
         payload = json.loads(result.stdout)
         assert payload["status"] == "FAILED"
-        failed = [c["check"] for c in payload["report"]["validation"]["checks"] if c["status"] == "FAIL"]
+        checks = payload["report"]["validation"]["checks"]
+        failed = [c["check"] for c in checks if c["status"] == "FAIL"]
         assert "secrets_not_in_env" in failed
         assert "secrets_not_in_env" in payload["error"]
 

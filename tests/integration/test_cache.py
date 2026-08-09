@@ -112,15 +112,16 @@ class TestCacheValidationMiss:
                 return False
 
         cache = SQLiteCache(tmp_path / "cache.db")
-        # write a payload that no longer matches the ImageAnalysis schema
-        await cache.set("analysis:node:latest", {"totally": "wrong-shape"})
-
         uc = RecommendImagesUseCase(
             repository=NullRepo(),
             scanner=NullScanner(),
             eol_checker=NullEOL(),
             cache=cache,
         )
+        # write a payload that no longer matches the ImageAnalysis schema
+        key = uc._cache_key("node:latest")
+        await cache.set(key, {"totally": "wrong-shape"})
+
         result = await uc._get_cached("node:latest")
         assert result is None
-        assert await cache.get("analysis:node:latest") is None
+        assert await cache.get(key) is None

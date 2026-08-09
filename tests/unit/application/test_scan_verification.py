@@ -258,10 +258,8 @@ class TestStaleCacheIsRevalidated:
         )
 
         class _Cache(CacheStoreInterface):
-            def __init__(self):
-                self.store = {
-                    f"analysis:{TAGS[0].full_reference}": poisoned.model_dump(),
-                }
+            def __init__(self, key):
+                self.store = {key: poisoned.model_dump()}
                 self.deleted: list[str] = []
 
             async def get(self, key):
@@ -277,10 +275,15 @@ class TestStaleCacheIsRevalidated:
             async def clear(self):
                 self.store.clear()
 
-        cache = _Cache()
-        result = await _use_case(_CleanScanner(), cache=cache).execute("node")
+        # A chave carrega um fingerprint das regras de ignore e do threat
+        # intel; perguntá-la ao caso de uso evita testar o formato dela.
+        use_case = _use_case(_CleanScanner())
+        key = use_case._cache_key(TAGS[0].full_reference)
+        cache = _Cache(key)
+        use_case._cache = cache
+        result = await use_case.execute("node")
 
-        assert f"analysis:{TAGS[0].full_reference}" in cache.deleted
+        assert key in cache.deleted
         # Re-scanned cleanly, so it is recommended on the fresh scan's merit.
         assert all(a.scan.is_verified for a in result.recommendations)
 
@@ -405,3 +408,83 @@ class TestCrossValidation:
 
         assert result.recommendations
         assert all(a.scan_divergence == "" for a in result.recommendations)
+
+
+class TestPromotedCandidatesAreCrossValidated:
+    """A cross-validation rodava sobre o top N *antes* do filtro de tags.
+
+    Um candidato promovido para o lugar de outro descartado entrava na
+    tabela sem nunca ter passado pelo segundo scanner -- ou seja, com a
+    pontuação apresentada sem contestação justamente por não ter sido
+    checada. Que é a garantia que o README dá para os melhores candidatos.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_candidate_promoted_after_a_tag_drop_is_still_validated(self):
+        from dockerls.application.services.cross_validation import CrossValidator
+
+        # Onze tags: mais que TOP_N, para haver quem promover.
+        tags = [DockerImage(name="node", tag=f"t{i}", is_official=True) for i in range(11)]
+        # A primeira não existe no registry e será descartada.
+        existing = {t.tag for t in tags[1:]}
+
+        class _Secondary(ScannerInterface):
+            def __init__(self):
+                self.scanned: list[str] = []
+
+            async def is_available(self):
+                return True
+
+            async def scan(self, image_reference):
+                self.scanned.append(image_reference)
+                return ScanResult(
+                    image_reference=image_reference,
+                    scanner="grype",
+                    scan_timestamp=datetime.now(tz=UTC).isoformat(),
+                )
+
+        secondary = _Secondary()
+        result = await _use_case(
+            _CleanScanner(),
+            repository=_Repo(tags=tags, existing_tags=existing),
+            cross_validator=CrossValidator(secondary),
+        ).execute("node")
+
+        recommended = {a.image.full_reference for a in result.recommendations}
+        assert recommended, "nothing was recommended, the test proves nothing"
+        # A tag inexistente não pode ter sobrado...
+        assert "node:t0" not in recommended
+        # ...e tudo que sobrou precisa ter sido cross-validado.
+        assert recommended <= set(secondary.scanned)
+
+    @pytest.mark.asyncio
+    async def test_dropped_candidates_do_not_cost_a_secondary_scan(self):
+        """Escanear quem vai ser descartado é trabalho jogado fora."""
+        from dockerls.application.services.cross_validation import CrossValidator
+        from dockerls.application.use_cases.recommend_images import TOP_N
+
+        tags = [DockerImage(name="node", tag=f"t{i}", is_official=True) for i in range(11)]
+
+        class _Secondary(ScannerInterface):
+            def __init__(self):
+                self.scanned: list[str] = []
+
+            async def is_available(self):
+                return True
+
+            async def scan(self, image_reference):
+                self.scanned.append(image_reference)
+                return ScanResult(
+                    image_reference=image_reference,
+                    scanner="grype",
+                    scan_timestamp=datetime.now(tz=UTC).isoformat(),
+                )
+
+        secondary = _Secondary()
+        await _use_case(
+            _CleanScanner(),
+            repository=_Repo(tags=tags, existing_tags={t.tag for t in tags[1:]}),
+            cross_validator=CrossValidator(secondary),
+        ).execute("node")
+
+        assert len(secondary.scanned) <= TOP_N

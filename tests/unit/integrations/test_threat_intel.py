@@ -58,3 +58,69 @@ class TestThreatIntelClient:
         client = ThreatIntelClient()
         assert await client.known_exploited([]) == set()
         assert await client.epss_scores([]) == {}
+
+
+class TestEpssBatching:
+    """A API do FIRST pagina o resultado. Pedir todos os CVEs de uma vez
+    devolvia calado só a primeira página, e o sinal de EPSS sumia justamente
+    nas imagens com mais CRITICAL/HIGH -- as que mais precisam dele."""
+
+    @pytest.mark.asyncio
+    async def test_more_than_one_page_of_cves_is_fully_resolved(self):
+        client = ThreatIntelClient()
+        cve_ids = [f"CVE-2026-{i:05d}" for i in range(250)]
+
+        seen_batches: list[list[str]] = []
+
+        async def fake_get(self, url, params=None, **kwargs):
+            requested = params["cve"].split(",")
+            seen_batches.append(requested)
+            return httpx.Response(
+                200,
+                json={"data": [{"cve": c, "epss": "0.5"} for c in requested]},
+                request=httpx.Request("GET", url),
+            )
+
+        with patch.object(httpx.AsyncClient, "get", fake_get):
+            scores = await client.epss_scores(cve_ids)
+
+        assert len(scores) == 250, "CVEs beyond the first page lost their EPSS score"
+        assert len(seen_batches) == 3
+        assert all(len(b) <= ThreatIntelClient.EPSS_BATCH_SIZE for b in seen_batches)
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_limit_is_sent_so_the_default_cannot_truncate(self):
+        client = ThreatIntelClient()
+        captured: dict[str, str] = {}
+
+        async def fake_get(self, url, params=None, **kwargs):
+            captured.update(params)
+            return httpx.Response(200, json={"data": []}, request=httpx.Request("GET", url))
+
+        with patch.object(httpx.AsyncClient, "get", fake_get):
+            await client.epss_scores(["CVE-2026-0001", "CVE-2026-0002"])
+
+        assert captured["limit"] == "2"
+
+    @pytest.mark.asyncio
+    async def test_one_failed_batch_does_not_discard_the_others(self):
+        """Sinal parcial ainda é melhor que nenhum."""
+        client = ThreatIntelClient()
+        cve_ids = [f"CVE-2026-{i:05d}" for i in range(150)]
+        calls = {"n": 0}
+
+        async def fake_get(self, url, params=None, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ConnectError("boom")
+            requested = params["cve"].split(",")
+            return httpx.Response(
+                200,
+                json={"data": [{"cve": c, "epss": "0.9"} for c in requested]},
+                request=httpx.Request("GET", url),
+            )
+
+        with patch.object(httpx.AsyncClient, "get", fake_get):
+            scores = await client.epss_scores(cve_ids)
+
+        assert len(scores) == 50

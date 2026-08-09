@@ -106,6 +106,18 @@ class EndOfLifeChecker(EOLCheckerInterface):
                     data = cast("list[dict[str, Any]]", resp.json())
                     self._cache[slug] = data
                     return data
+                if resp.status_code == 404:
+                    # O produto não existe no catálogo -- uma resposta
+                    # definitiva, e cacheável. Sem isso, cada uma das ~100
+                    # tags de uma execução repetia a mesma consulta perdida
+                    # (duas, contando is_eol e is_lts). Além do desperdício,
+                    # o volume provocava rate limiting: parte das tags então
+                    # recebia dados e parte recebia lista vazia, e a mesma
+                    # execução emitia vereditos de EOL inconsistentes entre
+                    # tags do mesmo produto.
+                    self._cache[slug] = []
+                    return []
+                logger.debug(f"EOL check for {slug} returned HTTP {resp.status_code}")
                 return []
             except httpx.HTTPError as e:
                 logger.debug(f"EOL check failed for {slug}: {e}")

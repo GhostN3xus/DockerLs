@@ -133,13 +133,21 @@ class DockerfileValidationResult:
 
 @dataclass
 class DockerfileInfo:
-    """Informações extraídas de um Dockerfile."""
+    """Informações extraídas de um Dockerfile.
+
+    Os campos de usuário e de base descrevem o **estágio final** -- o único
+    que vira a imagem que roda. Um `USER node` num estágio de build não
+    protege nada em produção, e por um tempo era exatamente isso que fazia a
+    validação dar PASS num container que subia como root.
+    """
 
     base_images: list[str] = field(default_factory=list)
     stages: int = 1
     has_user_directive: bool = False
     user_name: str | None = None
     user_uid: int | None = None
+    # Base do estágio final, já resolvida através de `FROM <alias>`.
+    final_base_image: str | None = None
     has_healthcheck: bool = False
     has_labels: bool = False
     labels: dict[str, str] = field(default_factory=dict)
@@ -161,6 +169,7 @@ class DockerfileInfo:
         """Retorna dicionário serializável."""
         return {
             "base_images": self.base_images,
+            "final_base_image": self.final_base_image,
             "stages": self.stages,
             "has_user_directive": self.has_user_directive,
             "user_name": self.user_name,

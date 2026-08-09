@@ -22,7 +22,16 @@ from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
 from dockerls.domain.interfaces.scanner import ScannerInterface
 
 TAG = DockerImage(name="node", tag="22-alpine", is_official=True)
-KEY = f"analysis:{TAG.full_reference}"
+
+
+def _key_for(use_case) -> str:
+    """A chave real que o caso de uso usa, em vez de uma cópia do formato.
+
+    Ela carrega um fingerprint das entradas que mudam a análise (regras de
+    ignore ativas, threat intel ligado ou não); um teste que reconstrói a
+    string à mão passa a testar o formato, não o comportamento.
+    """
+    return use_case._cache_key(TAG.full_reference)
 
 
 class _Repo(ImageRepositoryInterface):
@@ -60,8 +69,8 @@ class _CountingScanner(ScannerInterface):
 
 
 class _Cache(CacheStoreInterface):
-    def __init__(self, payload):
-        self.store = {KEY: payload} if payload is not None else {}
+    def __init__(self, payload, key):
+        self.store = {key: payload} if payload is not None else {}
         self.deleted: list[str] = []
 
     async def get(self, key):
@@ -94,15 +103,17 @@ def _poisoned(status, timestamp="2026-01-01T00:00:00Z"):
 
 
 async def _run(cache_payload):
-    cache = _Cache(cache_payload)
     scanner = _CountingScanner()
-    result = await RecommendImagesUseCase(
+    use_case = RecommendImagesUseCase(
         repository=_Repo(),
         scanner=scanner,
         eol_checker=_EOL(),
-        cache=cache,
-    ).execute("node")
-    return result, cache, scanner
+    )
+    key = _key_for(use_case)
+    cache = _Cache(cache_payload, key)
+    use_case._cache = cache
+    result = await use_case.execute("node")
+    return result, cache, scanner, key
 
 
 class TestCorruptedPayloadsAreDiscarded:
@@ -119,7 +130,7 @@ class TestCorruptedPayloadsAreDiscarded:
     )
     @pytest.mark.asyncio
     async def test_unusable_payload_forces_a_real_scan(self, payload):
-        result, _, scanner = await _run(payload)
+        result, _, scanner, _key = await _run(payload)
 
         assert scanner.scans == 1, "the corrupted entry was trusted"
         assert result.recommendations
@@ -127,35 +138,35 @@ class TestCorruptedPayloadsAreDiscarded:
 
     @pytest.mark.asyncio
     async def test_schema_mismatch_is_deleted_not_reused(self):
-        _, cache, _ = await _run({"garbage": True})
-        assert KEY in cache.deleted
+        _, cache, _, key = await _run({"garbage": True})
+        assert key in cache.deleted
 
 
 class TestPersistedFailureStatusIsNeverTrusted:
     @pytest.mark.parametrize("status", [ScanStatus.ERROR, ScanStatus.TIMEOUT, ScanStatus.PARTIAL])
     @pytest.mark.asyncio
     async def test_cached_failed_scan_is_rescanned(self, status):
-        result, cache, scanner = await _run(_poisoned(status))
+        result, cache, scanner, key = await _run(_poisoned(status))
 
         assert scanner.scans == 1, f"a cached {status.value} scan was reused"
-        assert KEY in cache.deleted
+        assert key in cache.deleted
         assert result.recommendations[0].scan.status is ScanStatus.OK
 
     @pytest.mark.asyncio
     async def test_cached_scan_without_a_timestamp_is_rescanned(self):
         """A default-constructed ScanResult has status OK and no timestamp
         -- the shape a "no data" fallback would persist."""
-        result, cache, scanner = await _run(_poisoned(ScanStatus.OK, timestamp=""))
+        result, cache, scanner, key = await _run(_poisoned(ScanStatus.OK, timestamp=""))
 
         assert scanner.scans == 1
-        assert KEY in cache.deleted
+        assert key in cache.deleted
         assert result.recommendations[0].scan.scan_timestamp != ""
 
     @pytest.mark.asyncio
     async def test_a_perfect_score_does_not_buy_trust(self):
         """The poisoned entries all carry score=100 / tier=S; the gate must
         key on scan status alone."""
-        _, _, scanner = await _run(_poisoned(ScanStatus.ERROR))
+        _, _, scanner, _key = await _run(_poisoned(ScanStatus.ERROR))
         assert scanner.scans == 1
 
 
@@ -175,7 +186,7 @@ class TestValidCacheEntriesAreStillUsed:
             remediation_score=100,
         ).model_dump()
 
-        result, cache, scanner = await _run(good)
+        result, cache, scanner, _key = await _run(good)
 
         assert scanner.scans == 0, "a valid cache entry was ignored"
         assert cache.deleted == []
@@ -202,3 +213,46 @@ class TestCacheKeyIsSchemaVersioned:
             sqlite_cache.CACHE_SCHEMA_VERSION = original
 
         assert asyncio.run(cache.get("analysis:node:22")) is not None
+
+
+class TestCacheKeyCoversScoreAffectingInputs:
+    """As regras de ignore e o threat intel são aplicados *antes* de cachear,
+    então precisam entrar na chave. Sem isso o cache guardava uma supressão
+    de CVE já revogada e a servia por até 24h."""
+
+    def _use_case(self, **kwargs):
+        return RecommendImagesUseCase(
+            repository=_Repo(), scanner=_CountingScanner(), eol_checker=_EOL(), **kwargs
+        )
+
+    def test_changing_the_ignore_set_changes_the_key(self, tmp_path):
+        ignore = tmp_path / ".dockerls-ignore.yaml"
+        ignore.write_text("ignores:\n  - cve: CVE-2026-0001\n")
+        with_rule = self._use_case(ignore_path=ignore)
+
+        ignore.write_text("ignores: []\n")
+        without_rule = self._use_case(ignore_path=ignore)
+
+        assert _key_for(with_rule) != _key_for(without_rule)
+
+    def test_an_expired_rule_does_not_reuse_the_suppressed_entry(self, tmp_path):
+        """O arquivo de ignore promete que uma isenção vencida deixa de
+        valer. Se a chave não mudasse, o cache desfazia essa promessa."""
+        ignore = tmp_path / ".dockerls-ignore.yaml"
+        ignore.write_text("ignores:\n  - cve: CVE-2026-0001\n    expires: 2999-01-01\n")
+        active = self._use_case(ignore_path=ignore)
+
+        ignore.write_text("ignores:\n  - cve: CVE-2026-0001\n    expires: 2000-01-01\n")
+        expired = self._use_case(ignore_path=ignore)
+
+        assert _key_for(active) != _key_for(expired)
+
+    def test_toggling_threat_intel_changes_the_key(self):
+        from unittest.mock import MagicMock
+
+        assert _key_for(self._use_case()) != _key_for(self._use_case(threat_intel=MagicMock()))
+
+    def test_the_same_inputs_give_a_stable_key(self):
+        """O fingerprint não pode variar entre execuções, senão o cache
+        nunca acerta."""
+        assert _key_for(self._use_case()) == _key_for(self._use_case())
