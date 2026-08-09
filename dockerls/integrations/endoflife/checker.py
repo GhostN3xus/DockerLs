@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -86,14 +87,31 @@ class EndOfLifeChecker(EOLCheckerInterface):
         self._max_attempts = max_attempts
         self._backoff_base = backoff_base
         self._cache: dict[str, list[dict[str, Any]]] = {}
+        # One lock per product slug. The memo below only closes the window
+        # *after* a response lands, and `recommend` asks `is_eol` + `is_lts`
+        # for ~100 tags concurrently -- so a single-product run fired up to
+        # 200 identical requests before the first one returned. That is the
+        # rate limiting (and the resulting inconsistent EOL verdicts within
+        # one run) that the memo was added to stop.
+        self._locks: dict[str, asyncio.Lock] = {}
 
     def _resolve_product(self, product: str) -> str:
         return DOCKER_TO_ENDOFLIFE.get(product.lower(), product.lower())
 
     async def _fetch_product(self, product: str) -> list[dict[str, Any]]:
-        policy = retry_policy(self._max_attempts, self._backoff_base)
-        result: list[dict[str, Any]] = await policy(self._fetch_product_once, product)
-        return result
+        slug = self._resolve_product(product)
+        cached = self._cache.get(slug)
+        if cached is not None:
+            return cached
+
+        lock = self._locks.setdefault(slug, asyncio.Lock())
+        async with lock:
+            cached = self._cache.get(slug)
+            if cached is not None:
+                return cached
+            policy = retry_policy(self._max_attempts, self._backoff_base)
+            result: list[dict[str, Any]] = await policy(self._fetch_product_once, product)
+            return result
 
     async def _fetch_product_once(self, product: str) -> list[dict[str, Any]]:
         slug = self._resolve_product(product)

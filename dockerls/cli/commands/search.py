@@ -16,7 +16,14 @@ def search(
     limit: int = typer.Option(100, "--limit", "-l", help="Maximum tags to retrieve"),
 ) -> None:
     """Search Docker Hub for available tags of an image."""
-    asyncio.run(_search(image, limit))
+    try:
+        asyncio.run(_search(image, limit))
+    except ValueError as e:
+        # `sanitize_image_name` rejects malformed references. That is user
+        # error -- every other command already reported it as a message, and
+        # only `search` still answered with a stack trace.
+        console.print(f"[red]Invalid image reference:[/red] {e}")
+        raise typer.Exit(1) from e
 
 
 async def _search(image: str, limit: int) -> None:

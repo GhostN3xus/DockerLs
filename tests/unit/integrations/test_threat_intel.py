@@ -124,3 +124,35 @@ class TestEpssBatching:
             scores = await client.epss_scores(cve_ids)
 
         assert len(scores) == 50
+
+
+class TestKevIsFetchedOnce:
+    """`recommend` enriches every tag concurrently. The KEV memo is only
+    populated after a download completes, so without a lock a 100-tag run
+    started 100 simultaneous downloads of the same multi-megabyte catalogue.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_lookups_share_one_download(self):
+        import asyncio
+
+        client = ThreatIntelClient()
+        calls = 0
+
+        async def slow_get(self, url, **kwargs):
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.01)
+            return httpx.Response(
+                200,
+                json={"vulnerabilities": [{"cveID": "CVE-2024-0001"}]},
+                request=httpx.Request("GET", url),
+            )
+
+        with patch("httpx.AsyncClient.get", slow_get):
+            results = await asyncio.gather(
+                *[client.known_exploited(["CVE-2024-0001"]) for _ in range(25)]
+            )
+
+        assert calls == 1, f"KEV catalogue downloaded {calls} times for one run"
+        assert all(r == {"CVE-2024-0001"} for r in results)

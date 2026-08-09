@@ -65,3 +65,40 @@ class TestValidateThreshold:
     def test_too_large(self):
         with pytest.raises(ValueError, match="exceeds"):
             validate_threshold(100000, "max_high")
+
+
+class TestReferencesThatLookLikeScannerFlags:
+    """The reference is appended to `trivy image …` / `grype …` as the scan
+    target. Hyphen is legal mid-name, so a string like `--ignore-unfixed`
+    satisfied the pattern and reached the scanner as a *flag* -- control over
+    how, or whether, the scan actually ran."""
+
+    @pytest.mark.parametrize(
+        "hostile",
+        [
+            "--ignore-unfixed",
+            "--offline-scan",
+            "--skip-db-update",
+            "-o",
+            "ghcr.io/--evil/app",
+            "org/-flag",
+        ],
+    )
+    def test_rejected(self, hostile):
+        with pytest.raises(ValueError, match="Invalid image name"):
+            sanitize_image_name(hostile)
+
+    @pytest.mark.parametrize(
+        "legit",
+        [
+            "node",
+            "node:22-alpine",
+            "my-org/my-app:1.0",
+            "ghcr.io/org/app:v2",
+            "registry.internal:5000/team/app:tag",
+            "cgr.dev/chainguard/node:latest-dev",
+            "node@sha256:" + "a" * 64,
+        ],
+    )
+    def test_real_references_still_accepted(self, legit):
+        assert sanitize_image_name(legit) == legit

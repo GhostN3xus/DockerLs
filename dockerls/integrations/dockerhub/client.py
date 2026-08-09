@@ -73,7 +73,10 @@ class DockerHubClient(ImageRepositoryInterface):
                 if resp.status_code == 200:
                     self._auth_token = resp.json().get("token", "")
                     return bool(self._auth_token)
-        except httpx.HTTPError as e:
+        except (httpx.HTTPError, ValueError) as e:
+            # ValueError covers a 200 whose body is not JSON -- a captive
+            # portal or proxy error page. Failing to authenticate degrades to
+            # anonymous access; it must never abort the command.
             logger.warning(f"Docker Hub auth failed: {e}")
         return False
 

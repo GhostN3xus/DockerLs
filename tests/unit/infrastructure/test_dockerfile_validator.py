@@ -159,3 +159,91 @@ class TestShellUsage:
         checks = validate("FROM node:22-alpine\nUSER node\n")
 
         assert checks["entrypoint_exec_form"] == ValidationStatus.SKIP
+
+
+class TestScratchIsNotAFloatingTag:
+    """`FROM scratch` é a imagem vazia embutida no Docker: não é um
+    repositório e não tem tag nenhuma para pinar. Tratá-la como "sem tag,
+    logo :latest" reprovava com severidade HIGH justamente os Dockerfiles
+    mais enxutos que existem -- inclusive o template Go desta ferramenta."""
+
+    def test_scratch_runtime_stage_does_not_fail_the_pin_rule(self, validate):
+        checks = validate(
+            "FROM golang:1.23-alpine AS builder\n"
+            "RUN go build -o app .\n"
+            "\n"
+            "FROM scratch\n"
+            "COPY --from=builder /app/app /app\n"
+            "USER 65534:65534\n"
+            'ENTRYPOINT ["/app"]\n'
+        )
+
+        assert checks["base_image_pinned"] == ValidationStatus.PASS
+        assert checks["non_root_user"] == ValidationStatus.PASS
+
+    def test_scratch_with_a_platform_flag_is_still_scratch(self, validate):
+        checks = validate("FROM --platform=$BUILDPLATFORM scratch\nUSER 65534\n")
+
+        assert checks["base_image_pinned"] == ValidationStatus.PASS
+
+    def test_an_actually_untagged_image_still_fails(self, validate):
+        checks = validate("FROM ubuntu\nUSER app\n")
+
+        assert checks["base_image_pinned"] == ValidationStatus.FAIL
+
+
+class TestNumericRootUser:
+    """`USER 0` e `USER 0:0` são root tanto quanto `USER root`, e passavam:
+    a checagem só comparava com a string "root". Um falso PASS em
+    non_root_user é o pior desfecho possível desta regra."""
+
+    @pytest.mark.parametrize("directive", ["USER 0", "USER 0:0", "USER root", "USER root:root"])
+    def test_root_by_any_spelling_fails(self, validate, directive):
+        checks = validate(f"FROM node:22-alpine\n{directive}\n")
+
+        assert checks["non_root_user"] == ValidationStatus.FAIL
+
+    @pytest.mark.parametrize("directive", ["USER 1000", "USER 65534:65534", "USER appuser"])
+    def test_a_real_non_root_user_still_passes(self, validate, directive):
+        checks = validate(f"FROM node:22-alpine\n{directive}\n")
+
+        assert checks["non_root_user"] == ValidationStatus.PASS
+
+
+class TestTrailingLineContinuation:
+    """Um arquivo terminado em barra invertida deixava a diretiva pendente
+    no buffer do parser, e ela sumia sem ser verificada."""
+
+    def test_a_final_unterminated_run_is_still_inspected(self, validate):
+        checks = validate("FROM node:22-alpine\nUSER node\nRUN sudo apt-get update && \\")
+
+        assert checks["no_sudo"] == ValidationStatus.FAIL
+
+    def test_a_final_unterminated_env_still_reports_its_secret(self, tmp_path):
+        (tmp_path / "Dockerfile").write_text("FROM node:22-alpine\nUSER node\nENV API_KEY=abc \\")
+        result = DockerfileValidator().validate(tmp_path)
+
+        secret_check = next(c for c in result.checks if c.check == "secrets_not_in_env")
+        assert secret_check.status == ValidationStatus.FAIL
+        assert "API_KEY" in secret_check.message
+
+
+class TestUnreadableDockerignore:
+    def test_it_is_reported_as_skip_not_as_a_crash(self, tmp_path, monkeypatch):
+        """Um `.dockerignore` presente mas ilegível derrubava a validação
+        inteira por causa de um check opcional."""
+        (tmp_path / "Dockerfile").write_text("FROM node:22-alpine\nUSER node\n")
+        (tmp_path / ".dockerignore").write_text(".git\n")
+
+        real_read_text = type(tmp_path).read_text
+
+        def boom(self, *args, **kwargs):
+            if self.name == ".dockerignore":
+                raise PermissionError("denied")
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(type(tmp_path), "read_text", boom)
+
+        result = DockerfileValidator().validate(tmp_path)
+        check = next(c for c in result.checks if c.check == "dockerignore_complete")
+        assert check.status == ValidationStatus.SKIP

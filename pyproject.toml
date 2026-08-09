@@ -38,6 +38,10 @@ dependencies = [
     "tenacity>=8.0",
     "loguru>=0.7",
     "pyyaml>=6.0",
+    # Transitive (httpx -> httpcore/anyio), floored rather than left to the
+    # resolver: `pip-audit` is a gate in this project's own CI, and idna
+    # below 3.15 carries PYSEC-2026-215. Nothing here imports idna directly.
+    "idna>=3.15",
 ]
 
 [project.optional-dependencies]
@@ -63,6 +67,12 @@ Issues = "https://github.com/GhostN3xus/DockerLs/issues"
 
 [tool.setuptools.packages.find]
 include = ["dockerls*"]
+
+# The hardened Dockerfile templates are data files, not modules, so
+# `packages.find` alone never put them in the wheel: `dockerls build
+# --hardened` worked from a source checkout and failed from an install.
+[tool.setuptools.package-data]
+dockerls = ["infrastructure/templates/hardening/*.dockerfile"]
 
 [tool.ruff]
 target-version = "py311"

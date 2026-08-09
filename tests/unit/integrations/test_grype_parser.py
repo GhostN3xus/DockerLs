@@ -48,12 +48,24 @@ class TestGrypeParser:
 
 
 class _FakeProc:
-    def __init__(self, stdout=b"", stderr=b"", returncode=0):
+    """Stand-in for an `asyncio` subprocess.
+
+    `hangs=True` makes `communicate()` itself raise `TimeoutError`, which is
+    what `asyncio.wait_for` would raise around a real one. Patching
+    `asyncio.wait_for` instead left the `communicate()` coroutine created and
+    never awaited, so the suite emitted a `RuntimeWarning` attributed to
+    whichever unrelated test happened to be running when it was collected.
+    """
+
+    def __init__(self, stdout=b"", stderr=b"", returncode=0, hangs=False):
         self._stdout = stdout
         self._stderr = stderr
         self.returncode = returncode
+        self._hangs = hangs
 
     async def communicate(self):
+        if self._hangs:
+            raise TimeoutError
         return self._stdout, self._stderr
 
 
@@ -70,11 +82,8 @@ class TestGrypeScanErrorPaths:
     @pytest.mark.asyncio
     async def test_timeout_is_timeout_status(self):
         scanner = GrypeScanner(timeout=1)
-        proc = _FakeProc()
-        with (
-            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
-            patch("asyncio.wait_for", AsyncMock(side_effect=TimeoutError())),
-        ):
+        proc = _FakeProc(hangs=True)
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
             result = await scanner.scan("nginx:latest")
         assert result.status == ScanStatus.TIMEOUT
 
@@ -143,3 +152,40 @@ class TestGrypeDatabaseRefresh:
             await scanner.scan("node:22-alpine")
 
         assert mock_exec.call_args.kwargs["env"] is None
+
+
+class TestCvssExtractionIsNullSafe:
+    """Grype emits `"metrics": null` for advisories with no CVSS vector. A
+    null there used to raise `AttributeError` mid-parse, turning an otherwise
+    good scan of a real image into an ERROR result."""
+
+    @pytest.mark.parametrize(
+        "cvss",
+        [
+            pytest.param([{"source": "nvd", "metrics": None}], id="null_metrics"),
+            pytest.param([{"source": "nvd", "metrics": []}], id="metrics_is_a_list"),
+            pytest.param([{"source": "nvd", "metrics": {"baseScore": None}}], id="null_score"),
+            pytest.param([{"source": "nvd", "metrics": {"baseScore": "n/a"}}], id="text_score"),
+            pytest.param([{"source": "nvd"}], id="metrics_missing"),
+        ],
+    )
+    def test_unscored_advisory_reads_as_zero(self, cvss):
+        result = GrypeScanner()._parse_results(
+            "node:22",
+            {
+                "matches": [
+                    {
+                        "vulnerability": {
+                            "id": "CVE-2024-3333",
+                            "severity": "High",
+                            "fix": {"versions": []},
+                            "cvss": cvss,
+                        },
+                        "artifact": {"name": "libz", "version": "1.0"},
+                    }
+                ]
+            },
+        )
+
+        assert result.total_count == 1
+        assert result.vulnerabilities[0].cvss_score == 0.0

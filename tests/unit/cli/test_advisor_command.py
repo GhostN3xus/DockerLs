@@ -102,3 +102,58 @@ class TestAdvisorCommand:
             r = runner.invoke(app, ["advisor", "node", "--format", "json"])
         assert r.exit_code == 1
         assert "error" in r.stdout
+
+
+class TestAdvisorArgumentHandling:
+    def test_unknown_format_is_rejected(self):
+        """An unrecognised format silently fell through to the Rich table, so
+        `--format jsonn` in a pipeline produced decorated prose where a parser
+        expected JSON."""
+        result = runner.invoke(app, ["advisor", "node", "--format", "jsonn"])
+
+        assert result.exit_code == 1
+        assert "--format" in result.stdout
+
+    def test_workers_defaults_to_configuration_not_a_hard_coded_ten(self, monkeypatch):
+        """`--workers` carried a hard-coded default of 10, which shadowed
+        `Settings.workers` entirely -- the same dead-configuration bug the
+        rest of the CLI was already fixed for."""
+        import inspect
+
+        from dockerls.cli.commands.advisor import advisor
+
+        default = inspect.signature(advisor).parameters["workers"].default
+        assert default.default is None, "a non-None default shadows Settings.workers"
+
+    def test_configured_workers_reach_the_use_case(self):
+        seen = {}
+
+        async def fake_builder(**kwargs):
+            seen.update(kwargs)
+            uc = AsyncMock()
+            uc.execute = AsyncMock(
+                return_value=AnalysisResult(
+                    query="node",
+                    total_tags_scanned=1,
+                    baseline_met=True,
+                    recommendations=[_analysis()],
+                )
+            )
+            return uc
+
+        with patch("dockerls.cli.commands.advisor.build_recommend_use_case", fake_builder):
+            result = runner.invoke(app, ["advisor", "node", "--format", "json"])
+
+        assert result.exit_code == 0
+        assert seen["workers"] is None, "the CLI passed a default instead of deferring to Settings"
+
+    def test_invalid_threshold_is_a_message_not_a_traceback(self):
+        async def boom(**kwargs):
+            raise ValueError("--workers must be at least 1")
+
+        with patch("dockerls.cli.commands.advisor.build_recommend_use_case", boom):
+            result = runner.invoke(app, ["advisor", "node"])
+
+        assert result.exit_code == 1
+        assert "Invalid configuration" in result.stdout
+        assert "Traceback" not in result.stdout

@@ -18,6 +18,7 @@ from dockerls.cli.app import app
 from dockerls.cli.commands.build import BuildImageUseCase
 from dockerls.domain.entities.dockerfile_analysis import HardeningRule, SeverityLevel
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY
+from dockerls.infrastructure.dockerfile_validator import HardeningTemplates
 
 runner = CliRunner()
 
@@ -143,8 +144,20 @@ class TestListTemplates:
         result = runner.invoke(app, ["build", "--list-templates"])
 
         assert result.exit_code == EXIT_OK
-        for template in ("node", "python", "go", "java"):
+        for template in ("node", "python", "go"):
             assert template in result.stdout
+
+    def test_only_lists_templates_that_actually_exist(self):
+        """The list used to advertise "java", for which no template file has
+        ever existed: `--base java` then fell through to a generic template
+        with a different base than the one the user asked for."""
+        listed = json.loads(runner.invoke(app, ["build", "--list-templates", "--ci-mode"]).stdout)[
+            "templates"
+        ]
+
+        provider = HardeningTemplates()
+        for name in listed:
+            assert provider.get_template(name).strip(), f"{name} listed but yields no template"
 
     def test_ci_mode_lists_them_as_json(self):
         result = runner.invoke(app, ["build", "--list-templates", "--ci-mode"])
@@ -207,22 +220,22 @@ class TestReportFile:
 
 
 def _build_report(**overrides) -> BuildReport:
-    defaults: dict = dict(
-        build_id="deadbeef01234567",
-        timestamp="2026-01-01T00:00:00+00:00",
-        image="myapp:1.0",
-        dockerfile_path="Dockerfile",
-        validation={
+    defaults: dict = {
+        "build_id": "deadbeef01234567",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "image": "myapp:1.0",
+        "dockerfile_path": "Dockerfile",
+        "validation": {
             "dockerfile_path": "Dockerfile",
             "passed": 5,
             "warnings": 0,
             "errors": 0,
             "checks": [],
         },
-        scan_results={"trivy": {"critical": 0, "high": 1, "medium": 2, "low": 3}},
-        security_score=88,
-        security_tier="B",
-        recommendations=[
+        "scan_results": {"trivy": {"critical": 0, "high": 1, "medium": 2, "low": 3}},
+        "security_score": 88,
+        "security_tier": "B",
+        "recommendations": [
             {
                 "priority": "HIGH",
                 "title": "Pin base image",
@@ -231,13 +244,13 @@ def _build_report(**overrides) -> BuildReport:
                 "reason": "Floating tags drift under you",
             }
         ],
-        build_metadata={
+        "build_metadata": {
             "git_sha": "deadbeef",
             "built_by": "ci",
             "docker_version": "Docker version 24.0.0",
             "buildkit": True,
         },
-    )
+    }
     defaults.update(overrides)
     return BuildReport(**defaults)
 
@@ -328,9 +341,7 @@ class TestFullBuildFlow:
         )
         monkeypatch.setattr(BuildImageUseCase, "execute", lambda self, request: response)
 
-        result = runner.invoke(
-            app, ["build", "-t", "myapp:1.0", "--ci-mode", str(clean_context)]
-        )
+        result = runner.invoke(app, ["build", "-t", "myapp:1.0", "--ci-mode", str(clean_context)])
 
         assert result.exit_code == EXIT_OK
         payload = json.loads(result.stdout)
@@ -359,3 +370,70 @@ class TestFullBuildFlow:
         assert "Vulnerability Scan" in html
         assert "No scan was run." not in html
         assert '<td class="high">High</td><td>1</td>' in html
+
+
+class TestHtmlReportIsEscaped:
+    """The build report interpolated `--tag`, the Dockerfile path and the
+    tier straight into markup. A tag is attacker-influenced in any CI that
+    builds from a branch name, so `x"><script>` turned a report someone opens
+    in a browser into an execution vector. The `export --format html` path
+    already escaped; this one did not.
+    """
+
+    HOSTILE = '"><script>alert(1)</script>'
+
+    def test_image_tag_is_escaped(self, tmp_path):
+        from dockerls.cli.commands.build import _render_html_report
+
+        html = _render_html_report(_build_report(image=self.HOSTILE))
+
+        assert "<script>" not in html
+        assert "&lt;script&gt;" in html
+
+    def test_dockerfile_path_is_escaped(self, tmp_path):
+        from dockerls.cli.commands.build import _render_html_report
+
+        html = _render_html_report(_build_report(image="", dockerfile_path=self.HOSTILE))
+
+        assert "<script>" not in html
+
+    def test_tier_and_timestamp_are_escaped(self):
+        from dockerls.cli.commands.build import _render_html_report
+
+        html = _render_html_report(
+            _build_report(security_tier=self.HOSTILE, timestamp=self.HOSTILE)
+        )
+
+        assert "<script>" not in html
+
+    def test_non_numeric_counts_cannot_inject_markup(self):
+        """Counts come from scanner JSON -- numbers by convention, not by
+        guarantee."""
+        from dockerls.cli.commands.build import _render_html_report
+
+        html = _render_html_report(
+            _build_report(scan_results={"trivy": {"critical": "<img onerror=x>"}})
+        )
+
+        assert "<img" not in html
+
+    def test_the_page_still_reads_correctly(self):
+        from dockerls.cli.commands.build import _render_html_report
+
+        html = _render_html_report(_build_report())
+
+        assert html.startswith("<!DOCTYPE html>")
+        assert "myapp:1.0" in html
+        assert '<div class="score">88/100</div>' in html
+
+
+class TestBaseTemplateValidation:
+    def test_unknown_base_is_rejected_before_anything_is_built(self, clean_context):
+        result = runner.invoke(
+            app, ["build", "-t", "x:1", "--hardened", "--base", "java", str(clean_context)]
+        )
+
+        assert result.exit_code == EXIT_ERROR
+        assert "--base" in result.stdout
+        for name in HardeningTemplates().list_templates():
+            assert name in result.stdout

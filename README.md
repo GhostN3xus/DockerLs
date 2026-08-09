@@ -105,8 +105,11 @@ dockerls recommend node --fail-on high --no-color
 ```
 
 `recommend` e `advisor` aceitam `--format json` (saída legível por máquina) e
-`--no-color` (texto puro, sem códigos ANSI), e terminam com um código de saída
-que reflete o resultado, para servir de portão em CI:
+`--no-color` (texto puro, sem códigos ANSI).
+
+<a id="exit-codes-de-recommend"></a>
+`recommend` termina com um código de saída que reflete o resultado, para servir
+de portão em CI:
 
 | Código de saída | Significado                                             |
 |-----------------|---------------------------------------------------------|
@@ -114,6 +117,10 @@ que reflete o resultado, para servir de portão em CI:
 | 1               | Erro grave, ou limite de `--fail-on` foi violado         |
 | 2               | Nenhuma imagem no baseline, mas há alternativas          |
 | 3               | Nada utilizável foi encontrado                           |
+
+`advisor` usa apenas `0` (produziu um plano) e `1` (não havia nada sobre o que
+aconselhar): ele reporta uma única imagem, então "baseline" e "alternativa" não
+são desfechos distinguíveis do ponto de vista dele.
 
 `--fail-on {critical,high,medium}` força o código de saída 1 se o melhor
 resultado ainda carregar vulnerabilidades naquela severidade ou acima, mesmo em
@@ -420,8 +427,8 @@ efeito colateral. Para gerar o arquivo, rode o build sem `--validate-only`.
 
 ### Exit codes
 
-Todo comando da CLI segue a mesma tabela. É o contrato do qual um pipeline pode
-depender:
+Os comandos que **avaliam um artefato seu** (`build`, `analyze-dockerfile`)
+seguem esta tabela. É o contrato do qual um pipeline pode depender:
 
 | Código | Significado | Quando acontece |
 | --- | --- | --- |
@@ -432,6 +439,15 @@ depender:
 A distinção entre `1` e `2` importa: `1` significa "não sei", `2` significa "sei,
 e reprovou". Um pipeline que trata os dois como falha genérica não consegue
 diferenciar uma indisponibilidade do scanner de uma imagem realmente insegura.
+
+`recommend` **não** cabe nessa tabela, e por um motivo: ele não avalia um
+artefato seu, ele escolhe entre candidatos. "Não achei nada no baseline, mas
+achei alternativas" é um desfecho que `0`/`1`/`2` não sabem expressar, então
+`recommend` usa a escala própria de quatro códigos
+[documentada acima](#exit-codes-de-recommend). Os demais comandos
+(`search`, `compare`, `analyze`, `advisor`, `sbom`, `export`, `login`, `logout`,
+`cache`) usam apenas `0` para sucesso e `1` para falha; `health` usa `1` para
+"algum serviço degradado".
 
 ---
 
@@ -575,6 +591,8 @@ dockerls/
     config/          # Settings (Pydantic)
     database/        # Modelos SQLAlchemy
     logging/         # Configuração do Loguru com mascaramento de segredos
+    templates/       # Dockerfiles hardened servidos por --hardened/--base
+    dockerfile_validator.py  # Regras OWASP e provedor de templates
     evidence.py      # Persistência do JSON bruto dos scans
   integrations/
     dockerhub/       # Cliente da API do Docker Hub

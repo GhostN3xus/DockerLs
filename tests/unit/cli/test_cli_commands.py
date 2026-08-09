@@ -311,3 +311,43 @@ class TestVersionCommand:
         result = runner.invoke(app, ["version"])
         assert result.exit_code == 0
         assert "DockerLs v" in result.stdout
+
+
+class TestMalformedImageReferencesAreUserErrors:
+    """`sanitize_image_name` rejects malformed references by raising
+    `ValueError`. `analyze`, `compare`, `export` and `recommend` already
+    reported that as a message; `search` and `sbom` still answered with a
+    stack trace, which in a pipeline is indistinguishable from a crash.
+    """
+
+    def test_search_reports_it_without_a_traceback(self):
+        result = runner.invoke(app, ["search", "bad name!"])
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Invalid image reference" in result.stdout
+
+    def test_sbom_reports_it_without_a_traceback(self):
+        scanner = AsyncMock()
+        scanner.is_available = AsyncMock(return_value=True)
+        scanner.generate_sbom = AsyncMock(side_effect=ValueError("Invalid image name: bad name!"))
+        with patch("dockerls.cli.commands.sbom.TrivyScanner", return_value=scanner):
+            result = runner.invoke(app, ["sbom", "bad name!"])
+
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "Invalid image reference" in result.stdout
+
+    def test_sbom_unwritable_output_is_reported(self, tmp_path):
+        scanner = AsyncMock()
+        scanner.is_available = AsyncMock(return_value=True)
+        scanner.generate_sbom = AsyncMock(return_value="{}")
+        blocked = tmp_path / "afile"
+        blocked.write_text("x")
+        with patch("dockerls.cli.commands.sbom.TrivyScanner", return_value=scanner):
+            result = runner.invoke(
+                app, ["sbom", "node:22-alpine", "-o", str(blocked / "nested" / "sbom.json")]
+            )
+
+        assert result.exit_code == 1
+        assert "Could not write" in result.stdout

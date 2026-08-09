@@ -143,3 +143,35 @@ class TestUnknownProductIsCachedOnce:
             await checker.is_eol("node", "22")
 
         assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_concurrent_lookups_of_one_product_hit_the_api_once(self):
+        """O memo só fecha a janela *depois* da resposta chegar, e `recommend`
+        pergunta `is_eol` + `is_lts` para ~100 tags em paralelo -- ou seja,
+        até 200 requisições idênticas antes da primeira retornar. Era essa a
+        rajada que provocava rate limiting e fazia tags do mesmo produto
+        receberem vereditos de EOL diferentes na mesma execução.
+        """
+        import asyncio
+
+        checker = EndOfLifeChecker()
+        calls = {"n": 0}
+
+        async def slow_get(self, url, **kwargs):
+            calls["n"] += 1
+            await asyncio.sleep(0.01)
+            return httpx.Response(
+                200,
+                json=[{"cycle": "22", "eol": "2000-01-01", "lts": True}],
+                request=httpx.Request("GET", url),
+            )
+
+        with patch.object(httpx.AsyncClient, "get", slow_get):
+            results = await asyncio.gather(
+                *[checker.is_eol("node", "22") for _ in range(20)],
+                *[checker.is_lts("node", "22") for _ in range(20)],
+            )
+
+        assert calls["n"] == 1, f"endoflife.date queried {calls['n']} times for one product"
+        # E todas as respostas concordam entre si -- o ponto todo do memo.
+        assert all(results)

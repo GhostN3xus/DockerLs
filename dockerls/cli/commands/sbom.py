@@ -25,7 +25,14 @@ def sbom(
             f"[red]Unsupported SBOM format: {output_format}. Use cyclonedx or spdx.[/red]"
         )
         raise typer.Exit(1)
-    asyncio.run(_sbom(image, fmt, output))
+    try:
+        asyncio.run(_sbom(image, fmt, output))
+    except ValueError as e:
+        # A malformed image reference is rejected by `sanitize_image_name`
+        # inside the scanner; surfacing it as a message keeps `sbom` in line
+        # with every other command.
+        console.print(f"[red]Invalid image reference:[/red] {e}")
+        raise typer.Exit(1) from e
 
 
 async def _sbom(image: str, fmt: str, output: str) -> None:
@@ -40,7 +47,14 @@ async def _sbom(image: str, fmt: str, output: str) -> None:
         raise typer.Exit(1)
 
     if output:
-        Path(output).write_text(content, encoding="utf-8")
+        path = Path(output)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        except OSError as e:
+            # An unwritable destination is user error, not a traceback.
+            console.print(f"[red]Could not write {path}:[/red] {e}")
+            raise typer.Exit(1) from e
         console.print(f"[green]SBOM written to {output}[/green]")
     else:
         console.print(content, soft_wrap=True)
