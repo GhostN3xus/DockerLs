@@ -54,10 +54,9 @@ def build(
     suggest_hardening: bool = typer.Option(
         False, "--suggest-hardening", help="Sugere melhorias sem build"
     ),
-    config: str | None = typer.Option(
-        None, "--config", help="Arquivo de config .dockerls-hardening.yaml"
+    push: bool = typer.Option(
+        False, "--push", help="Faz docker push da tag após um build bem-sucedido"
     ),
-    push: bool = typer.Option(False, "--push", help="Push para registry após build"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug detalhado"),
     output: str | None = typer.Option(None, "--output", "-o", help="Arquivo de saída do relatório"),
     force: bool = typer.Option(False, "--force", help="Força build mesmo com erros de validação"),
@@ -75,6 +74,13 @@ def build(
     # Validar tag obrigatória (exceto em modos especiais)
     if not tag and not validate_only and not suggest_hardening:
         console.print("[red]Error:[/red] --tag é obrigatório para build")
+        raise typer.Exit(EXIT_ERROR)
+
+    # Um limiar desconhecido não pode virar um portão que nunca reprova:
+    # rejeita antes de construir qualquer coisa.
+    if fail_on is not None and fail_on.strip().lower() not in BuildImageUseCase.FAIL_ON_THRESHOLDS:
+        valid = ", ".join(BuildImageUseCase.FAIL_ON_THRESHOLDS)
+        console.print(f"[red]Error:[/red] --fail-on inválido: {fail_on!r}. Use um de: {valid}")
         raise typer.Exit(EXIT_ERROR)
 
     # Parsear JSON args
@@ -102,6 +108,7 @@ def build(
         ci_mode=ci_mode,
         verbose=verbose,
         force=force,
+        push=push,
     )
 
     # Executar

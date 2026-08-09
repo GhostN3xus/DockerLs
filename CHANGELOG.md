@@ -35,6 +35,58 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
   precisa ser alcançável a partir de algum ponto do pacote, e nenhum módulo
   pode ficar órfão. Ele encontrou mais oito casos já na primeira execução.
 
+### Corrigido (revisão final: veredito falso-positivo de segurança)
+
+Seis defeitos da mesma classe, a pior possível numa ferramenta de segurança:
+**dizer que está seguro quando não está**. Um falso FAIL custa o tempo de
+quem lê; um falso PASS entrega a imagem em produção com o carimbo da
+ferramenta.
+
+- **O fallback do Grype devolvia um scan zerado.** O código era
+  `return ScanResult(scan_tool="grype")` sob um comentário `# Parse similar
+  ao Trivy...`. Numa máquina sem Trivy e com Grype — a configuração de
+  fallback que a própria ferramenta anuncia — **todo build era reportado com
+  zero vulnerabilidades** e `--fail-on critical` nunca reprovava nada. O
+  parser foi implementado (incluindo a faixa `NEGLIGIBLE`, que só o Grype
+  tem e que virava `UNKNOWN`).
+- **`--fail-on` passava em silêncio quando o scan não rodava.** Sem scanner
+  instalado, `scan_result` era `None`, a condição do portão era pulada e o
+  build terminava com exit 0. Um portão que não pôde ser avaliado não é um
+  portão aprovado: agora é erro de execução (exit 1).
+- **`--fail-on medium` e `--fail-on low` nunca reprovavam.** Só `critical` e
+  `high` eram tratados; o resto caía num `return False`. Os quatro níveis
+  agora funcionam, cada um reprovando também o que é pior que ele, e um
+  limiar desconhecido é rejeitado na CLI antes do build começar em vez de
+  virar um portão aberto que parece fechado.
+- **`non_root_user` dava PASS num container que sobe como root.** A regra
+  aceitava qualquer `USER` do arquivo, então um `USER node` num estágio de
+  build satisfazia a verificação enquanto o estágio final rodava como root.
+  O parser passou a rastrear estágios e resolver o estágio final, inclusive
+  seguindo a herança de `FROM <alias>`.
+- **`minimal_base` dava PASS com um runtime gordo.** Mesmo defeito: um
+  builder em Alpine fazia um runtime em Ubuntu passar. Agora avalia a base
+  do estágio final.
+- **`secrets_not_in_env` não via a maioria dos segredos.** A regex
+  `^ENV\s+(\S+)=(.*)$` lia só o primeiro par de uma linha, então
+  `ENV NODE_ENV=production DOCKER_TOKEN=...` passava batido, e a forma
+  legada `ENV KEY value` não casava com nada — nunca era verificada. As duas
+  formas do Docker agora são cobertas.
+- **`shell_usage` era um check que sempre passava** — não olhava nada,
+  apenas adicionava um `PASS` incondicional. Uma regra assim é pior que
+  regra nenhuma: afirma ao usuário que o ponto foi verificado e ainda infla
+  o score. Agora verifica de fato a forma do `CMD`, e devolve `SKIP` quando
+  não há o que verificar. `entrypoint_exec_form` também virou `SKIP`
+  explícito em vez de sumir da tabela.
+
+### Alterado
+
+- **`--push` passou a funcionar.** A flag era aceita e silenciosamente
+  ignorada. Agora publica a tag depois de um build bem-sucedido — e depois
+  dos portões, porque publicar uma imagem que reprovou no scan derrota o
+  propósito de ter portão.
+- **`--config` foi removida.** Era aceita, não tinha formato definido e
+  nada a consumia.
+
 ### Corrigido (auditoria: o que é afirmado versus o que o código faz)
 
 - **`build --validate-only` não imprimia nada de útil.**

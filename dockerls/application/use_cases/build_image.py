@@ -118,6 +118,7 @@ class BuildImageRequest:
     ci_mode: bool = False
     verbose: bool = False
     force: bool = False
+    push: bool = False
 
 
 @dataclass
@@ -218,18 +219,48 @@ class BuildImageUseCase:
                 scan_result = self._scan_image(request.tag)
 
             # 7. Verificar thresholds de falha
-            if request.fail_on and scan_result and self._should_fail(scan_result, request.fail_on):
-                return BuildImageResponse(
-                    success=False,
-                    image_tag=request.tag,
-                    image_sha256=build_result.image_sha256,
-                    validation=validation,
-                    analysis=validation_result.analysis,
-                    error=f"Vulnerabilities exceed threshold ({request.fail_on})",
-                    exit_code=EXIT_POLICY,
-                )
+            if request.fail_on:
+                # Um portão que não pôde ser avaliado não é um portão
+                # aprovado. Sem scan, `--fail-on` deixava passar em silêncio
+                # qualquer imagem numa máquina sem scanner instalado.
+                if scan_result is None:
+                    return BuildImageResponse(
+                        success=False,
+                        image_tag=request.tag,
+                        image_sha256=build_result.image_sha256,
+                        validation=validation,
+                        analysis=validation_result.analysis,
+                        error=(
+                            f"--fail-on {request.fail_on} requires a vulnerability scan, "
+                            "and no scanner (trivy, grype) could be run"
+                        ),
+                        exit_code=EXIT_ERROR,
+                    )
+                if self._should_fail(scan_result, request.fail_on):
+                    return BuildImageResponse(
+                        success=False,
+                        image_tag=request.tag,
+                        image_sha256=build_result.image_sha256,
+                        validation=validation,
+                        analysis=validation_result.analysis,
+                        error=f"Vulnerabilities exceed threshold ({request.fail_on})",
+                        exit_code=EXIT_POLICY,
+                    )
 
-            # 8. Gerar relatório
+            # 8. Push, se pedido. Só depois dos portões: publicar uma imagem
+            #    que reprovou no scan derrota o propósito de ter o portão.
+            if request.push:
+                push_error = self._push_image(request.tag)
+                if push_error is not None:
+                    return BuildImageResponse(
+                        success=False,
+                        image_tag=request.tag,
+                        image_sha256=build_result.image_sha256,
+                        error=push_error,
+                        exit_code=EXIT_ERROR,
+                    )
+
+            # 9. Gerar relatório
             report = self._generate_report(
                 validation=validation_result,
                 build=build_result,
@@ -529,6 +560,24 @@ class BuildImageUseCase:
                 logs=logs,
             )
 
+    def _push_image(self, tag: str) -> str | None:
+        """Publica a imagem no registry. Devolve a mensagem de erro, ou None."""
+        logger.debug(f"Publicando imagem: {tag}")
+        try:
+            result = subprocess.run(  # noqa: S603 -- argv, sem shell; argv[0] resolvido
+                [resolve_executable("docker"), "push", tag],
+                capture_output=True,
+                text=True,
+                timeout=1800,
+                check=False,
+            )
+        except (ExecutableNotFoundError, OSError, subprocess.SubprocessError) as e:
+            return f"Push failed: {e}"
+
+        if result.returncode != 0:
+            return f"Push failed: {result.stderr.strip()[:500]}"
+        return None
+
     def _get_image_info(self, tag: str) -> dict[str, Any]:
         """Obtém informações da imagem construída."""
         try:
@@ -574,55 +623,11 @@ class BuildImageUseCase:
                 check=False,
             )
 
-            if result.returncode == 0:
-                scan_data = json.loads(result.stdout)
-
-                # Parsear resultados do Trivy
-                critical = high = medium = low = unknown = fixable = 0
-                vulnerabilities = []
-
-                for finding in scan_data.get("Results", []):
-                    for vuln in finding.get("Vulnerabilities", []):
-                        severity = vuln.get("Severity", "UNKNOWN")
-                        if severity == "CRITICAL":
-                            critical += 1
-                        elif severity == "HIGH":
-                            high += 1
-                        elif severity == "MEDIUM":
-                            medium += 1
-                        elif severity == "LOW":
-                            low += 1
-                        else:
-                            unknown += 1
-
-                        if vuln.get("FixedVersion"):
-                            fixable += 1
-
-                        vulnerabilities.append(
-                            {
-                                "cve_id": vuln.get("VulnerabilityID"),
-                                "package": vuln.get("PkgName"),
-                                "severity": severity,
-                                "installed_version": vuln.get("InstalledVersion"),
-                                "fixed_version": vuln.get("FixedVersion"),
-                            }
-                        )
-
-                end_time = datetime.now()
-                scan_time = (end_time - start_time).total_seconds()
-
-                return ScanResult(
-                    critical=critical,
-                    high=high,
-                    medium=medium,
-                    low=low,
-                    unknown=unknown,
-                    total_vulnerabilities=critical + high + medium + low + unknown,
-                    fixable=fixable,
-                    scan_tool="trivy",
-                    scan_time_seconds=scan_time,
-                    vulnerabilities=vulnerabilities[:100],  # Limitar a 100
-                )
+            if result.returncode == 0 and result.stdout:
+                scan = self._parse_trivy_scan(json.loads(result.stdout))
+                scan.scan_time_seconds = (datetime.now() - start_time).total_seconds()
+                return scan
+            logger.warning(f"Trivy falhou (exit {result.returncode}), tentando Grype...")
 
         except ExecutableNotFoundError:
             logger.warning("Trivy não encontrado, tentando Grype...")
@@ -644,10 +649,10 @@ class BuildImageUseCase:
                 check=False,
             )
 
-            if result.returncode == 0:
-                scan_data = json.loads(result.stdout)
-                # Parse similar ao Trivy...
-                return ScanResult(scan_tool="grype")
+            if result.returncode == 0 and result.stdout:
+                scan = self._parse_grype_scan(json.loads(result.stdout))
+                scan.scan_time_seconds = (datetime.now() - start_time).total_seconds()
+                return scan
 
         except Exception as e:
             logger.warning(f"Grype também falhou: {e}")
@@ -655,13 +660,114 @@ class BuildImageUseCase:
         logger.warning("Nenhuma ferramenta de scan disponível")
         return None
 
+    @staticmethod
+    def _parse_trivy_scan(data: dict[str, Any]) -> ScanResult:
+        """Converte o JSON do Trivy em contagens por severidade."""
+        counts = dict.fromkeys(("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"), 0)
+        fixable = 0
+        vulnerabilities: list[dict[str, Any]] = []
+
+        for finding in data.get("Results", []):
+            for vuln in finding.get("Vulnerabilities", []):
+                severity = str(vuln.get("Severity", "UNKNOWN")).upper()
+                counts[severity if severity in counts else "UNKNOWN"] += 1
+                if vuln.get("FixedVersion"):
+                    fixable += 1
+                vulnerabilities.append(
+                    {
+                        "cve_id": vuln.get("VulnerabilityID"),
+                        "package": vuln.get("PkgName"),
+                        "severity": severity,
+                        "installed_version": vuln.get("InstalledVersion"),
+                        "fixed_version": vuln.get("FixedVersion"),
+                    }
+                )
+
+        return BuildImageUseCase._scan_result(counts, fixable, vulnerabilities, "trivy")
+
+    @staticmethod
+    def _parse_grype_scan(data: dict[str, Any]) -> ScanResult:
+        """Converte o JSON do Grype em contagens por severidade.
+
+        Este parser não existia: o fallback devolvia um `ScanResult()` zerado
+        com um comentário "parse similar ao Trivy...". Numa máquina só com
+        Grype, todo build era reportado com zero vulnerabilidades e
+        `--fail-on critical` nunca reprovava nada.
+        """
+        counts = dict.fromkeys(("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"), 0)
+        fixable = 0
+        vulnerabilities: list[dict[str, Any]] = []
+
+        for match in data.get("matches", []):
+            vuln = match.get("vulnerability", {})
+            severity = str(vuln.get("severity", "UNKNOWN")).upper()
+            # Grype tem uma faixa a mais que o Trivy; sem isso ela cairia em
+            # UNKNOWN e sumiria da contagem de LOW.
+            if severity == "NEGLIGIBLE":
+                severity = "LOW"
+            counts[severity if severity in counts else "UNKNOWN"] += 1
+
+            artifact = match.get("artifact", {})
+            fixed_versions = vuln.get("fix", {}).get("versions", []) or []
+            if fixed_versions:
+                fixable += 1
+            vulnerabilities.append(
+                {
+                    "cve_id": vuln.get("id"),
+                    "package": artifact.get("name"),
+                    "severity": severity,
+                    "installed_version": artifact.get("version"),
+                    "fixed_version": fixed_versions[0] if fixed_versions else None,
+                }
+            )
+
+        return BuildImageUseCase._scan_result(counts, fixable, vulnerabilities, "grype")
+
+    @staticmethod
+    def _scan_result(
+        counts: dict[str, int],
+        fixable: int,
+        vulnerabilities: list[dict[str, Any]],
+        tool: str,
+    ) -> ScanResult:
+        return ScanResult(
+            critical=counts["CRITICAL"],
+            high=counts["HIGH"],
+            medium=counts["MEDIUM"],
+            low=counts["LOW"],
+            unknown=counts["UNKNOWN"],
+            total_vulnerabilities=sum(counts.values()),
+            fixable=fixable,
+            scan_tool=tool,
+            vulnerabilities=vulnerabilities[:100],  # Limitar a 100
+        )
+
+    #: Limiares aceitos por `--fail-on`, do mais severo para o mais brando.
+    #: Cada um reprova também tudo que for pior que ele.
+    FAIL_ON_THRESHOLDS = ("critical", "high", "medium", "low")
+
     def _should_fail(self, scan_result: ScanResult, threshold: str) -> bool:
-        """Verifica se deve falhar o build baseado no threshold."""
-        if threshold == "critical":
-            return scan_result.critical > 0
-        elif threshold == "high":
-            return scan_result.critical > 0 or scan_result.high > 0
-        return False
+        """Verifica se deve falhar o build baseado no threshold.
+
+        Só `critical` e `high` eram tratados; qualquer outro valor caía num
+        `return False`, então `--fail-on medium` era um portão que nunca
+        reprovava -- silenciosamente. Valores desconhecidos agora são
+        rejeitados na CLI, antes do build começar.
+        """
+        counts = {
+            "critical": scan_result.critical,
+            "high": scan_result.high,
+            "medium": scan_result.medium,
+            "low": scan_result.low,
+        }
+        normalized = threshold.strip().lower()
+        if normalized not in self.FAIL_ON_THRESHOLDS:
+            raise ValueError(
+                f"Unknown --fail-on threshold {threshold!r}; "
+                f"expected one of: {', '.join(self.FAIL_ON_THRESHOLDS)}"
+            )
+        cutoff = self.FAIL_ON_THRESHOLDS.index(normalized)
+        return any(counts[level] > 0 for level in self.FAIL_ON_THRESHOLDS[: cutoff + 1])
 
     def _generate_report(
         self,

@@ -387,6 +387,9 @@ dockerls build --suggest-hardening .
 # Build de verdade, reprovando se o scan achar CRITICAL
 dockerls build -t minha-app:1.0 --fail-on critical .
 
+# Build, scan e push para o registry
+dockerls build -t minha-app:1.0 --fail-on high --push .
+
 # Templates hardened disponíveis para --base
 dockerls build --list-templates
 ```
@@ -399,6 +402,15 @@ precisa saber qual regra falhou.
 
 Uma validação com `errors > 0` barra o build (`--force` ignora e constrói assim
 mesmo).
+
+`--fail-on` aceita `critical`, `high`, `medium` ou `low`, e cada nível reprova
+também tudo que for mais severo que ele. Um valor fora dessa lista é rejeitado
+antes do build começar — um limiar que a ferramenta não entende viraria um
+portão aberto com cara de fechado. Pelo mesmo motivo, `--fail-on` sem nenhum
+scanner disponível termina em `1` (o portão não pôde ser avaliado), nunca em `0`.
+
+`--push` publica a tag **depois** dos portões: uma imagem que reprovou no scan
+não é publicada.
 
 #### `--hardened` é gerado no build, não na validação
 

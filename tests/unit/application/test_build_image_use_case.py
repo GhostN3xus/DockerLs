@@ -352,6 +352,30 @@ class TestBuildImageUseCase:
         assert response.exit_code == EXIT_POLICY
         assert "Vulnerabilities exceed threshold" in response.error
 
+    def test_fail_on_without_a_scan_is_an_execution_error(self, use_case, context):
+        """Um portão que não pôde ser avaliado não é um portão aprovado.
+
+        Numa máquina sem trivy nem grype, `--fail-on critical` deixava passar
+        qualquer imagem, com exit 0.
+        """
+        with (
+            patch.object(use_case, "_build_image") as mock_build,
+            patch.object(use_case, "_scan_image", return_value=None),
+        ):
+            mock_build.return_value = BuildResult(success=True, image_tag="test:latest")
+            response = use_case.execute(
+                BuildImageRequest(
+                    context_path=str(context),
+                    tag="test:latest",
+                    scan=True,
+                    fail_on="critical",
+                )
+            )
+
+        assert response.success is False
+        assert response.exit_code == EXIT_ERROR
+        assert "no scanner" in response.error
+
     def test_docker_build_failure_is_an_execution_error(self, use_case, context):
         """Erro do `docker build` é exit 1: infraestrutura, não política."""
         with patch.object(use_case, "_build_image") as mock_build:
@@ -611,6 +635,57 @@ class TestScanParsing:
         assert scan.fixable == 2
         assert scan.scan_tool == "trivy"
 
+    def test_grype_output_is_actually_parsed(self, bare_use_case):
+        """O fallback devolvia um `ScanResult()` zerado com um comentário
+        "parse similar ao Trivy...". Numa máquina só com Grype, todo build
+        era reportado com zero vulnerabilidades e passava em `--fail-on`.
+        """
+        grype_output = json.dumps(
+            {
+                "matches": [
+                    {
+                        "vulnerability": {
+                            "id": "CVE-2026-1",
+                            "severity": "Critical",
+                            "fix": {"versions": ["3.0.12"]},
+                        },
+                        "artifact": {"name": "openssl", "version": "3.0.11"},
+                    },
+                    {
+                        "vulnerability": {"id": "CVE-2026-2", "severity": "High"},
+                        "artifact": {"name": "curl", "version": "7.88"},
+                    },
+                    # Faixa que só o Grype tem: precisa virar LOW, não sumir.
+                    {
+                        "vulnerability": {"id": "CVE-2026-3", "severity": "Negligible"},
+                        "artifact": {"name": "bash", "version": "5.1"},
+                    },
+                ]
+            }
+        )
+
+        def resolve(name):
+            if name == "trivy":
+                raise ExecutableNotFoundError("trivy")
+            return f"/usr/bin/{name}"
+
+        with (
+            patch(
+                "dockerls.application.use_cases.build_image.resolve_executable", side_effect=resolve
+            ),
+            patch("dockerls.application.use_cases.build_image.subprocess.run") as run,
+        ):
+            run.return_value = _CompletedProcess(returncode=0, stdout=grype_output)
+            scan = bare_use_case._scan_image("app:1.0")
+
+        assert scan is not None
+        assert scan.scan_tool == "grype"
+        assert (scan.critical, scan.high, scan.low) == (1, 1, 1)
+        assert scan.total_vulnerabilities == 3
+        assert scan.fixable == 1
+        # E o resultado precisa reprovar um portão que antes ele deixava passar.
+        assert bare_use_case._should_fail(scan, "critical") is True
+
     def test_falls_back_to_grype_when_trivy_is_absent(self, bare_use_case):
         def resolve(name):
             if name == "trivy":
@@ -653,13 +728,25 @@ class TestFailOnThreshold:
             ("high", ScanResult(high=1), True),
             ("high", ScanResult(critical=1), True),
             ("high", ScanResult(medium=50), False),
-            ("medium", ScanResult(critical=1), False),
+            # `medium` e `low` caíam num `return False`: eram portões que
+            # nunca reprovavam, em silêncio.
+            ("medium", ScanResult(critical=1), True),
+            ("medium", ScanResult(medium=1), True),
+            ("medium", ScanResult(low=99), False),
+            ("low", ScanResult(low=1), True),
+            ("low", ScanResult(), False),
         ],
     )
     def test_threshold_semantics(self, bare_use_case, threshold, scan, expected):
         """`--fail-on high` também reprova em CRITICAL: um limiar que ignora
         o que é pior que ele não é um limiar."""
         assert bare_use_case._should_fail(scan, threshold) is expected
+
+    def test_unknown_threshold_raises_instead_of_passing(self, bare_use_case):
+        """Falhar alto é a única opção segura: devolver False para um limiar
+        que não se entende é um portão aberto que parece fechado."""
+        with pytest.raises(ValueError, match="Unknown --fail-on threshold"):
+            bare_use_case._should_fail(ScanResult(critical=5), "kritikal")
 
 
 class TestImageInfo:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from dockerls.domain.entities.dockerfile_analysis import (
@@ -20,6 +21,20 @@ from dockerls.domain.interfaces.dockerfile_validator import (
 )
 
 
+@dataclass
+class _Stage:
+    """Um estágio (`FROM ... [AS alias]`) e o que foi declarado dentro dele.
+
+    O parser precisa disso porque quase toda propriedade de runtime -- quem
+    é o usuário, qual é a base -- só importa no estágio final.
+    """
+
+    base: str
+    alias: str | None = None
+    user: str | None = None
+    uid: int | None = None
+
+
 class DockerfileParser:
     """Parser simples para Dockerfiles.
 
@@ -34,7 +49,9 @@ class DockerfileParser:
         r"^COPY\s+(?:--chown=(\S+:\S+)\s+)?(?:--from=(\S+)\s+)?(\S+)\s+(\S+)$",
         re.IGNORECASE,
     )
-    ENV_PATTERN = re.compile(r"^ENV\s+(\S+)=(.*)$", re.IGNORECASE)
+    ENV_PREFIX = re.compile(r"^ENV\s+(.+)$", re.IGNORECASE)
+    # Pares chave=valor de uma linha ENV, com valor opcionalmente entre aspas.
+    ENV_KV = re.compile(r"""([\w.\-]+)=(?:"[^"]*"|'[^']*'|\S*)""")
     LABEL_PATTERN = re.compile(r"^LABEL\s+([^=]+)=(.*)$", re.IGNORECASE)
     EXPOSE_PATTERN = re.compile(r"^EXPOSE\s+(\d+)", re.IGNORECASE)
     USER_PATTERN = re.compile(r"^USER\s+(\S+)(?::(\d+))?$", re.IGNORECASE)
@@ -60,6 +77,7 @@ class DockerfileParser:
     def __init__(self) -> None:
         self._lines: list[str] = []
         self._info = DockerfileInfo()
+        self._stages: list[_Stage] = []
 
     def parse(self, content: str) -> DockerfileInfo:
         """Parseia o conteúdo de um Dockerfile.
@@ -72,8 +90,8 @@ class DockerfileParser:
         """
         self._lines = content.splitlines()
         self._info = DockerfileInfo(raw_lines=self._lines.copy())
+        self._stages = []
 
-        current_stage = 0
         line_continuation = ""
 
         for line_num, line in enumerate(self._lines, 1):
@@ -93,12 +111,45 @@ class DockerfileParser:
 
             self._parse_line(line, line_num)
 
-            # Count stages
-            if self.FROM_PATTERN.match(line):
-                current_stage += 1
-
-        self._info.stages = max(1, current_stage)
+        self._info.stages = max(1, len(self._stages))
+        self._resolve_final_stage()
         return self._info
+
+    def _resolve_final_stage(self) -> None:
+        """Projeta no `DockerfileInfo` o que vale no estágio final.
+
+        `FROM builder` herda o USER do estágio referenciado, então a
+        resolução caminha pela cadeia de aliases até achar um USER ou uma
+        base externa. Sem isso, um `USER node` num estágio de build fazia a
+        imagem final -- que sobe como root -- passar na validação.
+        """
+        if not self._stages:
+            return
+
+        final = self._stages[-1]
+        by_alias = {s.alias.lower(): s for s in self._stages if s.alias}
+
+        stage: _Stage | None = final
+        visited: set[int] = set()
+        while stage is not None and id(stage) not in visited:
+            visited.add(id(stage))
+            if stage.user is not None:
+                self._info.has_user_directive = True
+                self._info.user_name = stage.user
+                self._info.user_uid = stage.uid
+                break
+            stage = by_alias.get(stage.base.lower())
+
+        # Base efetiva do estágio final, resolvida pela mesma cadeia.
+        stage = final
+        visited = set()
+        while stage is not None and id(stage) not in visited:
+            visited.add(id(stage))
+            parent = by_alias.get(stage.base.lower())
+            if parent is None:
+                self._info.final_base_image = stage.base
+                break
+            stage = parent
 
     def _parse_line(self, line: str, line_num: int) -> None:
         """Parseia uma linha específica do Dockerfile."""
@@ -106,8 +157,17 @@ class DockerfileParser:
         # FROM
         if match := self.FROM_PATTERN.match(line):
             image = match.group(1).strip()
+            alias = match.group(2)
             self._info.base_images.append(image)
-            if ":latest" in image or (":" not in image and "@" not in image):
+            self._stages.append(_Stage(base=image, alias=alias))
+            # `FROM builder` referencia um estágio anterior, não um registry:
+            # a ausência de tag ali não é um :latest implícito.
+            is_stage_reference = any(
+                s.alias and s.alias.lower() == image.lower() for s in self._stages[:-1]
+            )
+            if not is_stage_reference and (
+                ":latest" in image or (":" not in image and "@" not in image)
+            ):
                 self._info.uses_latest_tag = True
 
         # RUN
@@ -155,11 +215,12 @@ class DockerfileParser:
             )
 
         # ENV
-        elif match := self.ENV_PATTERN.match(line):
-            env_name = match.group(1)
-            if self._is_secret_name(env_name):
-                self._info.has_secrets_in_env = True
-                self._info.secret_env_vars.append(env_name)
+        elif self.ENV_PREFIX.match(line):
+            for env_name in self._env_names(line):
+                if self._is_secret_name(env_name):
+                    self._info.has_secrets_in_env = True
+                    if env_name not in self._info.secret_env_vars:
+                        self._info.secret_env_vars.append(env_name)
 
         # LABEL
         elif match := self.LABEL_PATTERN.match(line):
@@ -174,12 +235,14 @@ class DockerfileParser:
             if port not in self._info.exposes_ports:
                 self._info.exposes_ports.append(port)
 
-        # USER
+        # USER -- registrado no estágio corrente; qual deles vale é decidido
+        # em _resolve_final_stage().
         elif match := self.USER_PATTERN.match(line):
-            self._info.has_user_directive = True
-            self._info.user_name = match.group(1)
-            if match.group(2):
-                self._info.user_uid = int(match.group(2))
+            if self._stages:
+                name, _, group = match.group(1).partition(":")
+                self._stages[-1].user = name
+                uid = match.group(2) or (group if group.isdigit() else None)
+                self._stages[-1].uid = int(uid) if uid else None
 
         # HEALTHCHECK
         elif self.HEALTHCHECK_PATTERN.match(line):
@@ -198,6 +261,25 @@ class DockerfileParser:
             arg_name = match.group(1)
             if arg_name in ("BUILDKIT_INLINE_CACHE", "DOCKER_BUILDKIT"):
                 self._info.uses_buildkit = True
+
+    def _env_names(self, line: str) -> list[str]:
+        """Nomes de variáveis declarados numa linha ENV.
+
+        Cobre as duas formas que o Docker aceita, e a antiga regex cobria
+        meia: `ENV A=1 B=2` (só via `A`, então um segredo em `B` passava
+        batido) e `ENV KEY value` (não casava, então nunca era verificada).
+        A regra do Docker para distinguir: se o primeiro token tem `=`, é a
+        forma de múltiplos pares.
+        """
+        match = self.ENV_PREFIX.match(line)
+        if not match:
+            return []
+
+        body = match.group(1).strip()
+        first = body.split(maxsplit=1)[0] if body else ""
+        if "=" not in first:
+            return [first] if first else []
+        return self.ENV_KV.findall(body)
 
     def _is_secret_name(self, name: str) -> bool:
         """Verifica se um nome de variável parece ser um segredo."""
@@ -594,12 +676,15 @@ class DockerfileValidator(DockerfileValidatorInterface):
             )
 
     def _is_minimal_base(self, info: DockerfileInfo) -> bool:
-        """Verifica se a base image é minimal."""
+        """Verifica se a base do estágio **final** é minimal.
+
+        Antes bastava qualquer estágio ser minimal: um builder em Alpine
+        fazia um runtime em Ubuntu passar. O que vai para produção é só o
+        último estágio.
+        """
         minimal_markers = ["alpine", "distroless", "slim", "chainguard", "wolfi"]
-        for base in info.base_images:
-            if any(marker in base.lower() for marker in minimal_markers):
-                return True
-        return False
+        base = info.final_base_image or (info.base_images[-1] if info.base_images else "")
+        return any(marker in base.lower() for marker in minimal_markers)
 
     def _check_no_sudo(self, info: DockerfileInfo, result: DockerfileValidationResult) -> None:
         """Verifica se usa sudo."""
@@ -629,7 +714,19 @@ class DockerfileValidator(DockerfileValidatorInterface):
         self, info: DockerfileInfo, result: DockerfileValidationResult
     ) -> None:
         """Verifica se ENTRYPOINT usa forma exec (não shell)."""
-        if info.entrypoint:
+        if not info.entrypoint:
+            # SKIP, não silêncio: um check que simplesmente some da tabela é
+            # indistinguível de um check que passou.
+            result.add_check(
+                ValidationCheck(
+                    check="entrypoint_exec_form",
+                    status=ValidationStatus.SKIP,
+                    message="No ENTRYPOINT directive to check",
+                    severity=SeverityLevel.INFO,
+                    rule_id="DF010",
+                )
+            )
+        else:
             # Exec form starts with [
             if info.entrypoint.startswith("["):
                 result.add_check(
@@ -654,18 +751,46 @@ class DockerfileValidator(DockerfileValidatorInterface):
                 )
 
     def _check_shell_usage(self, info: DockerfileInfo, result: DockerfileValidationResult) -> None:
-        """Verifica uso implícito de shell."""
-        # Verifica se há RUN commands sem /bin/sh explícito quando necessário
-        # Esta é uma verificação simplificada
-        result.add_check(
-            ValidationCheck(
-                check="shell_usage",
-                status=ValidationStatus.PASS,
-                message="No implicit shell issues detected",
-                severity=SeverityLevel.INFO,
-                rule_id="DF011",
+        """Verifica se CMD usa forma exec (não shell).
+
+        Este check devolvia PASS incondicionalmente -- não olhava nada. Uma
+        regra que sempre passa é pior que regra nenhuma: ela afirma ao
+        usuário que o ponto foi verificado, e ainda infla o score.
+
+        Na forma shell o processo vira filho de `/bin/sh -c`, que não repassa
+        sinais: o container ignora SIGTERM e morre no SIGKILL do timeout.
+        """
+        if not info.cmd:
+            result.add_check(
+                ValidationCheck(
+                    check="shell_usage",
+                    status=ValidationStatus.SKIP,
+                    message="No CMD directive to check",
+                    severity=SeverityLevel.INFO,
+                    rule_id="DF011",
+                )
             )
-        )
+        elif info.cmd.startswith("["):
+            result.add_check(
+                ValidationCheck(
+                    check="shell_usage",
+                    status=ValidationStatus.PASS,
+                    message="CMD uses exec form",
+                    severity=SeverityLevel.INFO,
+                    rule_id="DF011",
+                )
+            )
+        else:
+            result.add_check(
+                ValidationCheck(
+                    check="shell_usage",
+                    status=ValidationStatus.WARN,
+                    message="CMD uses shell form (signals are not forwarded to the process)",
+                    severity=SeverityLevel.MEDIUM,
+                    rule_id="DF011",
+                    fix_suggestion='CMD ["npm", "start"] instead of CMD npm start',
+                )
+            )
 
     def _check_dockerignore(
         self, info: DockerfileInfo, result: DockerfileValidationResult, context_path: Path
