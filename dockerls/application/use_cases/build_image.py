@@ -342,9 +342,7 @@ class BuildImageUseCase:
             else self._calculate_security_score(validation_result, None)
         )
         tier = (
-            analysis.security_tier
-            if analysis is not None
-            else self._calculate_security_tier(score)
+            analysis.security_tier if analysis is not None else self._calculate_security_tier(score)
         )
         return BuildReport(
             build_id=self._new_build_id(validation.dockerfile_path),
@@ -600,13 +598,15 @@ class BuildImageUseCase:
                         if vuln.get("FixedVersion"):
                             fixable += 1
 
-                        vulnerabilities.append({
-                            "cve_id": vuln.get("VulnerabilityID"),
-                            "package": vuln.get("PkgName"),
-                            "severity": severity,
-                            "installed_version": vuln.get("InstalledVersion"),
-                            "fixed_version": vuln.get("FixedVersion"),
-                        })
+                        vulnerabilities.append(
+                            {
+                                "cve_id": vuln.get("VulnerabilityID"),
+                                "package": vuln.get("PkgName"),
+                                "severity": severity,
+                                "installed_version": vuln.get("InstalledVersion"),
+                                "fixed_version": vuln.get("FixedVersion"),
+                            }
+                        )
 
                 end_time = datetime.now()
                 scan_time = (end_time - start_time).total_seconds()

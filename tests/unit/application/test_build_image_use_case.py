@@ -558,7 +558,9 @@ class TestDockerBuildInvocation:
         ):
             resolve.side_effect = lambda name: f"/usr/bin/{name}"
             run.return_value = _CompletedProcess(returncode=1, stderr="no such file")
-            result = bare_use_case._build_image(".", "Dockerfile", "app:1", BuildOptions(tag="app:1"))
+            result = bare_use_case._build_image(
+                ".", "Dockerfile", "app:1", BuildOptions(tag="app:1")
+            )
 
         assert result.success is False
         assert "no such file" in result.error_message
@@ -566,7 +568,9 @@ class TestDockerBuildInvocation:
     def test_missing_docker_fails_with_a_named_message(self, bare_use_case):
         with patch("dockerls.application.use_cases.build_image.resolve_executable") as resolve:
             resolve.side_effect = ExecutableNotFoundError("docker")
-            result = bare_use_case._build_image(".", "Dockerfile", "app:1", BuildOptions(tag="app:1"))
+            result = bare_use_case._build_image(
+                ".", "Dockerfile", "app:1", BuildOptions(tag="app:1")
+            )
 
         assert result.success is False
         assert "docker" in result.error_message
@@ -578,7 +582,9 @@ class TestDockerBuildInvocation:
         ):
             resolve.side_effect = lambda name: f"/usr/bin/{name}"
             run.side_effect = subprocess.TimeoutExpired(cmd="docker", timeout=3600)
-            result = bare_use_case._build_image(".", "Dockerfile", "app:1", BuildOptions(tag="app:1"))
+            result = bare_use_case._build_image(
+                ".", "Dockerfile", "app:1", BuildOptions(tag="app:1")
+            )
 
         assert result.success is False
         assert "timeout" in result.error_message.lower()

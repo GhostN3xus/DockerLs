@@ -35,7 +35,7 @@ class DockerfileParser:
         re.IGNORECASE,
     )
     ENV_PATTERN = re.compile(r"^ENV\s+(\S+)=(.*)$", re.IGNORECASE)
-    LABEL_PATTERN = re.compile(r'^LABEL\s+([^=]+)=(.*)$', re.IGNORECASE)
+    LABEL_PATTERN = re.compile(r"^LABEL\s+([^=]+)=(.*)$", re.IGNORECASE)
     EXPOSE_PATTERN = re.compile(r"^EXPOSE\s+(\d+)", re.IGNORECASE)
     USER_PATTERN = re.compile(r"^USER\s+(\S+)(?::(\d+))?$", re.IGNORECASE)
     HEALTHCHECK_PATTERN = re.compile(r"^HEALTHCHECK\s+", re.IGNORECASE)
@@ -345,8 +345,7 @@ class DockerfileValidator(DockerfileValidatorInterface):
                         'LABEL security.cve-contact="security@company.com"'
                     ),
                     reason=(
-                        "Labels enable automated policy enforcement "
-                        "and contact during incidents"
+                        "Labels enable automated policy enforcement and contact during incidents"
                     ),
                 )
             )
@@ -510,8 +509,7 @@ class DockerfileValidator(DockerfileValidatorInterface):
                         severity=SeverityLevel.MEDIUM,
                         rule_id="DF005",
                         fix_suggestion=(
-                            "Add: && rm -rf /var/cache/apk/* "
-                            "|| rm -rf /var/cache/apt/archives"
+                            "Add: && rm -rf /var/cache/apk/* || rm -rf /var/cache/apt/archives"
                         ),
                     )
                 )
@@ -566,8 +564,7 @@ class DockerfileValidator(DockerfileValidatorInterface):
                     severity=SeverityLevel.LOW,
                     rule_id="DF007",
                     fix_suggestion=(
-                        'LABEL security.scanner="dockerls"\n'
-                        'LABEL maintainer="team@company.com"'
+                        'LABEL security.scanner="dockerls"\nLABEL maintainer="team@company.com"'
                     ),
                 )
             )
@@ -733,9 +730,7 @@ class DockerfileValidator(DockerfileValidatorInterface):
 
         return max(0, min(100, score))
 
-    def _calculate_security_tier(
-        self, score: int, validation: DockerfileValidationResult
-    ) -> str:
+    def _calculate_security_tier(self, score: int, validation: DockerfileValidationResult) -> str:
         """Calcula tier de segurança baseado no score."""
         if validation.errors > 0:
             return "C"  # Não pronto para produção

@@ -105,9 +105,7 @@ def build(
     )
 
     # Executar
-    response = (
-        _run_interactive_wizard(use_case, path) if interactive else use_case.execute(request)
-    )
+    response = _run_interactive_wizard(use_case, path) if interactive else use_case.execute(request)
 
     # Output
     if ci_mode or output:
@@ -433,6 +431,9 @@ def _render_html_report(report: BuildReport) -> str:
     else:
         html += "    <p>No scan was run.</p>\n"
 
-    return html + """
+    return (
+        html
+        + """
 </body>
 </html>"""
+    )

@@ -26,6 +26,7 @@ app = typer.Typer(
     pretty_exceptions_enable=False,
 )
 
+
 @app.callback()
 def _bootstrap() -> None:
     """Runs before every subcommand, so no command can start with loguru's
