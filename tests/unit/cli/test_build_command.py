@@ -13,7 +13,10 @@ import json
 import pytest
 from typer.testing import CliRunner
 
+from dockerls.application.use_cases.build_image import BuildImageResponse, BuildReport
 from dockerls.cli.app import app
+from dockerls.cli.commands.build import BuildImageUseCase
+from dockerls.domain.entities.dockerfile_analysis import HardeningRule, SeverityLevel
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY
 
 runner = CliRunner()
@@ -200,3 +203,158 @@ class TestReportFile:
         assert result.exit_code == EXIT_OK
         assert json.loads(out.read_text())["status"] == "SUCCESS"
         assert "Validation Checks" not in result.stdout
+
+
+def _build_report(**overrides) -> BuildReport:
+    defaults: dict = dict(
+        build_id="deadbeef01234567",
+        timestamp="2026-01-01T00:00:00+00:00",
+        image="myapp:1.0",
+        dockerfile_path="Dockerfile",
+        validation={
+            "dockerfile_path": "Dockerfile",
+            "passed": 5,
+            "warnings": 0,
+            "errors": 0,
+            "checks": [],
+        },
+        scan_results={"trivy": {"critical": 0, "high": 1, "medium": 2, "low": 3}},
+        security_score=88,
+        security_tier="B",
+        recommendations=[
+            {
+                "priority": "HIGH",
+                "title": "Pin base image",
+                "current": "node:latest",
+                "suggested": "node:22-alpine",
+                "reason": "Floating tags drift under you",
+            }
+        ],
+        build_metadata={
+            "git_sha": "deadbeef",
+            "built_by": "ci",
+            "docker_version": "Docker version 24.0.0",
+            "buildkit": True,
+        },
+    )
+    defaults.update(overrides)
+    return BuildReport(**defaults)
+
+
+class TestFullBuildFlow:
+    """The real build path: `_print_build_output`, `_print_report`, and the
+    HTML/JSON report writers. Every other class in this file only exercises
+    `validate-only`/`suggest-hardening`/`list-templates`, none of which ever
+    reach these functions.
+    """
+
+    def test_successful_build_renders_the_security_score_and_scan_results(
+        self, clean_context, monkeypatch
+    ):
+        response = BuildImageResponse(
+            success=True,
+            image_tag="myapp:1.0",
+            image_sha256="sha256:deadbeef",
+            report=_build_report(),
+            exit_code=EXIT_OK,
+        )
+        monkeypatch.setattr(BuildImageUseCase, "execute", lambda self, request: response)
+
+        result = runner.invoke(app, ["build", "-t", "myapp:1.0", str(clean_context)])
+
+        assert result.exit_code == EXIT_OK
+        assert "Build Successful" in result.stdout
+        assert "myapp:1.0" in result.stdout
+        assert "Security Score: 88/100" in result.stdout
+        assert "Tier: B" in result.stdout
+        assert "HIGH: " in result.stdout and "1" in result.stdout
+        assert "MEDIUM: " in result.stdout and "2" in result.stdout
+
+    def test_hardening_suggestions_are_listed_after_a_successful_build(
+        self, clean_context, monkeypatch
+    ):
+        suggestion = HardeningRule(
+            priority=SeverityLevel.HIGH,
+            title="Add HEALTHCHECK",
+            description="No healthcheck configured",
+            current_state="none",
+            suggested_fix='HEALTHCHECK CMD ["node", "healthcheck.js"]',
+            reason="Orchestrators need a health signal to restart a stuck container",
+        )
+        response = BuildImageResponse(
+            success=True,
+            image_tag="myapp:1.0",
+            report=_build_report(),
+            recommendations=[suggestion],
+            exit_code=EXIT_OK,
+        )
+        monkeypatch.setattr(BuildImageUseCase, "execute", lambda self, request: response)
+
+        result = runner.invoke(app, ["build", "-t", "myapp:1.0", str(clean_context)])
+
+        assert "Hardening Suggestions" in result.stdout
+        assert "Add HEALTHCHECK" in result.stdout
+        assert "No healthcheck configured" in result.stdout
+
+    def test_failed_build_via_fail_on_threshold_renders_build_failed_panel(
+        self, clean_context, monkeypatch
+    ):
+        """Only the `--fail-on` rejection path sets `image_tag` on a failed
+        response; a raw `docker build` failure leaves it unset, which routes
+        `_print_table_output` to the validation renderer instead."""
+        response = BuildImageResponse(
+            success=False,
+            image_tag="myapp:1.0",
+            error="Vulnerabilities exceed threshold (critical)",
+            exit_code=EXIT_POLICY,
+        )
+        monkeypatch.setattr(BuildImageUseCase, "execute", lambda self, request: response)
+
+        result = runner.invoke(
+            app, ["build", "-t", "myapp:1.0", "--fail-on", "critical", str(clean_context)]
+        )
+
+        assert result.exit_code == EXIT_POLICY
+        assert "Build Failed" in result.stdout
+        assert "Vulnerabilities exceed threshold (critical)" in result.stdout
+
+    def test_ci_mode_emits_the_full_report_as_json(self, clean_context, monkeypatch):
+        response = BuildImageResponse(
+            success=True,
+            image_tag="myapp:1.0",
+            report=_build_report(),
+            exit_code=EXIT_OK,
+        )
+        monkeypatch.setattr(BuildImageUseCase, "execute", lambda self, request: response)
+
+        result = runner.invoke(
+            app, ["build", "-t", "myapp:1.0", "--ci-mode", str(clean_context)]
+        )
+
+        assert result.exit_code == EXIT_OK
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "SUCCESS"
+        assert payload["report"]["security_score"] == 88
+        assert payload["report"]["scan_results"]["trivy"]["high"] == 1
+
+    def test_html_report_includes_the_vulnerability_scan_table(
+        self, clean_context, tmp_path, monkeypatch
+    ):
+        response = BuildImageResponse(
+            success=True,
+            image_tag="myapp:1.0",
+            report=_build_report(),
+            exit_code=EXIT_OK,
+        )
+        monkeypatch.setattr(BuildImageUseCase, "execute", lambda self, request: response)
+        out = tmp_path / "build_report.html"
+
+        result = runner.invoke(
+            app, ["build", "-t", "myapp:1.0", "--report", str(out), str(clean_context)]
+        )
+
+        assert result.exit_code == EXIT_OK
+        html = out.read_text()
+        assert "Vulnerability Scan" in html
+        assert "No scan was run." not in html
+        assert '<td class="high">High</td><td>1</td>' in html

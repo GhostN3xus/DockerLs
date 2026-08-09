@@ -10,9 +10,12 @@ from __future__ import annotations
 import json
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
+from dockerls.application.use_cases.analyze_dockerfile import AnalyzeDockerfileResponse
 from dockerls.cli.app import app
+from dockerls.cli.commands.analyze_dockerfile import _print_table_output
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY
 
 runner = CliRunner()
@@ -97,3 +100,17 @@ class TestAnalyzeDockerfile:
         result = runner.invoke(app, ["analyze-dockerfile", str(clean_context)])
 
         assert "None" not in result.stdout
+
+
+class TestPrintTableOutputDefensiveBranch:
+    """`success=True` with no `validation` should be unreachable through the
+    use case, but `_print_table_output` guards against it directly instead
+    of trusting that invariant -- this locks that guard in place."""
+
+    def test_success_with_no_validation_is_reported_as_an_execution_error(self):
+        response = AnalyzeDockerfileResponse(success=True, validation=None)
+
+        with pytest.raises(typer.Exit) as exc_info:
+            _print_table_output(response)
+
+        assert exc_info.value.exit_code == EXIT_ERROR

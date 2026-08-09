@@ -87,6 +87,43 @@ class TestFileOnlySinks:
         assert "fallback message" in capsys.readouterr().err
 
 
+class TestConsoleLevelFloor:
+    """The console sink has its own floor, independent of the file level.
+
+    Raising `DOCKERLS_LOG_LEVEL` to DEBUG for the file sink must never start
+    spraying DEBUG/INFO chatter onto the terminal: `console_level` defaults
+    to WARNING regardless of what `level` (the file sink's level) is set to.
+    """
+
+    def test_console_defaults_to_warning_even_when_file_level_is_debug(self, tmp_path, capsys):
+        setup_logging("DEBUG", log_dir=tmp_path / "logs", console=True)
+        logger.info("debug-level chatter that must stay off the terminal")
+        logger.complete()
+        logger.remove()
+        assert "debug-level chatter" not in capsys.readouterr().err
+
+    def test_console_still_shows_warning_and_above_by_default(self, tmp_path, capsys):
+        setup_logging("DEBUG", log_dir=tmp_path / "logs", console=True)
+        logger.warning("a warning that should reach the terminal")
+        logger.complete()
+        logger.remove()
+        assert "a warning that should reach the terminal" in capsys.readouterr().err
+
+    def test_explicit_console_level_overrides_the_floor(self, tmp_path, capsys):
+        setup_logging("DEBUG", log_dir=tmp_path / "logs", console=True, console_level="DEBUG")
+        logger.info("verbose info now allowed through")
+        logger.complete()
+        logger.remove()
+        assert "verbose info now allowed through" in capsys.readouterr().err
+
+    def test_console_level_has_no_effect_when_console_is_off(self, tmp_path, capsys):
+        setup_logging("INFO", log_dir=tmp_path / "logs", console=False, console_level="DEBUG")
+        logger.info("must still not reach the terminal without --verbose")
+        logger.complete()
+        logger.remove()
+        assert "must still not reach the terminal" not in capsys.readouterr().err
+
+
 class TestSchemeInsideKeyValue:
     """Regression: an auth scheme nested in a key-value pair must not leak.
 
