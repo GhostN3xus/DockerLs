@@ -39,21 +39,41 @@ class ThreatIntelClient:
         kev = await self._load_kev()
         return {cve.upper() for cve in cve_ids if cve.upper() in kev}
 
+    # A API do FIRST pagina o resultado e a query vai na URL. Pedir 200 CVEs
+    # de uma vez devolvia calado só a primeira página -- e o restante perdia
+    # o sinal de EPSS justamente nas imagens que mais têm CRITICAL/HIGH, que
+    # são as que mais precisam dele. O lote é pedido com `limit` explícito
+    # em vez de confiar no default do serviço.
+    EPSS_BATCH_SIZE = 100
+
     async def epss_scores(self, cve_ids: list[str]) -> dict[str, float]:
         """Return {cve_id: epss_probability} for whatever FIRST.org returns;
         missing/unreachable CVEs are simply absent from the result."""
         if not cve_ids:
             return {}
+
+        scores: dict[str, float] = {}
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            for start in range(0, len(cve_ids), self.EPSS_BATCH_SIZE):
+                batch = cve_ids[start : start + self.EPSS_BATCH_SIZE]
+                # Um lote que falha não pode descartar os que já vieram: o
+                # sinal parcial ainda é melhor que nenhum.
+                scores.update(await self._epss_batch(client, batch))
+        return scores
+
+    async def _epss_batch(self, client: httpx.AsyncClient, batch: list[str]) -> dict[str, float]:
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.get(self.EPSS_URL, params={"cve": ",".join(cve_ids)})
-                resp.raise_for_status()
-                data = resp.json()
-                return {
-                    entry["cve"].upper(): float(entry["epss"])
-                    for entry in data.get("data", [])
-                    if "cve" in entry and "epss" in entry
-                }
+            resp = await client.get(
+                self.EPSS_URL,
+                params={"cve": ",".join(batch), "limit": str(len(batch))},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return {
+                entry["cve"].upper(): float(entry["epss"])
+                for entry in data.get("data", [])
+                if "cve" in entry and "epss" in entry
+            }
         except (httpx.HTTPError, ValueError, KeyError, TypeError) as e:
-            logger.debug(f"EPSS lookup unavailable, continuing without it: {e}")
+            logger.debug(f"EPSS lookup unavailable for {len(batch)} CVEs, continuing without: {e}")
             return {}

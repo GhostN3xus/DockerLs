@@ -87,6 +87,19 @@ ferramenta.
   isenção vencida deixa de valer, e o cache desfazia essa promessa em
   silêncio. A chave agora carrega um fingerprint das entradas que mudam a
   análise.
+- **O sinal de EPSS sumia nas imagens que mais precisavam dele.** Todos os
+  CVEs iam num único GET, e a API do FIRST pagina o resultado — de 200 CVEs
+  voltava calada só a primeira página. Quanto mais CRITICAL/HIGH a imagem
+  tinha, mais sinal se perdia. Agora vai em lotes, com `limit` explícito em
+  vez de confiar no default do serviço, e um lote que falha não descarta os
+  que já vieram.
+- **Vereditos de EOL inconsistentes dentro da mesma execução.** Um 404 do
+  endoflife.date (produto fora do catálogo) não era cacheado, então cada uma
+  das ~100 tags repetia a consulta perdida — duas, contando `is_eol` e
+  `is_lts`. O volume provocava rate limiting, e aí parte das tags recebia
+  dados e parte recebia lista vazia: tags do mesmo produto saíam com
+  vereditos de EOL diferentes na mesma tabela. O 404 passou a ser cacheado
+  (resposta definitiva); falhas transitórias continuam não sendo.
 - **Candidatos promovidos escapavam da cross-validation.** Ela rodava sobre
   o top N *antes* do filtro de tags no registry, então um candidato
   promovido para o lugar de um descartado entrava na tabela sem nunca ter
