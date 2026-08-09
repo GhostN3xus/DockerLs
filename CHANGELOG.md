@@ -78,6 +78,24 @@ ferramenta.
   não há o que verificar. `entrypoint_exec_form` também virou `SKIP`
   explícito em vez de sumir da tabela.
 
+- **O cache guardava supressões de CVE já revogadas.** As regras de ignore e
+  o enriquecimento de threat intel são aplicados *antes* de gravar o
+  `ImageAnalysis`, mas a chave era só a referência da imagem. Um CVE que
+  deixava de ser ignorado — porque a regra foi removida, ou porque o
+  `expires` dela venceu — continuava suprimido do score e da tabela até o
+  TTL expirar (24h no padrão). O próprio arquivo de ignore promete que uma
+  isenção vencida deixa de valer, e o cache desfazia essa promessa em
+  silêncio. A chave agora carrega um fingerprint das entradas que mudam a
+  análise.
+- **Candidatos promovidos escapavam da cross-validation.** Ela rodava sobre
+  o top N *antes* do filtro de tags no registry, então um candidato
+  promovido para o lugar de um descartado entrava na tabela sem nunca ter
+  passado pelo segundo scanner — com a pontuação apresentada sem contestação
+  justamente por não ter sido checada, que é o oposto da garantia descrita
+  no README. A ordem foi invertida: filtra as tags primeiro, cross-valida
+  quem sobrou. De quebra, deixa de gastar um scan secundário em quem vai
+  cair.
+
 ### Alterado
 
 - **`--push` passou a funcionar.** A flag era aceita e silenciosamente

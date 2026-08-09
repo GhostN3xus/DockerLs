@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -84,6 +85,29 @@ class RecommendImagesUseCase:
         self._verify_hub_tags = verify_hub_tags
         self._log_file = log_file
         self._cache_ttl_seconds = cache_ttl_seconds
+        self._analysis_fingerprint = self._compute_analysis_fingerprint()
+
+    def _compute_analysis_fingerprint(self) -> str:
+        """Identifica as entradas, fora a própria imagem, que mudam o
+        `ImageAnalysis` guardado em cache.
+
+        As regras de ignore e o enriquecimento de threat intel são aplicados
+        *antes* de cachear, mas a chave era só a referência da imagem. Um CVE
+        que deixava de ser ignorado -- porque a regra foi removida, ou porque
+        o `expires` dela venceu -- continuava suprimido até o TTL expirar
+        (24h no padrão). O arquivo de ignore promete que uma isenção vencida
+        deixa de valer; o cache desfazia essa promessa em silêncio.
+        """
+        material = "|".join(
+            [
+                ",".join(sorted(self._ignored_cves)),
+                "threat-intel" if self._threat_intel is not None else "no-threat-intel",
+            ]
+        )
+        return hashlib.sha256(material.encode()).hexdigest()[:12]
+
+    def _cache_key(self, image_reference: str) -> str:
+        return f"analysis:{self._analysis_fingerprint}:{image_reference}"
 
     async def execute(self, image_name: str, limit: int = 100) -> AnalysisResult:
         try:
@@ -256,16 +280,22 @@ class RecommendImagesUseCase:
         # missing Hub tag can be backfilled from the next best ones.
         candidates = pool[: TOP_N * 2]
 
-        if self._cross_validator is not None and self._cross_validator.enabled and candidates:
-            self._observer.phase(f"Cross-validating top {min(TOP_N, len(candidates))} candidates")
-            await self._cross_validator.validate(candidates[:TOP_N])
-
+        # A verificação de tag vem primeiro, e a cross-validation só depois,
+        # sobre quem sobreviveu. Na ordem inversa, um candidato promovido
+        # para o top N no lugar de um descartado entrava na tabela sem nunca
+        # ter passado pelo segundo scanner -- ou seja, com a pontuação
+        # apresentada sem contestação justamente por não ter sido checada.
+        # De quebra, deixa de gastar um scan secundário em quem vai cair.
         if self._verify_hub_tags and candidates:
             self._observer.phase("Verifying tags in their source registries")
             await self._verify_tags(candidates, unverified)
             candidates = [c for c in candidates if c.hub_tag_verified is not False]
 
         selected = candidates[:TOP_N]
+
+        if self._cross_validator is not None and self._cross_validator.enabled and selected:
+            self._observer.phase(f"Cross-validating top {len(selected)} candidates")
+            await self._cross_validator.validate(selected)
         _assert_verified(selected)
         for analysis in selected:
             analysis.recommendation = build_recommendation(analysis)
@@ -338,27 +368,30 @@ class RecommendImagesUseCase:
     async def _get_cached(self, key: str) -> ImageAnalysis | None:
         if not self._cache:
             return None
-        data = await self._cache.get(f"analysis:{key}")
+        cache_key = self._cache_key(key)
+        data = await self._cache.get(cache_key)
         if not (data and isinstance(data, dict)):
             return None
         try:
             analysis: ImageAnalysis = ImageAnalysis.model_validate(data)
         except ValidationError as e:
             logger.warning(f"Discarding stale cache entry for {key}: {e}")
-            await self._cache.delete(f"analysis:{key}")
+            await self._cache.delete(cache_key)
             return None
         # A cache hit is not proof of a successful scan: an entry written by
         # an older build could carry a failed scan. Re-apply the gate.
         if not analysis.scan.is_verified:
             logger.warning(f"Discarding cache entry for {key}: cached scan is not verified")
-            await self._cache.delete(f"analysis:{key}")
+            await self._cache.delete(cache_key)
             return None
         return analysis
 
     async def _set_cached(self, key: str, analysis: ImageAnalysis) -> None:
         if self._cache:
             await self._cache.set(
-                f"analysis:{key}", analysis.model_dump(), ttl_seconds=self._cache_ttl_seconds
+                self._cache_key(key),
+                analysis.model_dump(),
+                ttl_seconds=self._cache_ttl_seconds,
             )
 
 
