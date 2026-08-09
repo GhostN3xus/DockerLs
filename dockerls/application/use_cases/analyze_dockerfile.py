@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from dockerls.domain.entities.dockerfile_analysis import (
@@ -37,7 +37,7 @@ class AnalyzeDockerfileResponse:
     suggestions: list[HardeningRule] | None = None
     error: str | None = None
 
-    def model_dump(self) -> dict:
+    def model_dump(self) -> dict[str, Any]:
         """Retorna dicionário serializável."""
         return {
             "success": self.success,

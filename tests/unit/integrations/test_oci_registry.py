@@ -1,0 +1,141 @@
+"""Cliente OCI Distribution v2.
+
+Só o filtro de tags e o parser do desafio `WWW-Authenticate` eram cobertos;
+o token dance e o tratamento de erro do `list_tags` -- que é o que decide se
+um catálogo hardened entra ou não na recomendação -- não eram.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+import httpx
+import pytest
+
+from dockerls.integrations.registry.oci import OCIRegistryClient
+
+# Capturado antes de qualquer patch: referenciar httpx.AsyncClient de dentro
+# do substituto resolveria para o próprio patch.
+_REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+
+def _use_handler(handler):
+    """Faz todo httpx.AsyncClient construído responder por `handler`."""
+    transport = httpx.MockTransport(handler)
+
+    def factory(**kwargs):
+        kwargs.pop("transport", None)
+        return _REAL_ASYNC_CLIENT(transport=transport, **kwargs)
+
+    return patch.object(httpx, "AsyncClient", factory)
+
+
+class TestListTags:
+    @pytest.mark.asyncio
+    async def test_returns_the_payload_when_anonymous_access_works(self):
+        def handler(request):
+            return httpx.Response(200, json={"name": "chainguard/node", "tags": ["latest"]})
+
+        with _use_handler(handler):
+            payload = await OCIRegistryClient("cgr.dev").list_tags("chainguard/node")
+
+        assert payload == {"name": "chainguard/node", "tags": ["latest"]}
+
+    @pytest.mark.asyncio
+    async def test_completes_the_bearer_token_dance(self):
+        """401 com desafio -> pega token no realm -> repete com Authorization.
+
+        É o único fluxo que registries públicos oferecem para pull anônimo;
+        se ele quebra, o catálogo inteiro some da recomendação em silêncio.
+        """
+        seen: list[httpx.Request] = []
+
+        def handler(request):
+            seen.append(request)
+            if request.url.path == "/token":
+                return httpx.Response(200, json={"token": "tok-123"})
+            if "Authorization" not in request.headers:
+                return httpx.Response(
+                    401,
+                    headers={
+                        "WWW-Authenticate": 'Bearer realm="https://cgr.dev/token",'
+                        'service="cgr.dev",scope="repository:chainguard/node:pull"'
+                    },
+                )
+            return httpx.Response(200, json={"tags": ["latest"]})
+
+        with _use_handler(handler):
+            payload = await OCIRegistryClient("cgr.dev").list_tags("chainguard/node")
+
+        assert payload == {"tags": ["latest"]}
+        assert seen[-1].headers["Authorization"] == "Bearer tok-123"
+        # O scope do desafio precisa ser repassado ao realm, senão o token
+        # volta sem permissão para o repositório pedido.
+        assert "repository%3Achainguard%2Fnode%3Apull" in str(seen[1].url) or (
+            "repository:chainguard/node:pull" in str(seen[1].url)
+        )
+
+    @pytest.mark.asyncio
+    async def test_accepts_access_token_field(self):
+        """GCR e ECR devolvem `access_token` em vez de `token`."""
+
+        def handler(request):
+            if request.url.path == "/token":
+                return httpx.Response(200, json={"access_token": "tok-gcr"})
+            if "Authorization" not in request.headers:
+                return httpx.Response(
+                    401, headers={"WWW-Authenticate": 'Bearer realm="https://gcr.io/token"'}
+                )
+            return httpx.Response(200, json={"tags": []})
+
+        with _use_handler(handler):
+            payload = await OCIRegistryClient("gcr.io").list_tags("distroless/base")
+
+        assert payload == {"tags": []}
+
+    @pytest.mark.asyncio
+    async def test_401_without_a_usable_challenge_returns_none(self):
+        def handler(request):
+            return httpx.Response(401, headers={"WWW-Authenticate": "Basic realm=x"})
+
+        with _use_handler(handler):
+            assert await OCIRegistryClient("cgr.dev").list_tags("private/repo") is None
+
+    @pytest.mark.asyncio
+    async def test_missing_repository_returns_none(self):
+        def handler(request):
+            return httpx.Response(404)
+
+        with _use_handler(handler):
+            assert await OCIRegistryClient("cgr.dev").list_tags("nope/nope") is None
+
+    @pytest.mark.asyncio
+    async def test_server_error_returns_none_instead_of_raising(self):
+        """Um registry fora do ar degrada a busca, não derruba o comando."""
+
+        def handler(request):
+            return httpx.Response(503)
+
+        with _use_handler(handler):
+            assert await OCIRegistryClient("cgr.dev").list_tags("chainguard/node") is None
+
+    @pytest.mark.asyncio
+    async def test_network_failure_returns_none(self):
+        def handler(request):
+            raise httpx.ConnectError("no route to host")
+
+        with _use_handler(handler):
+            assert await OCIRegistryClient("cgr.dev").list_tags("chainguard/node") is None
+
+    @pytest.mark.asyncio
+    async def test_non_json_body_returns_none(self):
+        def handler(request):
+            return httpx.Response(200, text="<html>proxy error</html>")
+
+        with _use_handler(handler):
+            assert await OCIRegistryClient("cgr.dev").list_tags("chainguard/node") is None
+
+
+class TestHost:
+    def test_exposes_the_host_it_was_built_with(self):
+        assert OCIRegistryClient("cgr.dev").host == "cgr.dev"

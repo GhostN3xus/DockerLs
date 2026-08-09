@@ -12,6 +12,7 @@ from dockerls.domain.entities.scan_result import ScanResult, ScanStatus
 from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.scanner import ScannerInterface
 from dockerls.integrations.trivy.cache_pool import TrivyCachePool, default_trivy_cache_dir
+from dockerls.utils.executables import ExecutableNotFoundError, resolve_executable
 from dockerls.utils.validation import sanitize_image_name
 
 if TYPE_CHECKING:
@@ -53,13 +54,20 @@ class TrivyScanner(ScannerInterface):
         safe_ref = sanitize_image_name(image_reference)
 
         async with self._cache_pool.acquire() as cache_dir:
-            cmd = ["trivy", "image", "--format", fmt, "--quiet", *self._cache_args(cache_dir)]
-            if self._skip_db_update:
-                cmd.append("--skip-db-update")
-            cmd.append(safe_ref)
-
             try:
-                proc = await asyncio.create_subprocess_exec(  # noqa: S603
+                cmd = [
+                    resolve_executable("trivy"),
+                    "image",
+                    "--format",
+                    fmt,
+                    "--quiet",
+                    *self._cache_args(cache_dir),
+                ]
+                if self._skip_db_update:
+                    cmd.append("--skip-db-update")
+                cmd.append(safe_ref)
+
+                proc = await asyncio.create_subprocess_exec(  # noqa: S603 -- argv[0] resolvido
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -69,7 +77,7 @@ class TrivyScanner(ScannerInterface):
                     logger.error(f"SBOM generation failed for {safe_ref}: {stderr.decode()[:300]}")
                     return None
                 return stdout.decode()
-            except (TimeoutError, OSError) as e:
+            except (TimeoutError, OSError, ExecutableNotFoundError) as e:
                 logger.error(f"SBOM generation failed for {safe_ref}: {e}")
                 return None
 
@@ -83,8 +91,8 @@ class TrivyScanner(ScannerInterface):
         """
         base = self._cache_pool.base_dir
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "trivy",
+            proc = await asyncio.create_subprocess_exec(  # noqa: S603 -- argv[0] resolvido
+                resolve_executable("trivy"),
                 "image",
                 "--download-db-only",
                 "--quiet",
@@ -96,7 +104,7 @@ class TrivyScanner(ScannerInterface):
             if proc.returncode != 0:
                 logger.warning(f"Trivy DB refresh failed: {stderr.decode()[:200]}")
                 return False
-        except (TimeoutError, OSError) as e:
+        except (TimeoutError, OSError, ExecutableNotFoundError) as e:
             logger.warning(f"Trivy DB refresh failed: {e}")
             return False
 
@@ -117,22 +125,22 @@ class TrivyScanner(ScannerInterface):
         timestamp = datetime.now(tz=UTC).isoformat()
 
         async with self._cache_pool.acquire() as cache_dir:
-            cmd = [
-                "trivy",
-                "image",
-                "--format",
-                "json",
-                "--severity",
-                "CRITICAL,HIGH,MEDIUM,LOW",
-                "--quiet",
-                *self._cache_args(cache_dir),
-            ]
-            if self._skip_db_update:
-                cmd.append("--skip-db-update")
-            cmd.append(safe_ref)
-
             try:
-                proc = await asyncio.create_subprocess_exec(  # noqa: S603
+                cmd = [
+                    resolve_executable("trivy"),
+                    "image",
+                    "--format",
+                    "json",
+                    "--severity",
+                    "CRITICAL,HIGH,MEDIUM,LOW",
+                    "--quiet",
+                    *self._cache_args(cache_dir),
+                ]
+                if self._skip_db_update:
+                    cmd.append("--skip-db-update")
+                cmd.append(safe_ref)
+
+                proc = await asyncio.create_subprocess_exec(  # noqa: S603 -- argv[0] resolvido
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -178,7 +186,7 @@ class TrivyScanner(ScannerInterface):
                     status=ScanStatus.TIMEOUT,
                     error_message=f"Scan exceeded {self._timeout}s timeout",
                 )
-            except (json.JSONDecodeError, OSError) as e:
+            except (json.JSONDecodeError, OSError, ExecutableNotFoundError) as e:
                 logger.error(f"Trivy scan failed for {safe_ref}: {e}")
                 return ScanResult(
                     image_reference=safe_ref,

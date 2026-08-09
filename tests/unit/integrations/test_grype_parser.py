@@ -4,6 +4,7 @@ import pytest
 
 from dockerls.domain.entities.scan_result import ScanStatus
 from dockerls.integrations.grype.scanner import GrypeScanner
+from tests.unit.integrations.conftest import stub_path
 
 
 class TestGrypeParser:
@@ -105,7 +106,10 @@ class TestGrypeDatabaseRefresh:
         with patch("asyncio.create_subprocess_exec", mock_exec):
             assert await scanner.refresh_db() is True
 
-        assert list(mock_exec.call_args.args) == ["grype", "db", "update"]
+        # argv[0] is the absolute path `shutil.which` resolved, not the bare
+        # name: running the bare name would leave the choice of binary to
+        # $PATH, which is the PATH hijacking this tool reports on others.
+        assert list(mock_exec.call_args.args) == [stub_path("grype"), "db", "update"]
 
     @pytest.mark.asyncio
     async def test_scans_before_refresh_use_default_env(self):

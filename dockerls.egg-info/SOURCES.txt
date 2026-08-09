@@ -19,6 +19,7 @@ dockerls/application/services/scanner_factory.py
 dockerls/application/use_cases/__init__.py
 dockerls/application/use_cases/analyze_dockerfile.py
 dockerls/application/use_cases/analyze_image.py
+dockerls/application/use_cases/build_image.py
 dockerls/application/use_cases/compare_images.py
 dockerls/application/use_cases/recommend_images.py
 dockerls/application/use_cases/search_images.py
@@ -32,6 +33,7 @@ dockerls/cli/commands/__init__.py
 dockerls/cli/commands/advisor.py
 dockerls/cli/commands/analyze.py
 dockerls/cli/commands/analyze_dockerfile.py
+dockerls/cli/commands/build.py
 dockerls/cli/commands/cache_cmd.py
 dockerls/cli/commands/compare.py
 dockerls/cli/commands/doctor.py

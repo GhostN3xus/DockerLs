@@ -9,6 +9,23 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
 
 ### Adicionado
 
+- **Um contrato de exit code documentado** (`dockerls/exit_codes.py`, seção
+  "Exit codes" no README), aplicado em toda a CLI: `0` sucesso, `1` erro de
+  execução (dependência ausente, rede, Dockerfile inexistente, erro do `docker
+  build`), `2` política violada (validação com `errors > 0`, `--fail-on`
+  acionado). Antes os números eram literais espalhados pelos comandos e não
+  concordavam entre si — `build --validate-only` devolvia `2` para uma falha
+  que o teste esperava como `1`, e nada estava escrito em lugar nenhum. A
+  distinção entre `1` e `2` é o que permite a um pipeline separar "o scanner
+  não rodou" de "a imagem reprovou".
+- **`dockerls analyze --wide`**, que renderiza a tabela de vulnerabilidades na
+  largura que ela pedir, sem truncar coluna alguma.
+- **`dockerls build --list-templates`**, que expõe os templates hardened
+  aceitos por `--base`. `list_templates()` existia na interface de domínio
+  desde o início e nada o chamava.
+- Documentação de `build` e `analyze-dockerfile` no README — os dois comandos
+  eram inteiramente ausentes dele.
+
 - **Uma proteção estrutural contra a classe de bug que continuava
   reaparecendo** (`tests/unit/test_no_dead_configuration.py`). Cinco vezes esta
   base de código entregou algo declarado, documentado e nunca alcançado em
@@ -19,6 +36,77 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
   pode ficar órfão. Ele encontrou mais oito casos já na primeira execução.
 
 ### Corrigido (auditoria: o que é afirmado versus o que o código faz)
+
+- **`build --validate-only` não imprimia nada de útil.**
+  `_format_validation_response()` descartava o resultado da validação e
+  devolvia só `success` e `exit_code`, então a CLI imprimia literalmente
+  `None` — sem tabela de checks, sem dizer qual regra falhou, em sucesso e em
+  falha. Agora a resposta carrega o `DockerfileValidationResult` completo
+  (checks, contagens, score) mais um resumo textual das regras violadas em
+  `error`, e a CLI renderiza a **mesma** tabela que `analyze-dockerfile`,
+  extraída para `dockerls/cli/rendering.py` em vez de duplicada. Em
+  `--ci-mode` a saída é JSON estruturado em stdout, sem cores e sem tabela, e
+  o relatório entra também quando a validação reprova. Nenhum caminho imprime
+  `None`.
+- **Uso normal da CLI vazava log `INFO` (e `DEBUG`) no stderr.** `build` nunca
+  tocava em `Settings`, então rodava com o sink padrão do loguru ainda
+  ligado — que despeja tudo a partir de DEBUG no terminal. A configuração de
+  logging virou um callback de raiz do Typer, que roda antes de qualquer
+  subcomando, e o sink de console tem piso `WARNING` independente de
+  `DOCKERLS_LOG_LEVEL`; `--verbose` o reabre no nível configurado.
+- **Uma validação reprovada não barrava o build.** O portão era
+  `if not validation_result`, e um objeto é sempre verdadeiro, então a
+  condição nunca disparava: o build seguia adiante com o Dockerfile reprovado.
+  Agora `errors > 0` barra o build (com `--force` para ignorar), e uma falha
+  em *rodar* a validação (Dockerfile inexistente) é `1`, não `2`.
+- **`--fail-on` devolvia `1`** para uma imagem que reprovou no scan, o mesmo
+  código de uma falha de infraestrutura. Passou a devolver `2`.
+- **O relatório de build lia `analysis.recommendations`**, atributo que
+  `DockerfileAnalysis` nunca teve. Só não explodia porque `analysis` era
+  `None` em todo teste que exercitava esse caminho. As recomendações vêm das
+  sugestões de hardening.
+- **`_generate_hardened_dockerfile()` escrevia arquivo direto do caso de
+  uso**, furando a interface `HardeningTemplateProvider`. A geração passou
+  para trás de `generate_hardened_dockerfile()` na infraestrutura — que
+  existia e nada chamava. Escrita em disco é responsabilidade de
+  infraestrutura.
+- `datetime.utcnow()` (deprecado, sem timezone) e `subprocess.os.environ`
+  (acesso a `os` por dentro de outro módulo) em `build_image.py`.
+- **Todo `subprocess` invocava o binário pelo nome puro** (`docker`, `trivy`,
+  `grype`, `git`), entregando a escolha do que executar ao `$PATH` — qualquer
+  diretório gravável mais cedo na ordem de busca decidia. É PATH hijacking, a
+  mesma classe de achado que esta ferramenta reporta nas imagens dos outros, e
+  um scanner de segurança é um alvo especialmente bom porque é o veredito dele
+  que o pipeline confia. Agora tudo passa por `resolve_executable()`
+  (`dockerls/utils/executables.py`), que resolve para caminho absoluto via
+  `shutil.which` e falha nomeando a ferramenta ausente.
+- **Dois `try/except/pass` silenciosos** em `build_image.py` engoliam
+  exatamente o erro que se quer ver quando o metadado do relatório sai vazio.
+  Passaram a logar em DEBUG, com a exceção capturada estreitada.
+- **`analyze-dockerfile --format json` emitia JSON inválido** num terminal
+  estreito: a saída ia pelo console do Rich, que quebra a linha na largura do
+  terminal, e uma quebra no meio de uma string do documento o torna
+  imparseável. Em 80 colunas era o caso comum. Passou a sair por
+  `typer.echo`. (`recommend` e `advisor` já haviam sido corrigidos com
+  `soft_wrap=True`; este ficou para trás.)
+- **A tabela do `analyze` truncava o ID da CVE** num terminal de 80 colunas
+  (`CVE-2026…`), que é justamente o campo que não pode ser encurtado — sem
+  ele o achado não é consultável em lugar nenhum. A coluna passou a reservar
+  largura para `CVE-YYYY-NNNNN`, e pacote/versões viraram as colunas
+  flexíveis que cedem espaço. De quebra, a tabela deixou de ser cortada na
+  borda direita quando não cabia.
+- **Os testes de `build_image` mockavam a camada errada.** Os fixtures
+  faziam `validator.validate()` devolver um objeto no formato de
+  `AnalyzeDockerfileResponse`, mas a interface devolve um
+  `DockerfileValidationResult` direto — e como o caso de uso instancia um
+  `AnalyzeDockerfileUseCase` internamente, esse retorno era envelopado numa
+  segunda camada e `response.validation.errors` caía num `MagicMock`, que
+  nunca é igual a `0`. Todo cenário "sem erros" chegava reprovado. Os
+  fixtures passaram a devolver os tipos de domínio corretos.
+- `--hardened --validate-only` deixou de ser esperado escrevendo em disco:
+  dry-run não tem efeito colateral. O teste antigo cobrava o oposto; agora
+  há um caso verificando que **nada** é escrito com `--validate-only` e
+  outro, sem a flag, verificando a geração de verdade.
 
 - **`logout` não existia**, então `login` conseguia armazenar credenciais sem
   nenhuma forma suportada de removê-las, e `clear_credentials` era inalcançável.

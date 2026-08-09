@@ -1,0 +1,99 @@
+"""Testes do comando `analyze-dockerfile`.
+
+Ele e `build --validate-only` renderizam o mesmo relatório pelo mesmo
+renderer (`dockerls/cli/rendering.py`); estes testes fixam o contrato de
+saída e de exit code desse caminho compartilhado.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+from typer.testing import CliRunner
+
+from dockerls.cli.app import app
+from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY
+
+runner = CliRunner()
+
+CLEAN_DOCKERFILE = """\
+FROM node:22-alpine AS builder
+WORKDIR /app
+RUN npm ci --no-cache-dir
+
+FROM node:22-alpine
+LABEL security.scanner="dockerls"
+LABEL maintainer="team@example.com"
+COPY --from=builder /app /app
+USER node
+HEALTHCHECK --interval=30s CMD ["node", "healthcheck.js"]
+ENTRYPOINT ["node", "index.js"]
+"""
+
+BAD_DOCKERFILE = "FROM node:latest\nENV API_KEY=abc123\nCMD npm start\n"
+
+
+@pytest.fixture
+def clean_context(tmp_path):
+    (tmp_path / "Dockerfile").write_text(CLEAN_DOCKERFILE)
+    (tmp_path / ".dockerignore").write_text("node_modules\n")
+    return tmp_path
+
+
+@pytest.fixture
+def bad_context(tmp_path):
+    (tmp_path / "Dockerfile").write_text(BAD_DOCKERFILE)
+    return tmp_path
+
+
+class TestAnalyzeDockerfile:
+    def test_clean_dockerfile_exits_zero_with_the_checks_table(self, clean_context):
+        result = runner.invoke(app, ["analyze-dockerfile", str(clean_context)])
+
+        assert result.exit_code == EXIT_OK
+        assert "Validation Checks" in result.stdout
+        assert "Security Score" in result.stdout
+
+    def test_failing_checks_exit_two(self, bad_context):
+        result = runner.invoke(app, ["analyze-dockerfile", str(bad_context)])
+
+        assert result.exit_code == EXIT_POLICY
+        assert "secrets_not_in_env" in result.stdout
+
+    def test_warnings_alone_do_not_fail(self, clean_context):
+        """Aviso não reprova build -- só erro reprova."""
+        result = runner.invoke(app, ["analyze-dockerfile", str(clean_context)])
+
+        assert result.exit_code == EXIT_OK
+
+    def test_missing_dockerfile_exits_one(self, tmp_path):
+        result = runner.invoke(app, ["analyze-dockerfile", str(tmp_path)])
+
+        assert result.exit_code == EXIT_ERROR
+        assert "not found" in result.stdout.lower()
+
+    def test_json_format_is_parseable(self, bad_context):
+        result = runner.invoke(app, ["analyze-dockerfile", str(bad_context), "--format", "json"])
+
+        payload = json.loads(result.stdout)
+        assert payload["success"] is True
+        assert payload["validation"]["errors"] > 0
+        assert payload["suggestions"]
+
+    def test_validate_only_skips_suggestions(self, bad_context):
+        result = runner.invoke(app, ["analyze-dockerfile", str(bad_context), "--validate-only"])
+
+        assert result.exit_code == EXIT_POLICY
+        assert "Recommendations" not in result.stdout
+
+    def test_no_suggestions_flag_hides_them(self, bad_context):
+        result = runner.invoke(app, ["analyze-dockerfile", str(bad_context), "--no-suggestions"])
+
+        assert "Recommendations" not in result.stdout
+        assert "Validation Checks" in result.stdout
+
+    def test_output_never_contains_the_string_none(self, clean_context):
+        result = runner.invoke(app, ["analyze-dockerfile", str(clean_context)])
+
+        assert "None" not in result.stdout
