@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 from loguru import logger
 
@@ -15,22 +17,32 @@ class ThreatIntelClient:
     def __init__(self, timeout: int = 15):
         self._timeout = timeout
         self._kev_ids: set[str] | None = None
+        # `recommend` enriches every tag concurrently, and the memo below is
+        # only populated *after* the first download finishes. Without this
+        # lock, a 100-tag run started 100 simultaneous downloads of the same
+        # multi-megabyte KEV catalogue -- a self-inflicted burst against
+        # cisa.gov that the memo was written to prevent.
+        self._kev_lock = asyncio.Lock()
 
     async def _load_kev(self) -> set[str]:
         if self._kev_ids is not None:
             return self._kev_ids
+        async with self._kev_lock:
+            if self._kev_ids is not None:
+                return self._kev_ids
+            self._kev_ids = await self._fetch_kev()
+        return self._kev_ids
+
+    async def _fetch_kev(self) -> set[str]:
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 resp = await client.get(self.KEV_URL)
                 resp.raise_for_status()
                 data = resp.json()
-                self._kev_ids = {
-                    str(v.get("cveID", "")).upper() for v in data.get("vulnerabilities", [])
-                }
+                return {str(v.get("cveID", "")).upper() for v in data.get("vulnerabilities", [])}
         except (httpx.HTTPError, ValueError) as e:
             logger.debug(f"CISA KEV catalog unavailable, continuing without it: {e}")
-            self._kev_ids = set()
-        return self._kev_ids
+            return set()
 
     async def known_exploited(self, cve_ids: list[str]) -> set[str]:
         """Return the subset of `cve_ids` present in the CISA KEV catalog."""

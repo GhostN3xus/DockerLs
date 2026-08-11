@@ -18,6 +18,8 @@ from dockerls.cli.dependencies import (
 )
 from dockerls.cli.progress import RichScanObserver
 from dockerls.domain.value_objects.security_tier import SecurityTier, Tier
+from dockerls.exit_codes import EXIT_ERROR as _EXIT_ERROR
+from dockerls.exit_codes import EXIT_OK
 from dockerls.infrastructure.evidence import slugify_reference
 
 if TYPE_CHECKING:
@@ -32,8 +34,10 @@ console = Console()
 #   1 = a hard error occurred (nothing could be scanned, or --fail-on was violated)
 #   2 = no baseline image, but fallback alternatives were found
 #   3 = nothing usable was found at all
-EXIT_BASELINE_MET = 0
-EXIT_ERROR = 1
+# 0 e 1 vêm do contrato compartilhado; 2 e 3 são próprios de `recommend`,
+# que escolhe entre candidatos em vez de avaliar um artefato do usuário.
+EXIT_BASELINE_MET = EXIT_OK
+EXIT_ERROR = _EXIT_ERROR
 EXIT_ALTERNATIVES_FOUND = 2
 EXIT_NONE_FOUND = 3
 

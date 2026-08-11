@@ -369,30 +369,58 @@ class RecommendImagesUseCase:
         if not self._cache:
             return None
         cache_key = self._cache_key(key)
-        data = await self._cache.get(cache_key)
+        try:
+            data = await self._cache.get(cache_key)
+        except Exception as e:
+            # An unreadable cache is a miss, not a scan failure.
+            logger.warning(f"Could not read cached analysis for {key}: {e}")
+            return None
         if not (data and isinstance(data, dict)):
             return None
         try:
             analysis: ImageAnalysis = ImageAnalysis.model_validate(data)
         except ValidationError as e:
             logger.warning(f"Discarding stale cache entry for {key}: {e}")
-            await self._cache.delete(cache_key)
+            await self._discard(cache_key)
             return None
         # A cache hit is not proof of a successful scan: an entry written by
         # an older build could carry a failed scan. Re-apply the gate.
         if not analysis.scan.is_verified:
             logger.warning(f"Discarding cache entry for {key}: cached scan is not verified")
-            await self._cache.delete(cache_key)
+            await self._discard(cache_key)
             return None
         return analysis
 
+    async def _discard(self, cache_key: str) -> None:
+        """Best-effort eviction: failing to delete a bad entry must not
+        become a failure to analyze the image it belongs to."""
+        if not self._cache:
+            return
+        try:
+            await self._cache.delete(cache_key)
+        except Exception as e:
+            logger.warning(f"Could not evict cache entry {cache_key}: {e}")
+
     async def _set_cached(self, key: str, analysis: ImageAnalysis) -> None:
-        if self._cache:
+        """Persist an analysis, treating a storage failure as a cache miss.
+
+        The cache is an optimisation, never a source of truth. Letting a
+        write error escape put it on the same path as a failed scan: the
+        exception unwound into `analyze_tag`'s handler, which reported a
+        fully-scanned, fully-scored image as `ERROR`/unverified. A locked
+        SQLite file -- ordinary under the concurrency this use case creates
+        -- was enough to make a clean image vanish from the results.
+        """
+        if not self._cache:
+            return
+        try:
             await self._cache.set(
                 self._cache_key(key),
                 analysis.model_dump(),
                 ttl_seconds=self._cache_ttl_seconds,
             )
+        except Exception as e:
+            logger.warning(f"Could not cache analysis for {key}: {e}")
 
 
 def _sources_of(tags: list[DockerImage]) -> list[str]:

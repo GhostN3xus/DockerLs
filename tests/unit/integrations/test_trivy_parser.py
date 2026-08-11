@@ -47,12 +47,24 @@ class TestTrivyParser:
 
 
 class _FakeProc:
-    def __init__(self, stdout=b"", stderr=b"", returncode=0):
+    """Stand-in for an `asyncio` subprocess.
+
+    `hangs=True` makes `communicate()` itself raise `TimeoutError`, which is
+    what `asyncio.wait_for` would raise around a real one. Patching
+    `asyncio.wait_for` instead left the `communicate()` coroutine created and
+    never awaited, so the suite emitted a `RuntimeWarning` attributed to
+    whichever unrelated test happened to be running when it was collected.
+    """
+
+    def __init__(self, stdout=b"", stderr=b"", returncode=0, hangs=False):
         self._stdout = stdout
         self._stderr = stderr
         self.returncode = returncode
+        self._hangs = hangs
 
     async def communicate(self):
+        if self._hangs:
+            raise TimeoutError
         return self._stdout, self._stderr
 
 
@@ -69,11 +81,8 @@ class TestTrivyScanErrorPaths:
     @pytest.mark.asyncio
     async def test_timeout_is_timeout_status(self):
         scanner = TrivyScanner(timeout=1)
-        proc = _FakeProc()
-        with (
-            patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)),
-            patch("asyncio.wait_for", AsyncMock(side_effect=TimeoutError())),
-        ):
+        proc = _FakeProc(hangs=True)
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=proc)):
             result = await scanner.scan("node:22-alpine")
         assert result.status == ScanStatus.TIMEOUT
         assert result.is_verified is False

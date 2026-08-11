@@ -35,6 +35,97 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
   precisa ser alcançável a partir de algum ponto do pacote, e nenhum módulo
   pode ficar órfão. Ele encontrou mais oito casos já na primeira execução.
 
+### Corrigido (auditoria completa: o hardening que nunca era aplicado)
+
+- **`--hardened`/`--base` nunca leram os templates versionados no repositório**
+  (`infrastructure/dockerfile_validator.py`). `TEMPLATES_DIR` subia dois níveis
+  a partir de `dockerls/infrastructure/` e reentrava em `infrastructure/
+  templates`, resolvendo para `<raiz-do-repo>/infrastructure/templates` — um
+  diretório que nunca existiu, e que numa instalação por wheel apontava para
+  dentro de `site-packages/`. `exists()` dava `False` em toda execução, então
+  os três templates caíam num gerador genérico que abria com
+  `FROM <base>:latest`: a ferramenta reprovava base flutuante nas imagens dos
+  outros (regra DF001) e emitia uma na própria saída "hardened". Esse gerador
+  foi removido; uma base sem template agora falha alto, dizendo quais existem.
+- **Os templates não iam para a wheel.** São arquivos de dados, e
+  `packages.find` sozinho não os inclui: `build --hardened` funcionava num
+  checkout e falhava a partir de um `pip install`. Declarados em
+  `[tool.setuptools.package-data]`.
+- **`list_templates()` anunciava `java`**, para o qual nunca houve arquivo.
+  `--base java` caía calado numa base diferente da pedida; agora a lista é
+  derivada do que existe em disco e `--base` é validado antes do build.
+- **O template Go rodava como root** (`FROM scratch` sem `USER`) e trazia um
+  `HEALTHCHECK ... || exit 0` — inerte na forma exec e, se valesse, um portão
+  que nunca reprova. Corrigidos para `USER 65534:65534` e healthcheck real.
+- **`FROM scratch` era reportado como tag flutuante** (severidade HIGH). É a
+  imagem vazia embutida no Docker: não tem tag alguma para pinar. A regra
+  reprovava justamente os Dockerfiles mais enxutos que existem.
+- **`USER 0` e `USER 0:0` passavam na regra `non_root_user`**, que só comparava
+  com a string `"root"`. Um container rodando como uid 0 recebia PASS.
+- **Uma diretiva final terminada em `\` desaparecia** do parser: um `RUN sudo
+  ...` na última linha do arquivo nunca era verificado. Os números de linha
+  relatados passam a apontar para o início da diretiva, não para o fim.
+
+### Corrigido (auditoria completa: robustez, concorrência e segurança)
+
+- **Referências que na verdade eram flags do scanner passavam pela validação**
+  (`utils/validation.py`). O hífen é legal no meio de um nome, então
+  `--ignore-unfixed` ou `--offline-scan` satisfaziam o padrão e chegavam ao
+  `trivy`/`grype` como opção em vez de alvo — controle sobre como, ou se, o
+  scan rodava, a partir de uma referência vinda de variável de CI.
+- **Um keyring quebrado derrubava qualquer comando** (`utils/auth.py`). O
+  backend SecretService é uma extensão Rust: quando a instalação está
+  quebrada ele levanta `pyo3_runtime.PanicException`, que herda de
+  `BaseException` e portanto escapava do `except Exception`. Ler credenciais
+  opcionais nunca pode abortar a execução; `KeyboardInterrupt` e `SystemExit`
+  seguem propagando.
+- **Uma falha de cache descartava um scan válido**
+  (`use_cases/recommend_images.py`). O erro de escrita subia até o handler que
+  reporta falhas de *scan*, então uma imagem inteiramente escaneada e
+  pontuada era registrada como `ERROR`/não verificada — bastava o SQLite estar
+  travado, o que é rotina sob a concorrência que este caso de uso cria.
+- **Rajada de requisições idênticas contra CISA KEV e endoflife.date.** Os
+  memos só fechavam a janela *depois* da resposta chegar, e `recommend`
+  enriquece todas as tags em paralelo: uma execução de 100 tags disparava 100
+  downloads simultâneos do catálogo KEV (megabytes) e até 200 consultas
+  idênticas ao endoflife.date — a rajada que provocava o rate limiting e fazia
+  tags do mesmo produto receberem vereditos de EOL diferentes na mesma
+  execução. Serializados por lock, com dupla checagem.
+- **Corrida na escrita do cache SQLite** (`cache/sqlite_cache.py`): o
+  select-then-insert tinha janela real para duas threads inserirem a mesma
+  chave única. Trocado por um upsert atômico (`ON CONFLICT DO UPDATE`).
+- **Injeção de HTML no relatório de build** (`cli/commands/build.py`). `--tag`,
+  o caminho do Dockerfile e o tier eram interpolados crus na página; uma tag
+  como `x"><script>` transformava um relatório que alguém abre no navegador em
+  vetor de execução. O caminho `export --format html` já escapava — este não.
+- **`"metrics": null` do Grype quebrava o parse inteiro** de um scan bom.
+- **Escritas de arquivo sem tratamento de erro** (`build --report`,
+  `build --output`, `sbom --output`) devolviam traceback em vez de mensagem.
+- **`search` e `sbom` respondiam com stack trace** a uma referência malformada,
+  enquanto todos os outros comandos já reportavam mensagem.
+- **`advisor --workers` tinha default fixo `10`**, que anulava
+  `Settings.workers` — a mesma classe de configuração morta já corrigida no
+  resto da CLI. E um `--format` desconhecido caía calado na tabela do Rich,
+  entregando prosa decorada a quem esperava JSON.
+- `DockerHubClient.authenticate()` tratava um 200 com corpo não-JSON (portal
+  cativo, página de erro de proxy) como exceção não capturada.
+- Um `.dockerignore` presente mas ilegível derrubava a validação inteira por
+  causa de um check opcional; agora é reportado como SKIP.
+
+### Removido
+
+- Quatro pacotes vazios e sem referência alguma (`dockerls/models/`,
+  `repositories/`, `scanners/`, `services/`) — restos de uma estrutura que
+  nunca foi usada.
+- `Dockerfile.hardened` na raiz do repositório: saída gerada pelo próprio
+  caminho de código defeituoso acima, versionada por acidente, com
+  `FROM node:latest` e reprovando nas regras da própria ferramenta. Adicionado
+  ao `.gitignore`, junto com `logs/` e `.dockerls/` — e o `.gitignore` estava
+  literalmente embrulhado numa cerca de markdown (```` ``` ````).
+- `dockerls.egg-info/` do controle de versão: metadado de build, já declarado
+  em `.gitignore` mas versionado mesmo assim, que reaparecia como ruído em
+  todo diff depois de qualquer `pip install -e`.
+
 ### Corrigido (revisão final: veredito falso-positivo de segurança)
 
 Seis defeitos da mesma classe, a pior possível numa ferramenta de segurança:

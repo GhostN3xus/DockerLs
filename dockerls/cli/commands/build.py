@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from html import escape as html_escape
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +84,16 @@ def build(
         console.print(f"[red]Error:[/red] --fail-on inválido: {fail_on!r}. Use um de: {valid}")
         raise typer.Exit(EXIT_ERROR)
 
+    # Uma base sem template não pode ser descoberta só depois do build ter
+    # começado -- o mesmo raciocínio do `--fail-on` acima.
+    if base is not None:
+        known = template_provider.list_templates()
+        if not any(key in base.lower() for key in known):
+            console.print(
+                f"[red]Error:[/red] --base inválido: {base!r}. Use um de: {', '.join(known)}"
+            )
+            raise typer.Exit(EXIT_ERROR)
+
     # Parsear JSON args
     build_args_dict = _parse_json_option(build_args, "--build-args")
     labels_dict = _parse_json_option(labels, "--labels")
@@ -153,9 +164,11 @@ def _run_interactive_wizard(use_case: BuildImageUseCase, path: str) -> BuildImag
     console.print(Panel("[bold cyan]DockerLs Interactive Build Wizard[/bold cyan]", expand=False))
     console.print()
 
-    # Perguntas
+    # As opções de base vêm do provedor, não de uma lista escrita à mão que
+    # oferecia "java" -- para o qual não existe template.
+    available = HardeningTemplates().list_templates() or ["node"]
     questions = [
-        ("base", "What's your application type?", ["node", "python", "go", "java", "other"]),
+        ("base", "What's your application type?", [*available, "other"]),
         ("hardened", "Use hardened template?", ["yes", "no"]),
         ("scan", "Scan after build?", ["yes", "no"]),
         ("report_format", "Export report?", ["json", "html", "both", "none"]),
@@ -324,7 +337,14 @@ def _print_report(report: BuildReport) -> None:
 def _write_report_file(report: BuildReport | None, report_file: str | None) -> None:
     if report is None or not report_file:
         return
-    _save_report(report, report_file)
+    try:
+        _save_report(report, report_file)
+    except OSError as e:
+        # An unwritable report destination is user error (bad path, no
+        # permission), not a crash -- and it must not mask the build result
+        # that was already printed above.
+        console.print(f"\n[red]Could not write report to {report_file}:[/red] {e}")
+        return
     console.print(f"\n📄 Report saved: [cyan]{report_file}[/cyan]")
 
 
@@ -365,7 +385,11 @@ def _print_json_output(response: BuildImageResponse, output_file: str | None = N
     json_output = json.dumps(output_data, indent=2)
 
     if output_file:
-        Path(output_file).write_text(json_output)
+        try:
+            Path(output_file).write_text(json_output, encoding="utf-8")
+        except OSError as e:
+            console.print(f"[red]Could not write {output_file}:[/red] {e}")
+            raise typer.Exit(EXIT_ERROR) from e
         console.print(f"Report saved to {output_file}", style="dim")
     else:
         typer.echo(json_output)
@@ -376,21 +400,30 @@ def _save_report(report: BuildReport, filepath: str) -> None:
     path = Path(filepath)
 
     if path.suffix.lower() in (".html", ".htm"):
-        path.write_text(_render_html_report(report))
+        path.write_text(_render_html_report(report), encoding="utf-8")
         return
 
-    path.write_text(json.dumps(_report_dict(report), indent=2))
+    path.write_text(json.dumps(_report_dict(report), indent=2), encoding="utf-8")
 
 
 def _render_html_report(report: BuildReport) -> str:
     score_color = "#22c55e" if report.security_score >= 75 else "#ef4444"
     tier_color = "#22c55e" if report.security_tier == "A" else "#ef4444"
     validation = report.validation
+    # Every value below originates outside this process -- `--tag`, the
+    # Dockerfile path, the tier string. Interpolated raw, a tag like
+    # `x"><script>...` turned the report into an execution vector for whoever
+    # opens it. The `export --format html` path already escaped; this one did
+    # not, which is exactly the kind of split a security tool cannot afford.
+    image = _esc(report.image)
+    dockerfile_path = _esc(report.dockerfile_path)
+    timestamp = _esc(report.timestamp)
+    tier = _esc(report.security_tier)
 
     html = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>DockerLs Build Report - {report.image or report.dockerfile_path}</title>
+    <title>DockerLs Build Report - {image or dockerfile_path}</title>
     <style>
         body {{ font-family: Arial, sans-serif; margin: 40px; }}
         .score {{ font-size: 48px; font-weight: bold; color: {score_color}; }}
@@ -406,19 +439,19 @@ def _render_html_report(report: BuildReport) -> str:
 </head>
 <body>
     <h1>🐳 DockerLs Build Report</h1>
-    <p><strong>Image:</strong> {report.image or "(not built)"}</p>
-    <p><strong>Dockerfile:</strong> {report.dockerfile_path}</p>
-    <p><strong>Timestamp:</strong> {report.timestamp}</p>
+    <p><strong>Image:</strong> {image or "(not built)"}</p>
+    <p><strong>Dockerfile:</strong> {dockerfile_path}</p>
+    <p><strong>Timestamp:</strong> {timestamp}</p>
 
     <h2>Security Assessment</h2>
-    <div class="score">{report.security_score}/100</div>
-    <div class="tier">Tier: {report.security_tier}</div>
+    <div class="score">{_int(report.security_score)}/100</div>
+    <div class="tier">Tier: {tier}</div>
 
     <h2>Validation Results</h2>
     <table>
-        <tr><th>Passed</th><td>{validation.get("passed", 0)}</td></tr>
-        <tr><th>Warnings</th><td>{validation.get("warnings", 0)}</td></tr>
-        <tr><th>Errors</th><td>{validation.get("errors", 0)}</td></tr>
+        <tr><th>Passed</th><td>{_int(validation.get("passed", 0))}</td></tr>
+        <tr><th>Warnings</th><td>{_int(validation.get("warnings", 0))}</td></tr>
+        <tr><th>Errors</th><td>{_int(validation.get("errors", 0))}</td></tr>
     </table>
 
     <h2>Vulnerability Scan</h2>
@@ -429,10 +462,10 @@ def _render_html_report(report: BuildReport) -> str:
         html += f"""
     <table>
         <tr><th>Severity</th><th>Count</th></tr>
-        <tr><td class="critical">Critical</td><td>{scan.get("critical", 0)}</td></tr>
-        <tr><td class="high">High</td><td>{scan.get("high", 0)}</td></tr>
-        <tr><td class="medium">Medium</td><td>{scan.get("medium", 0)}</td></tr>
-        <tr><td class="low">Low</td><td>{scan.get("low", 0)}</td></tr>
+        <tr><td class="critical">Critical</td><td>{_int(scan.get("critical", 0))}</td></tr>
+        <tr><td class="high">High</td><td>{_int(scan.get("high", 0))}</td></tr>
+        <tr><td class="medium">Medium</td><td>{_int(scan.get("medium", 0))}</td></tr>
+        <tr><td class="low">Low</td><td>{_int(scan.get("low", 0))}</td></tr>
     </table>
 """
     else:
@@ -444,3 +477,20 @@ def _render_html_report(report: BuildReport) -> str:
 </body>
 </html>"""
     )
+
+
+def _esc(value: object) -> str:
+    """HTML-escape a report value, quotes included, for attribute safety."""
+    return html_escape(str(value), quote=True)
+
+
+def _int(value: object) -> int:
+    """Counts come from scanner JSON, so they are numbers by convention, not
+    by guarantee. Coercing keeps a non-numeric value from reaching the page
+    as markup."""
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0

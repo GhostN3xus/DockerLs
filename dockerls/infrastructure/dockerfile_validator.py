@@ -21,6 +21,15 @@ from dockerls.domain.interfaces.dockerfile_validator import (
 )
 
 
+class UnknownHardeningTemplateError(ValueError):
+    """Pediu-se um template hardened que esta instalação não tem.
+
+    `ValueError` de propósito: a CLI já trata `ValueError` como erro de uso
+    (mensagem, sem stack trace), e o caso de uso de build o converte numa
+    resposta com `EXIT_ERROR`.
+    """
+
+
 @dataclass
 class _Stage:
     """Um estágio (`FROM ... [AS alias]`) e o que foi declarado dentro dele.
@@ -93,14 +102,18 @@ class DockerfileParser:
         self._stages = []
 
         line_continuation = ""
+        continuation_start = 0
 
         for line_num, line in enumerate(self._lines, 1):
             # Handle line continuations with backslash
             if line.rstrip().endswith("\\"):
+                if not line_continuation:
+                    continuation_start = line_num
                 line_continuation += line.rstrip()[:-1] + " "
                 continue
             elif line_continuation:
                 line = line_continuation + line.lstrip()
+                line_num = continuation_start
                 line_continuation = ""
 
             line = line.strip()
@@ -110,6 +123,12 @@ class DockerfileParser:
                 continue
 
             self._parse_line(line, line_num)
+
+        # Um arquivo que termina numa barra invertida deixava a diretiva
+        # pendente no buffer e ela sumia: um `RUN ... \` final -- com sudo,
+        # com segredo, com o que fosse -- nunca era verificado.
+        if line_continuation.strip():
+            self._parse_line(line_continuation.strip(), continuation_start)
 
         self._info.stages = max(1, len(self._stages))
         self._resolve_final_stage()
@@ -165,8 +184,10 @@ class DockerfileParser:
             is_stage_reference = any(
                 s.alias and s.alias.lower() == image.lower() for s in self._stages[:-1]
             )
-            if not is_stage_reference and (
-                ":latest" in image or (":" not in image and "@" not in image)
+            if (
+                not is_stage_reference
+                and not self._is_scratch(image)
+                and (":latest" in image or (":" not in image and "@" not in image))
             ):
                 self._info.uses_latest_tag = True
 
@@ -261,6 +282,19 @@ class DockerfileParser:
             arg_name = match.group(1)
             if arg_name in ("BUILDKIT_INLINE_CACHE", "DOCKER_BUILDKIT"):
                 self._info.uses_buildkit = True
+
+    @staticmethod
+    def _is_scratch(image: str) -> bool:
+        """`FROM scratch` é a imagem vazia embutida no Docker -- não é um
+        repositório e não tem tag nenhuma para pinar.
+
+        Tratá-la como "sem tag, logo :latest" reprovava com severidade HIGH
+        exatamente os Dockerfiles mais enxutos que existem (binário estático
+        sobre scratch), inclusive o template Go desta própria ferramenta.
+        """
+        # `FROM --platform=$BUILDPLATFORM scratch` também precisa casar.
+        parts = [p for p in image.split() if not p.startswith("--")]
+        return bool(parts) and parts[-1].lower() == "scratch"
 
     def _env_names(self, line: str) -> list[str]:
         """Nomes de variáveis declarados numa linha ENV.
@@ -491,8 +525,13 @@ class DockerfileValidator(DockerfileValidatorInterface):
     def _check_non_root_user(
         self, info: DockerfileInfo, result: DockerfileValidationResult
     ) -> None:
-        """Verifica se o container roda como usuário não-root."""
-        if info.has_user_directive and info.user_name and info.user_name.lower() != "root":
+        """Verifica se o container roda como usuário não-root.
+
+        `USER 0` e `USER 0:0` são root tanto quanto `USER root` -- e passavam,
+        porque a checagem só comparava com a string "root". Um Dockerfile
+        podia rodar como uid 0 e ainda assim receber PASS nesta regra.
+        """
+        if info.has_user_directive and info.user_name and not self._is_root_user(info):
             result.add_check(
                 ValidationCheck(
                     check="non_root_user",
@@ -514,6 +553,11 @@ class DockerfileValidator(DockerfileValidatorInterface):
                     fix_suggestion="ADD USER appuser\nUSER appuser",
                 )
             )
+
+    @staticmethod
+    def _is_root_user(info: DockerfileInfo) -> bool:
+        name = (info.user_name or "").strip().lower()
+        return name in ("root", "0") or info.user_uid == 0
 
     def _check_multi_stage(self, info: DockerfileInfo, result: DockerfileValidationResult) -> None:
         """Verifica se usa multi-stage build."""
@@ -799,7 +843,22 @@ class DockerfileValidator(DockerfileValidatorInterface):
         dockerignore_path = context_path / ".dockerignore"
 
         if dockerignore_path.exists():
-            content = dockerignore_path.read_text().lower()
+            try:
+                content = dockerignore_path.read_text(encoding="utf-8", errors="replace").lower()
+            except OSError as e:
+                # Present but unreadable is its own answer -- reporting it as
+                # SKIP is honest, where letting the OSError escape aborted
+                # the entire validation over one optional check.
+                result.add_check(
+                    ValidationCheck(
+                        check="dockerignore_complete",
+                        status=ValidationStatus.SKIP,
+                        message=f".dockerignore could not be read: {e}",
+                        severity=SeverityLevel.INFO,
+                        rule_id="DF012",
+                    )
+                )
+                return
             recommended = [".git", ".env", "node_modules", "__pycache__", "*.log"]
             missing = [item for item in recommended if item not in content]
 
@@ -871,41 +930,65 @@ class DockerfileValidator(DockerfileValidatorInterface):
 class HardeningTemplates(HardeningTemplateProvider):
     """Provedor de templates hardened para diferentes linguagens."""
 
-    TEMPLATES_DIR = Path(__file__).parent.parent.parent / "infrastructure" / "templates"
+    # `Path(__file__).parent` já é `dockerls/infrastructure`. Subir mais dois
+    # níveis e reentrar em "infrastructure/templates" apontava para
+    # `<raiz-do-repo>/infrastructure/templates`, que não existe -- e em uma
+    # instalação por wheel apontava para dentro de site-packages/. Resultado:
+    # `exists()` era sempre False, os três templates versionados no repositório
+    # nunca eram lidos, e todo `--hardened` caía no template básico. Um
+    # gerador de Dockerfile "hardened" que na prática emitia outra coisa é
+    # exatamente o tipo de silêncio que esta ferramenta existe para denunciar.
+    TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+    #: Chave aceita por `--base` -> arquivo de template versionado.
+    #: Só entra aqui o que existe de fato: anunciar um template inexistente
+    #: fazia `--base java` cair calado no template básico, com uma base
+    #: destoante da que o usuário pediu.
+    TEMPLATE_FILES = {
+        "node": "node.dockerfile",
+        "python": "python.dockerfile",
+        "go": "go.dockerfile",
+    }
+
+    def _template_path(self, name: str) -> Path:
+        return self.TEMPLATES_DIR / "hardening" / name
 
     def get_template(self, base_image: str) -> str:
-        """Retorna template hardened para um tipo de base image."""
-        template_map = {
-            "node": "node.dockerfile",
-            "python": "python.dockerfile",
-            "go": "go.dockerfile",
-            "java": "java.dockerfile",
-        }
+        """Retorna o template hardened correspondente a `base_image`.
 
-        # Detectar tipo de base image
+        Levanta `UnknownHardeningTemplateError` quando não há template para a
+        base pedida. Antes disso o método caía num template genérico que
+        abria com `FROM <base>:latest` -- ou seja, o gerador "hardened"
+        entregava uma base flutuante, reprovada pela própria regra DF001
+        desta ferramenta, e para `--base java` uma imagem que sequer existe.
+        Falhar alto é o único desfecho honesto: o usuário pediu hardening.
+        """
         base_lower = base_image.lower()
-        template_file = None
+        template_file = next(
+            (filename for key, filename in self.TEMPLATE_FILES.items() if key in base_lower),
+            None,
+        )
 
-        for key, filename in template_map.items():
-            if key in base_lower:
-                template_file = filename
-                break
+        if template_file is not None:
+            path = self._template_path(template_file)
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+            raise UnknownHardeningTemplateError(
+                f"Hardened template file is missing from the installation: {path}"
+            )
 
-        if not template_file:
-            # Default para node
-            template_file = "node.dockerfile"
-
-        template_path = self.TEMPLATES_DIR / "hardening" / template_file
-
-        if template_path.exists():
-            return template_path.read_text()
-
-        # Fallback: gerar template básico
-        return self._generate_basic_template(base_image)
+        available = ", ".join(self.list_templates()) or "none"
+        raise UnknownHardeningTemplateError(
+            f"No hardened template for base image {base_image!r}. Available: {available}"
+        )
 
     def list_templates(self) -> list[str]:
-        """Lista todos os templates disponíveis."""
-        return ["node", "python", "go", "java"]
+        """Lista os templates hardened realmente disponíveis em disco."""
+        return sorted(
+            name
+            for name, filename in self.TEMPLATE_FILES.items()
+            if self._template_path(filename).exists()
+        )
 
     def generate_hardened_dockerfile(
         self,
@@ -936,33 +1019,6 @@ class HardeningTemplates(HardeningTemplateProvider):
             output.write_text(content)
 
         return content
-
-    def _generate_basic_template(self, base_image: str) -> str:
-        """Gera template básico para uma imagem base."""
-        return f"""# Auto-generated hardened Dockerfile
-# Base: {base_image}
-
-FROM {base_image}:latest
-
-LABEL security.scanner="dockerls"
-LABEL security.hardened="true"
-
-# Create non-root user
-RUN useradd -m -u 1000 appuser || adduser -D -u 1000 appuser
-
-WORKDIR /app
-
-COPY --chown=appuser:appuser . .
-
-USER appuser
-
-EXPOSE 8080
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \\
-    CMD curl -f http://localhost:8080/health || exit 1
-
-ENTRYPOINT ["./app"]
-"""
 
     def _apply_suggestions(self, path: Path, suggestions: list[HardeningRule]) -> str:
         """Aplica sugestões ao Dockerfile existente."""

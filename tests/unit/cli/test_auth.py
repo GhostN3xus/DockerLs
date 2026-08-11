@@ -67,3 +67,46 @@ class TestClearCredentials:
         fake.delete_password = _raise
         monkeypatch.setitem(sys.modules, "keyring", fake)
         assert clear_credentials() is False
+
+
+class TestKeyringBackendCrashes:
+    """A keyring backend is arbitrary third-party code, and part of it is
+    native. The `cryptography` backend behind SecretService raises
+    `pyo3_runtime.PanicException` when its Rust extension is broken -- and
+    that derives from `BaseException`, not `Exception`, so the original
+    `except Exception` did not catch it. Reading optional credentials then
+    took down every command that touched them.
+    """
+
+    class _Panic(BaseException):
+        """Stands in for pyo3_runtime.PanicException: BaseException, not
+        Exception."""
+
+    def _panicking_keyring(self, monkeypatch):
+        fake = types.ModuleType("keyring")
+        fake.get_password = MagicMock(side_effect=self._Panic("Python API call failed"))
+        fake.set_password = MagicMock(side_effect=self._Panic("Python API call failed"))
+        fake.delete_password = MagicMock(side_effect=self._Panic("Python API call failed"))
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+
+    def test_load_survives_a_base_exception(self, monkeypatch):
+        self._panicking_keyring(monkeypatch)
+        assert load_credentials() == ("", "")
+
+    def test_store_survives_a_base_exception(self, monkeypatch):
+        self._panicking_keyring(monkeypatch)
+        assert store_credentials("user", "token") is False
+
+    def test_clear_survives_a_base_exception(self, monkeypatch):
+        self._panicking_keyring(monkeypatch)
+        assert clear_credentials() is False
+
+    @pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit])
+    def test_interrupts_still_propagate(self, monkeypatch, exc):
+        """Widening the guard must not swallow Ctrl-C."""
+        fake = types.ModuleType("keyring")
+        fake.get_password = MagicMock(side_effect=exc())
+        monkeypatch.setitem(sys.modules, "keyring", fake)
+
+        with pytest.raises(exc):
+            load_credentials()

@@ -6,6 +6,7 @@ import time
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import CursorResult, delete, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from dockerls.domain.interfaces.cache_store import CacheStoreInterface
 from dockerls.infrastructure.database.models import CacheEntry, create_db_engine
@@ -56,14 +57,21 @@ class SQLiteCache(CacheStoreInterface):
         vkey = self._versioned_key(key)
         serialized = json.dumps(value, default=str)
         expires_at = time.time() + ttl_seconds
+        # Writes run on a thread pool (`asyncio.to_thread`) and `recommend`
+        # issues them concurrently, so select-then-insert had a real window:
+        # two threads could both miss and then both INSERT the same unique
+        # key. A single atomic upsert closes it -- SQLite's ON CONFLICT does
+        # the check and the write in one statement.
+        stmt = (
+            sqlite_insert(CacheEntry)
+            .values(key=vkey, value=serialized, expires_at=expires_at)
+            .on_conflict_do_update(
+                index_elements=[CacheEntry.key],
+                set_={"value": serialized, "expires_at": expires_at},
+            )
+        )
         with self._session() as session:
-            stmt = select(CacheEntry).where(CacheEntry.key == vkey)
-            existing = session.execute(stmt).scalar_one_or_none()
-            if existing:
-                existing.value = serialized
-                existing.expires_at = expires_at
-            else:
-                session.add(CacheEntry(key=vkey, value=serialized, expires_at=expires_at))
+            session.execute(stmt)
             session.commit()
 
     async def delete(self, key: str) -> None:

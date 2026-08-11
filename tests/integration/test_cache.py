@@ -125,3 +125,34 @@ class TestCacheValidationMiss:
         result = await uc._get_cached("node:latest")
         assert result is None
         assert await cache.get(key) is None
+
+
+class TestConcurrentWrites:
+    """Cache writes run on a thread pool and `recommend` issues them
+    concurrently. Select-then-insert had a real window in which two threads
+    both missed and then both INSERTed the same unique key."""
+
+    @pytest.mark.asyncio
+    async def test_same_key_written_concurrently_does_not_raise(self, cache):
+        import asyncio
+
+        await asyncio.gather(*[cache.set("hot-key", {"writer": i}) for i in range(32)])
+
+        stored = await cache.get("hot-key")
+        assert stored is not None
+        assert stored["writer"] in range(32)
+
+    @pytest.mark.asyncio
+    async def test_distinct_keys_all_survive(self, cache):
+        import asyncio
+
+        await asyncio.gather(*[cache.set(f"key-{i}", {"n": i}) for i in range(32)])
+
+        for i in range(32):
+            assert await cache.get(f"key-{i}") == {"n": i}
+
+    @pytest.mark.asyncio
+    async def test_overwrite_replaces_rather_than_duplicates(self, cache):
+        await cache.set("k", {"v": 1})
+        await cache.set("k", {"v": 2})
+        assert await cache.get("k") == {"v": 2}

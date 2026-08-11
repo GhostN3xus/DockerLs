@@ -256,3 +256,55 @@ class TestCacheKeyCoversScoreAffectingInputs:
         """O fingerprint não pode variar entre execuções, senão o cache
         nunca acerta."""
         assert _key_for(self._use_case()) == _key_for(self._use_case())
+
+
+class _BrokenCache(CacheStoreInterface):
+    """A cache whose storage is unavailable -- a locked SQLite file, a full
+    disk, a read-only home directory."""
+
+    def __init__(self, fail_on: set[str]):
+        self.fail_on = fail_on
+
+    async def get(self, key):
+        if "get" in self.fail_on:
+            raise OSError("database is locked")
+        return None
+
+    async def set(self, key, value, ttl_seconds=86400):
+        if "set" in self.fail_on:
+            raise OSError("database is locked")
+
+    async def delete(self, key):
+        if "delete" in self.fail_on:
+            raise OSError("database is locked")
+
+    async def clear(self):
+        raise OSError("database is locked")
+
+
+class TestStorageFailuresNeverDiscardAScan:
+    """The cache is an optimisation, never a source of truth.
+
+    A write error used to unwind into `analyze_tag`'s handler, which reports
+    *scan* failures -- so a fully scanned, fully scored image was recorded as
+    `ERROR`/unverified and vanished from the results because SQLite happened
+    to be locked.
+    """
+
+    @pytest.mark.parametrize("failing", ["set", "get", "delete"])
+    @pytest.mark.asyncio
+    async def test_image_is_still_recommended(self, failing):
+        scanner = _CountingScanner()
+        use_case = RecommendImagesUseCase(
+            repository=_Repo(),
+            scanner=scanner,
+            eol_checker=_EOL(),
+            cache=_BrokenCache({failing}),
+        )
+
+        result = await use_case.execute("node")
+
+        assert scanner.scans == 1
+        assert result.recommendations, f"a failing cache.{failing}() dropped a verified scan"
+        assert result.recommendations[0].scan.is_verified
+        assert result.unverified == []

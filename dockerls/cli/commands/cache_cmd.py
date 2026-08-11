@@ -8,14 +8,13 @@ from rich.console import Console
 from sqlalchemy.exc import SQLAlchemyError
 
 from dockerls.cli.dependencies import build_cache
+from dockerls.exit_codes import EXIT_ERROR
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
 
 console = Console()
 cache_app = typer.Typer(help="Manage the scan cache")
-
-EXIT_ERROR = 1
 
 
 def _run(coro: Coroutine[Any, Any, None]) -> None:

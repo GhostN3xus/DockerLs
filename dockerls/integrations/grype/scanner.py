@@ -179,7 +179,16 @@ class GrypeScanner(ScannerInterface):
             return 0.0
 
         def base_score(entry: dict[str, Any]) -> float:
-            return float(entry.get("metrics", {}).get("baseScore", 0.0))
+            # Grype emits `"metrics": null` for advisories with no CVSS
+            # vector, and a null/non-numeric score must read as "unscored",
+            # not blow up the whole parse of an otherwise good scan.
+            metrics = entry.get("metrics") or {}
+            if not isinstance(metrics, dict):
+                return 0.0
+            try:
+                return float(metrics.get("baseScore", 0.0))
+            except (TypeError, ValueError):
+                return 0.0
 
         for entry in entries:
             if "nvd" in str(entry.get("source", "")).lower():

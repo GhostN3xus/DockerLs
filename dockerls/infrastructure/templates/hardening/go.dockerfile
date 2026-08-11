@@ -36,9 +36,17 @@ COPY --from=builder /app/app /app
 # Expor porta
 EXPOSE 8080
 
-# Health check (se o binário suportar)
+# Sem USER, `scratch` roda como uid 0 -- este template prometia hardening e
+# entregava um container root. Em `scratch` não há /etc/passwd, então o
+# usuário precisa ser numérico; 65534 é o `nobody` convencional.
+USER 65534:65534
+
+# Health check (se o binário suportar). Em `scratch` não existe shell, então
+# a forma exec é a única que roda. O `|| exit 0` anterior era duplamente
+# errado: inerte na forma exec e, se valesse, faria o healthcheck passar
+# sempre -- um portão que nunca reprova.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["/app", "-health"] || exit 0
+    CMD ["/app", "-health"]
 
 # No shell - exec form apenas
 ENTRYPOINT ["/app"]

@@ -14,9 +14,14 @@ from dockerls.cli.dependencies import build_recommend_use_case
 console = Console()
 
 
+_FORMATS = ("table", "json")
+
+
 def advisor(
     image: str = typer.Argument(help="Docker image name (e.g., node, python, nginx)"),
-    workers: int = typer.Option(10, "--workers", "-w", help="Concurrent workers"),
+    workers: int | None = typer.Option(
+        None, "--workers", "-w", help="Concurrent workers [config: workers, default 10]"
+    ),
     output_format: str = typer.Option(
         "table", "--format", "-f", help="Output format: table or json"
     ),
@@ -25,10 +30,23 @@ def advisor(
     """Security advisor: analyze and provide actionable remediation plan."""
     if no_color:
         console.no_color = True
-    asyncio.run(_advisor(image, workers, output_format))
+    # An unrecognised format silently fell through to the table, so
+    # `--format jsonn` in a pipeline produced Rich-decorated prose where a
+    # parser expected JSON.
+    if output_format not in _FORMATS:
+        console.print(
+            f"[red]Error:[/red] unsupported --format {output_format!r}. "
+            f"Use one of: {', '.join(_FORMATS)}"
+        )
+        raise typer.Exit(1)
+    try:
+        asyncio.run(_advisor(image, workers, output_format))
+    except ValueError as e:
+        console.print(f"[red]Invalid configuration:[/red] {e}")
+        raise typer.Exit(1) from e
 
 
-async def _advisor(image: str, workers: int, output_format: str) -> None:
+async def _advisor(image: str, workers: int | None, output_format: str) -> None:
     use_case = await build_recommend_use_case(workers=workers)
     result = await use_case.execute(image)
 

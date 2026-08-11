@@ -7,11 +7,15 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from dockerls.exit_codes import EXIT_ERROR, EXIT_OK
+
 console = Console()
 
-# Exit codes so `health` is usable as a CI gate.
-EXIT_HEALTHY = 0
-EXIT_DEGRADED = 1
+# Exit codes so `health` is usable as a CI gate. They come from the shared
+# contract rather than from literals re-declared here: a probe that cannot
+# reach a dependency is "não sei" (EXIT_ERROR), not a policy verdict.
+EXIT_HEALTHY = EXIT_OK
+EXIT_DEGRADED = EXIT_ERROR
 
 # Each probe must be an endpoint the tool actually depends on *and* one that
 # answers 2xx when healthy. `https://hub.docker.com/v2/` was neither: it
