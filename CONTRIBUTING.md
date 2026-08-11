@@ -1,47 +1,68 @@
-# Contribuindo com o DockerLs
+# Política de Segurança
 
-## Primeiros passos
+## Versões suportadas
 
-1. Faça um fork do repositório
-2. Clone o seu fork
-3. Crie um branch de funcionalidade: `git checkout -b feature/minha-funcionalidade`
-4. Instale as dependências de desenvolvimento: `make dev`
-5. Faça as suas alterações
-6. Rode as verificações: `make audit`
-7. Faça commit e push
-8. Abra um pull request
+| Versão | Suportada |
+|--------|-----------|
+| 1.x    | Sim       |
 
-## Preparando o ambiente de desenvolvimento
+## Reportando uma vulnerabilidade
 
-```bash
-git clone https://github.com/GhostN3xus/DockerLs.git
-cd DockerLs
-python -m venv .venv
-source .venv/bin/activate
-make dev
-```
+Se você descobrir uma vulnerabilidade de segurança no DockerLs, por favor reporte de forma responsável.
 
-## Padrões de código
+**Não abra uma issue pública.**
 
-- Siga o estilo de código já existente
-- Rode `make lint` antes de fazer commit
-- Rode `make test` para verificar que todos os testes passam
-- Adicione testes para funcionalidades novas
-- Mantenha as funções pequenas e com um único propósito
+Use o recurso de reporte privado de vulnerabilidades do GitHub neste repositório:
+**Security → Report a vulnerability**.
 
-## Processo de pull request
+### O que incluir
 
-1. Atualize a documentação, se necessário
-2. Adicione testes para o comportamento novo
-3. Garanta que o CI está passando
-4. É necessária uma aprovação para o merge
-
-## Reportando problemas
-
-Use as GitHub Issues. Inclua:
-
-- Versão do DockerLs
-- Versão do Python
-- Sistema operacional
+- Descrição da vulnerabilidade
 - Passos para reproduzir
-- Comportamento esperado versus comportamento observado
+- Avaliação de impacto
+- Correção sugerida (se houver)
+
+### Prazos de resposta
+
+- Confirmação de recebimento: até 48 horas
+- Avaliação inicial: até 1 semana
+- Correção e divulgação: coordenadas com quem reportou
+
+## Design de segurança
+
+O DockerLs segue estes princípios de segurança:
+
+### Validação de entrada
+
+- Todos os nomes de imagem são validados contra um padrão de regex estrito
+- Ataques de path traversal são bloqueados
+- Injeção de comando é impedida (sem `shell=True`, sem interpolação de strings nos comandos)
+
+### Tratamento de credenciais
+
+- As credenciais são armazenadas no keyring do sistema (nunca em arquivos de texto puro)
+- Variáveis de ambiente são suportadas como alternativa
+- Todas as credenciais são mascaradas na saída de log
+- Bearer tokens e senhas são filtrados do logging estruturado
+
+### Segurança de rede
+
+- Todas as requisições HTTP usam HTTPS
+- Timeouts são aplicados em todas as chamadas externas
+- A lógica de retry usa backoff exponencial para não sobrecarregar os serviços
+- Rate limiting é respeitado
+
+### Cadeia de suprimentos
+
+- As dependências são fixadas no `pyproject.toml`
+- O Dependabot monitora dependências vulneráveis
+- O `pip-audit` roda no CI
+- A imagem Docker usa build multi-stage com tags de versão específicas
+
+### Segurança de contêiner
+
+- Usuário não-root na imagem Docker
+- Suporte a sistema de arquivos somente leitura
+- Todas as capabilities removidas
+- Flag de no-new-privileges
+- Healthcheck configurado
