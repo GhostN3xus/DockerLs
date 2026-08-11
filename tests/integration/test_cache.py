@@ -1,6 +1,7 @@
 import pytest
 
 from dockerls.cache.sqlite_cache import SQLiteCache
+from dockerls.domain.entities.image import DockerImage
 
 
 @pytest.fixture
@@ -119,10 +120,10 @@ class TestCacheValidationMiss:
             cache=cache,
         )
         # write a payload that no longer matches the ImageAnalysis schema
-        key = uc._cache_key("node:latest")
+        key = uc._cache_key(DockerImage(name="node", tag="latest"))
         await cache.set(key, {"totally": "wrong-shape"})
 
-        result = await uc._get_cached("node:latest")
+        result = await uc._get_cached(DockerImage(name="node", tag="latest"))
         assert result is None
         assert await cache.get(key) is None
 

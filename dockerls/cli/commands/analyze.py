@@ -1,20 +1,52 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
 from rich.measure import Measurement
 from rich.table import Table
 
+from dockerls.application.dto.analysis import AnalysisResult
 from dockerls.cli.dependencies import build_analyze_use_case
-from dockerls.exit_codes import EXIT_ERROR
+from dockerls.cli.vulnerability_view import (
+    count_by_origin,
+    npm_remediation_hint,
+    origin_label,
+    sort_by_severity,
+)
+from dockerls.domain.entities.vulnerability import PackageOrigin, Vulnerability
+from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY
+from dockerls.exporters.factory import ExporterFactory
+
+if TYPE_CHECKING:
+    from dockerls.application.dto.analysis import ImageAnalysis
+    from dockerls.domain.entities.scan_result import ScanResult
 
 console = Console()
 
 
+_FORMATS = ("table", "json", "sarif")
+
+#: Limiares de `--fail-on`, do mais severo para o mais brando. Cada um reprova
+#: também tudo que for pior que ele -- mesma semântica de `build --fail-on`,
+#: para que a mesma palavra não signifique duas coisas na mesma ferramenta.
+FAIL_ON_THRESHOLDS = ("critical", "high", "medium", "low")
+
+
 def analyze(
     image: str = typer.Argument(help="Full image reference (e.g., node:22-alpine)"),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table, json or sarif"
+    ),
+    output: str = typer.Option("", "--output", "-o", help="Write the report to a file"),
+    fail_on: str | None = typer.Option(
+        None,
+        "--fail-on",
+        help="Exit with the policy code when findings at/above this severity exist",
+    ),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
     wide: bool = typer.Option(
         False, "--wide", help="Render the table without truncating any column"
@@ -23,7 +55,23 @@ def analyze(
     """Deep-analyze a specific Docker image tag."""
     if no_color:
         console.no_color = True
-    asyncio.run(_analyze(image, wide=wide))
+    if output_format not in _FORMATS:
+        console.print(
+            f"[red]Error:[/red] unsupported --format {output_format!r}. "
+            f"Use one of: {', '.join(_FORMATS)}"
+        )
+        raise typer.Exit(EXIT_ERROR)
+    # Um limiar que a ferramenta não entende viraria um portão aberto com cara
+    # de fechado -- rejeitado antes de qualquer scan começar.
+    if fail_on is not None and fail_on.strip().lower() not in FAIL_ON_THRESHOLDS:
+        console.print(
+            f"[red]Error:[/red] invalid --fail-on {fail_on!r}. "
+            f"Use one of: {', '.join(FAIL_ON_THRESHOLDS)}"
+        )
+        raise typer.Exit(EXIT_ERROR)
+    asyncio.run(
+        _analyze(image, wide=wide, output_format=output_format, output=output, fail_on=fail_on)
+    )
 
 
 # A CVE ID is the primary key of a finding: "CVE-2026…" identifies nothing and
@@ -37,7 +85,13 @@ _CVE_MIN_WIDTH = 14
 _UNBOUNDED_WIDTH = 10_000
 
 
-async def _analyze(image: str, wide: bool = False) -> None:
+async def _analyze(
+    image: str,
+    wide: bool = False,
+    output_format: str = "table",
+    output: str = "",
+    fail_on: str | None = None,
+) -> None:
     use_case = await build_analyze_use_case()
     try:
         result = await use_case.execute(image)
@@ -45,6 +99,94 @@ async def _analyze(image: str, wide: bool = False) -> None:
         console.print(f"[red]Scan failed: {e}[/red]")
         raise typer.Exit(EXIT_ERROR) from e
 
+    if not result.scan.is_verified:
+        # Sem scan não há veredito. Sair 0 aqui deixaria um portão de CI
+        # passar uma imagem que ninguém mediu.
+        console.print(
+            f"[red]Scan did not complete for {result.image.full_reference}:[/red] "
+            f"{result.scan.error_kind.value} -- {result.scan.error_message or 'no details'}"
+        )
+        raise typer.Exit(EXIT_ERROR)
+
+    if output_format in ("json", "sarif"):
+        _emit_machine_readable(result, output_format, output)
+        raise typer.Exit(_fail_on_exit_code(result, fail_on))
+
+    _render_table(result, wide)
+    raise typer.Exit(_fail_on_exit_code(result, fail_on))
+
+
+def _fail_on_exit_code(result: ImageAnalysis, fail_on: str | None) -> int:
+    """Honours the tool-wide exit contract: 2 means "measured, and it fails".
+
+    Deliberadamente igual a `build --fail-on`: `1` continua sendo "não
+    consegui medir" e `2` "medi, e reprovou". Inverter os dois só aqui faria a
+    mesma flag significar coisas opostas em dois comandos da mesma ferramenta.
+    """
+    if not fail_on:
+        return EXIT_OK
+    counts = {
+        "critical": result.scan.critical_count,
+        "high": result.scan.high_count,
+        "medium": result.scan.medium_count,
+        "low": result.scan.low_count,
+    }
+    cutoff = FAIL_ON_THRESHOLDS.index(fail_on.strip().lower())
+    triggering = [level for level in FAIL_ON_THRESHOLDS[: cutoff + 1] if counts[level] > 0]
+    if not triggering:
+        return EXIT_OK
+
+    # Um portão que só diz "reprovou" obriga a reabrir o relatório. Ele nomeia
+    # os CVEs que o dispararam.
+    offenders = [
+        v
+        for v in sort_by_severity(result.scan.vulnerabilities)
+        if v.severity.value.lower() in triggering
+    ]
+    console.print(
+        f"\n[bold red]Gate failed (--fail-on {fail_on}):[/bold red] "
+        f"{len(offenders)} finding(s) at or above {fail_on.upper()}"
+    )
+    for v in offenders[:10]:
+        console.print(
+            f"  {v.cve_id}  {v.severity.value}  {v.package_name} {v.installed_version}"
+            + (f" -> {v.fixed_version}" if v.fixed_version else " (no fix)")
+        )
+    if len(offenders) > 10:
+        console.print(f"  ... and {len(offenders) - 10} more")
+    return EXIT_POLICY
+
+
+def _emit_machine_readable(result: ImageAnalysis, fmt: str, output: str) -> None:
+    """Reuse the existing exporters by wrapping the single analysis in the
+    same `AnalysisResult` they already consume -- one report shape for the
+    whole tool rather than a second one that can drift."""
+    wrapped = AnalysisResult(
+        query=result.image.full_reference,
+        total_tags_scanned=1,
+        total_tags_analyzed=1,
+        baseline_met=result.production_ready,
+        recommendations=[result],
+    )
+    payload = ExporterFactory.create(fmt).export_string(wrapped)
+
+    if not output:
+        # soft_wrap: o Rich quebraria a linha na largura do terminal, e uma
+        # quebra no meio de uma string do JSON produz documento inválido.
+        console.print(payload, soft_wrap=True)
+        return
+
+    path = Path(output)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload, encoding="utf-8")
+    except OSError as e:
+        console.print(f"[red]Could not write {path}:[/red] {e}")
+        raise typer.Exit(EXIT_ERROR) from e
+    console.print(f"[green]Report written to {path}[/green]")
+
+
+def _render_table(result: ImageAnalysis, wide: bool) -> None:
     console.print(f"\n[bold]Analysis: {result.image.full_reference}[/bold]\n")
 
     info = Table(show_header=False, box=None, padding=(0, 2))
@@ -57,8 +199,11 @@ async def _analyze(image: str, wide: bool = False) -> None:
     info.add_row("Medium", str(result.scan.medium_count))
     info.add_row("Low", str(result.scan.low_count))
     info.add_row("Total Vulns", str(result.scan.total_count))
-    info.add_row("Fixable", str(result.scan.fixable_count))
-    info.add_row("Remediation Score", f"{result.remediation_score}%")
+    # A proporção crua ao lado da contagem: é ela que o "Remediation Score"
+    # resume num degrau, e vê-las juntas é o que impede de ler o degrau 20
+    # como "20% corrigíveis".
+    info.add_row("Fixable", f"{result.scan.fixable_count} ({_fixable_pct(result.scan)})")
+    info.add_row("Remediation Score", f"{result.remediation_score}/100")
     info.add_row("EOL", "Yes" if result.is_eol else "No")
     info.add_row("LTS", "Yes" if result.is_lts else "No")
     info.add_row("Scanner", result.scan.scanner)
@@ -73,9 +218,14 @@ async def _analyze(image: str, wide: bool = False) -> None:
         vtable.add_column("CVE", style="cyan", min_width=_CVE_MIN_WIDTH, overflow="fold")
         vtable.add_column("Severity")
         vtable.add_column("CVSS", justify="right")
+        # Qual base publicou o CVSS ao lado. Sem isso, um CRITICAL com score
+        # 7.5 -- severidade do vendor, número do NVD -- lê como erro de conta
+        # da ferramenta, e quem desconfia de um número desconfia do relatório.
+        vtable.add_column("Src", style="dim")
         # `ratio` marks these three as the flexible ones: when the terminal is
         # too narrow, they are what shrinks.
         vtable.add_column("Package", overflow="ellipsis", ratio=1)
+        vtable.add_column("Origin", style="magenta", overflow="ellipsis")
         vtable.add_column("Installed", overflow="ellipsis", ratio=1)
         vtable.add_column("Fixed", overflow="ellipsis", ratio=1)
         vtable.add_column("Status")
@@ -86,11 +236,7 @@ async def _analyze(image: str, wide: bool = False) -> None:
             "MEDIUM": "white",
             "LOW": "dim",
         }
-        for v in sorted(
-            result.scan.vulnerabilities,
-            key=lambda x: x.cvss_score,
-            reverse=True,
-        )[:30]:
+        for v in sort_by_severity(result.scan.vulnerabilities)[:30]:
             st = sev_styles.get(v.severity.value, "")
             status = "FIX AVAILABLE" if v.is_fixable else "NO FIX"
             status_style = "green" if v.is_fixable else "red"
@@ -98,12 +244,21 @@ async def _analyze(image: str, wide: bool = False) -> None:
                 v.cve_id,
                 f"[{st}]{v.severity.value}[/{st}]" if st else v.severity.value,
                 f"{v.cvss_score:.1f}",
+                v.cvss_source or "-",
                 v.package_name,
+                origin_label(v),
                 v.installed_version,
                 v.fixed_version or "-",
                 f"[{status_style}]{status}[/{status_style}]",
             )
         _print_vulnerabilities(vtable, wide)
+        _print_origin_summary(result.scan.vulnerabilities)
+
+
+def _fixable_pct(scan: ScanResult) -> str:
+    if scan.total_count == 0:
+        return "n/a"
+    return f"{scan.fixable_count / scan.total_count:.0%} of {scan.total_count}"
 
 
 def _print_vulnerabilities(vtable: Table, wide: bool) -> None:
@@ -127,3 +282,27 @@ def _print_vulnerabilities(vtable: Table, wide: bool) -> None:
     # the table keeps its natural layout rather than being stretched.
     vtable.expand = natural_width > console.width
     console.print(vtable)
+
+
+def _print_origin_summary(vulns: list[Vulnerability]) -> None:
+    """Break the findings down by where the affected package lives.
+
+    Uma contagem única de "16 vulnerabilidades" não diz o que fazer com elas.
+    Saber que as 16 estão em pacotes de linguagem, e não no SO, é a diferença
+    entre `apk upgrade` (que não resolve nada) e remover o npm da imagem
+    final (que resolve todas).
+    """
+    if not vulns:
+        return
+    counts = count_by_origin(vulns)
+    parts = [
+        f"OS packages: {counts[PackageOrigin.OS]}",
+        f"language packages: {counts[PackageOrigin.LANGUAGE]}",
+    ]
+    if counts[PackageOrigin.UNKNOWN]:
+        parts.append(f"unclassified: {counts[PackageOrigin.UNKNOWN]}")
+    console.print(f"\n[bold]By origin:[/bold] {' | '.join(parts)}")
+
+    hint = npm_remediation_hint(vulns)
+    if hint:
+        console.print(f"\n[bold yellow]Remediation[/bold yellow]\n{hint}")

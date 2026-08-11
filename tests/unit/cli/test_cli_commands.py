@@ -23,7 +23,13 @@ def _analysis() -> ImageAnalysis:
         installed_version="1.0",
         fixed_version="1.1",
     )
-    scan = ScanResult(image_reference="node:22-alpine", vulnerabilities=[vuln])
+    # Um scan real sempre carrega timestamp: é ele que `is_verified` exige, e
+    # `analyze` agora recusa emitir veredito sem scan verificado.
+    scan = ScanResult(
+        image_reference="node:22-alpine",
+        vulnerabilities=[vuln],
+        scan_timestamp="2026-01-01T00:00:00+00:00",
+    )
     return ImageAnalysis(
         image=DockerImage(name="node", tag="22-alpine"),
         scan=scan,

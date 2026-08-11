@@ -214,7 +214,7 @@ class TestAnalyzeImage:
         )
         result = await uc.execute("node:22-alpine")
         assert result.security_score > 0
-        assert result.tier in ("S", "A", "B", "C")
+        assert result.tier in ("A", "B", "C", "D", "E", "F")
 
     @pytest.mark.asyncio
     async def test_parse_reference(self):

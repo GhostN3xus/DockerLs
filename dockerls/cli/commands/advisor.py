@@ -81,7 +81,7 @@ async def _advisor(image: str, workers: int | None, output_format: str) -> None:
     info.add_row("High", f"[yellow]{best.scan.high_count}[/yellow]")
     info.add_row("Medium", str(best.scan.medium_count))
     info.add_row("Fixable High", str(best.scan.fixable_high_count))
-    info.add_row("Remediation Score", f"{best.remediation_score}%")
+    info.add_row("Remediation Score", f"{best.remediation_score}/100")
     info.add_row("EOL", "Yes" if best.is_eol else "No")
     info.add_row("LTS", "Yes" if best.is_lts else "No")
     console.print(info)

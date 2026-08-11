@@ -1,0 +1,160 @@
+"""`analyze` como portão de CI: formatos estruturados e exit codes.
+
+Sem saída legível por máquina e sem código de saída significativo, a análise
+de uma imagem não pluga em pipeline nenhum -- ela só existia como tabela para
+leitura humana.
+"""
+
+from __future__ import annotations
+
+import json
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from typer.testing import CliRunner
+
+from dockerls.application.dto.analysis import ImageAnalysis
+from dockerls.cli.app import app
+from dockerls.domain.entities.image import DockerImage
+from dockerls.domain.entities.scan_result import ScanErrorKind, ScanResult, ScanStatus
+from dockerls.domain.entities.vulnerability import Severity, Vulnerability
+from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY
+
+runner = CliRunner()
+
+
+def _analysis(critical=0, high=0, medium=0, verified=True) -> ImageAnalysis:
+    vulns = [
+        Vulnerability(cve_id=f"CVE-C{i}", severity=Severity.CRITICAL, package_name="tar")
+        for i in range(critical)
+    ]
+    vulns += [
+        Vulnerability(cve_id=f"CVE-H{i}", severity=Severity.HIGH, package_name="openssl")
+        for i in range(high)
+    ]
+    vulns += [
+        Vulnerability(cve_id=f"CVE-M{i}", severity=Severity.MEDIUM, package_name="zlib")
+        for i in range(medium)
+    ]
+    scan = ScanResult(
+        image_reference="node:22-alpine",
+        vulnerabilities=vulns,
+        scan_timestamp="2026-01-01T00:00:00+00:00" if verified else "",
+        status=ScanStatus.OK if verified else ScanStatus.ERROR,
+        error_kind=ScanErrorKind.NONE if verified else ScanErrorKind.DB_INIT_FAILED,
+        error_message="" if verified else "init error: DB error",
+    )
+    return ImageAnalysis(
+        image=DockerImage(name="node", tag="22-alpine"),
+        scan=scan,
+        security_score=80.0,
+        tier="B",
+        remediation_score=100,
+    )
+
+
+def _run(analysis, *args):
+    use_case = AsyncMock()
+    use_case.execute = AsyncMock(return_value=analysis)
+    with patch(
+        "dockerls.cli.commands.analyze.build_analyze_use_case", AsyncMock(return_value=use_case)
+    ):
+        return runner.invoke(app, ["analyze", "node:22-alpine", *args])
+
+
+class TestStructuredOutput:
+    def test_json_is_parseable(self):
+        result = _run(_analysis(high=2), "--format", "json")
+
+        assert result.exit_code == EXIT_OK
+        payload = json.loads(result.stdout)
+        assert payload["query"] == "node:22-alpine"
+        assert payload["recommendations"][0]["scan"]["vulnerabilities"]
+
+    def test_sarif_carries_the_findings(self):
+        result = _run(_analysis(high=1), "--format", "sarif")
+
+        assert result.exit_code == EXIT_OK
+        sarif = json.loads(result.stdout)
+        assert sarif["version"] == "2.1.0"
+        assert sarif["runs"][0]["tool"]["driver"]["name"] == "DockerLs"
+        assert sarif["runs"][0]["results"][0]["ruleId"] == "CVE-H0"
+
+    def test_unknown_format_is_rejected_before_scanning(self):
+        result = _run(_analysis(), "--format", "yaml")
+
+        assert result.exit_code == EXIT_ERROR
+        assert "--format" in result.stdout
+
+    def test_output_file_is_written(self, tmp_path):
+        out = tmp_path / "nested" / "report.json"
+        result = _run(_analysis(high=1), "--format", "json", "-o", str(out))
+
+        assert result.exit_code == EXIT_OK
+        assert json.loads(out.read_text())["query"] == "node:22-alpine"
+
+    def test_unwritable_output_is_a_message(self, tmp_path):
+        blocked = tmp_path / "afile"
+        blocked.write_text("x")
+        result = _run(_analysis(), "--format", "json", "-o", str(blocked / "n" / "r.json"))
+
+        assert result.exit_code == EXIT_ERROR
+        assert "Could not write" in result.stdout
+
+
+class TestFailOnGate:
+    """Mesma semântica de `build --fail-on`: cada nível reprova também tudo
+    que for mais severo que ele."""
+
+    def test_clean_image_passes(self):
+        assert _run(_analysis(), "--fail-on", "critical").exit_code == EXIT_OK
+
+    def test_critical_trips_the_critical_gate(self):
+        assert _run(_analysis(critical=1), "--fail-on", "critical").exit_code == EXIT_POLICY
+
+    def test_high_does_not_trip_the_critical_gate(self):
+        assert _run(_analysis(high=9), "--fail-on", "critical").exit_code == EXIT_OK
+
+    def test_critical_also_trips_the_high_gate(self):
+        assert _run(_analysis(critical=1), "--fail-on", "high").exit_code == EXIT_POLICY
+
+    def test_medium_gate_catches_everything_above_it(self):
+        assert _run(_analysis(medium=1), "--fail-on", "medium").exit_code == EXIT_POLICY
+        assert _run(_analysis(high=1), "--fail-on", "medium").exit_code == EXIT_POLICY
+
+    def test_no_gate_means_exit_zero_even_with_criticals(self):
+        assert _run(_analysis(critical=5)).exit_code == EXIT_OK
+
+    def test_the_gate_names_the_cves_that_tripped_it(self):
+        """Um portão que só diz "reprovou" obriga a reabrir o relatório."""
+        result = _run(_analysis(critical=2), "--fail-on", "critical")
+
+        assert "Gate failed" in result.stdout
+        assert "CVE-C0" in result.stdout
+        assert "CVE-C1" in result.stdout
+
+    def test_invalid_threshold_is_rejected_up_front(self):
+        result = _run(_analysis(), "--fail-on", "sevre")
+
+        assert result.exit_code == EXIT_ERROR
+        assert "--fail-on" in result.stdout
+
+    def test_the_gate_works_in_json_mode_too(self):
+        result = _run(_analysis(critical=1), "--format", "json", "--fail-on", "critical")
+
+        assert result.exit_code == EXIT_POLICY
+
+
+class TestUnverifiedScanNeverPasses:
+    @pytest.mark.parametrize("args", [(), ("--fail-on", "critical"), ("--format", "json")])
+    def test_a_failed_scan_exits_with_the_execution_code(self, args):
+        """Sair 0 aqui deixaria um portão de CI passar uma imagem que
+        ninguém mediu."""
+        result = _run(_analysis(verified=False), *args)
+
+        assert result.exit_code == EXIT_ERROR
+
+    def test_it_names_the_classified_cause(self):
+        result = _run(_analysis(verified=False))
+
+        assert "DB_INIT_FAILED" in result.stdout

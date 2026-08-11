@@ -26,7 +26,7 @@ def _analysis(critical=0, high=0) -> ImageAnalysis:
         image=DockerImage(name="node", tag="22-alpine"),
         scan=scan,
         security_score=90.0,
-        tier="S",
+        tier="A",
         remediation_score=100,
     )
 

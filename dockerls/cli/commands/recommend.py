@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -92,6 +93,9 @@ def recommend(
     no_hardened: bool = typer.Option(
         False, "--no-hardened", help="Search Docker Hub only (skip Chainguard/Distroless)"
     ),
+    no_cache: bool = typer.Option(
+        False, "--no-cache", help="Ignore cached analyses and re-scan every candidate"
+    ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Also print logs to stderr (they always go to the log file)"
     ),
@@ -116,6 +120,7 @@ def recommend(
                 cross_validate=not no_cross_validate,
                 verify_hub_tags=not no_hub_check,
                 include_hardened=not no_hardened,
+                use_cache=not no_cache,
             )
         )
     except ValueError as e:
@@ -138,6 +143,7 @@ async def _recommend(
     cross_validate: bool = True,
     verify_hub_tags: bool = True,
     include_hardened: bool = True,
+    use_cache: bool = True,
 ) -> None:
     # The observer builds its own stderr console; `console` (stdout) is left
     # exclusively for results so the two streams cannot interleave.
@@ -151,6 +157,7 @@ async def _recommend(
             cross_validate=cross_validate,
             verify_hub_tags=verify_hub_tags,
             include_hardened=include_hardened,
+            use_cache=use_cache,
         )
         result = await use_case.execute(image, limit=resolve_tag_limit(limit))
 
@@ -191,13 +198,21 @@ def _baseline_line(result: AnalysisResult) -> str:
 
 def _baseline_miss_message(result: AnalysisResult) -> str:
     """Name the exact threshold that was not met, so "no match" is a fact
-    the reader can check rather than an opaque verdict."""
+    the reader can check rather than an opaque verdict.
+
+    O ranking abaixo do alvo é apresentado como tal, e com todas as letras:
+    são as melhores candidatas encontradas, nenhuma delas aprovada. Antes o
+    caminho alternativo exigia `critical_count == 0` -- o mesmo critério que o
+    baseline acabara de rejeitar --, então quando toda tag tinha um CRITICAL o
+    usuário recebia "No suitable images found" e nada mais, depois de esperar
+    por uma centena de scans.
+    """
     baseline = _baseline_line(result)
     detail = f"{baseline}\n" if baseline else ""
     return (
-        f"[bold yellow]No image found matching baseline.[/bold yellow]\n"
+        f"[bold yellow]No image meets the baseline.[/bold yellow]\n"
         f"[yellow]{detail}"
-        f"No image met it -- showing the closest alternatives.[/yellow]"
+        f"Showing the best candidates found -- all of them below target.[/yellow]"
     )
 
 
@@ -244,7 +259,14 @@ def _print_table(analyses: list[ImageAnalysis]) -> None:
     table.add_column("Rem", justify="right")
     table.add_column("Tag", justify="center")
 
-    styles = {"S": "bold green", "A": "bold blue", "B": "bold yellow", "C": "bold red"}
+    styles = {
+        "A": "bold green",
+        "B": "bold blue",
+        "C": "bold yellow",
+        "D": "bold red",
+        "E": "bold red",
+        "F": "bold white on red",
+    }
     for i, a in enumerate(analyses, 1):
         ts = styles.get(a.tier, "")
         # A score two scanners disagree about is not shown as a number:
@@ -263,7 +285,7 @@ def _print_table(analyses: list[ImageAnalysis]) -> None:
             f"[{ts}]{a.tier}[/{ts}]" if ts else a.tier,
             counts,
             str(a.scan.fixable_count),
-            f"{a.remediation_score}%",
+            f"{a.remediation_score}/100",
             _hub_status(a),
         )
     console.print(table)
@@ -319,7 +341,7 @@ def _print_tier_warnings(analyses: list[ImageAnalysis]) -> None:
     flagged = [
         (a, SecurityTier.ADVICE.get(Tier(a.tier), ""))
         for a in analyses
-        if not a.production_ready or a.tier in (Tier.B, Tier.C)
+        if not a.production_ready or Tier(a.tier) in SecurityTier.ADVICE
     ]
     flagged = [(a, advice) for a, advice in flagged if advice]
     if not flagged:
@@ -354,19 +376,35 @@ def _short_reason(reason: str) -> str:
 
 
 def _print_unverified(result: AnalysisResult) -> None:
+    """List the tags that could not be scanned, grouped by classified cause.
+
+    Noventa e três linhas repetindo `ERROR: FATAL Fatal error run error: init
+    error: DB error: error in v...` não é diagnóstico: é o mesmo prefixo
+    cortado noventa e três vezes, sem nomear causa nenhuma. O resumo por
+    causa em cima diz de imediato que se trata de *um* problema -- o banco de
+    vulnerabilidades -- e não de noventa e três imagens ruins.
+    """
     if not result.unverified:
         return
     console.print("\n[bold yellow]! Unverified (technical error)[/bold yellow]")
     console.print(
         "[dim]  These tags were never scored -- no successful scan, no recommendation.[/dim]"
     )
+
+    by_kind = Counter(item.kind for item in result.unverified)
+    console.print(
+        "  [bold]Causes:[/bold] "
+        + ", ".join(f"{kind} x{count}" for kind, count in by_kind.most_common())
+    )
+
     for item in result.unverified[:10]:
         console.print(
-            f"  {item.image_reference}  [dim]{item.status}: {_short_reason(item.reason)}[/dim]"
+            f"  {item.image_reference}  [dim]{item.kind}: {_short_reason(item.reason)}[/dim]"
         )
     remaining = len(result.unverified) - 10
     if remaining > 0:
         console.print(f"  [dim]... and {remaining} more (see log file)[/dim]")
+    console.print("  [dim]Run with --verbose for the full scanner output.[/dim]")
 
 
 def _exit_code(result: AnalysisResult, fail_on: FailOn) -> int:

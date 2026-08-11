@@ -122,6 +122,14 @@ de portão em CI:
 aconselhar): ele reporta uma única imagem, então "baseline" e "alternativa" não
 são desfechos distinguíveis do ponto de vista dele.
 
+**Quando nada atinge o baseline, o ranking sai mesmo assim**, marcado como
+abaixo do alvo. O caminho alternativo filtrava por `critical_count == 0` -- de
+novo parte do mesmo critério que o baseline acabara de rejeitar --, então com
+toda tag candidata carregando um CRITICAL (o caso comum no Docker Hub) a
+execução respondia `No suitable images found` e nada mais, descartando a
+informação mais útil que produziu: qual das imagens ruins é a menos ruim. Para
+afrouxar o alvo de verdade, use `--max-critical`, `--max-high` e `--max-medium`.
+
 `--fail-on {critical,high,medium}` força o código de saída 1 se o melhor
 resultado ainda carregar vulnerabilidades naquela severidade ou acima, mesmo em
 modo alternativo -- útil para reprovar um job de CI diante de uma recomendação
@@ -272,10 +280,36 @@ Análise profunda de uma tag específica.
 ```bash
 dockerls analyze node:22-alpine
 dockerls analyze node:22-alpine --wide
+
+# Saída legível por máquina, para CI
+dockerls analyze node:22-alpine --format json
+dockerls analyze node:22-alpine --format sarif -o results.sarif
+
+# Portão de CI: reprova se houver achado na severidade indicada ou acima
+dockerls analyze node:22-alpine --fail-on critical
 ```
 
 Mostra todas as CVEs encontradas, pontuações CVSS, pacotes afetados e
 disponibilidade de correção.
+
+**Ordenação por severidade, não por CVSS.** As linhas saem CRITICAL primeiro,
+depois HIGH, e só dentro de cada faixa é que o CVSS decide. Ordenar apenas por
+CVSS decrescente empurrava um CRITICAL de nota 7,5 para baixo de sete HIGH de
+nota 8,6 -- o achado mais grave ficava escondido na sexta linha.
+
+**A coluna `Src` diz de qual base veio o CVSS.** Severidade e pontuação podem
+vir de bases diferentes: o Trivy classifica pela fonte em `SeveritySource` (em
+geral o vendor da distro) enquanto o bloco `CVSS` traz números de várias bases.
+É por isso que um `CRITICAL` podia aparecer ao lado de um `7.5` e parecer erro
+de conta. Agora a pontuação vem da mesma base que definiu a severidade, com
+recuo para o NVD quando aquela base não publica nota -- e a base é dita.
+
+**A coluna `Origin` separa pacote de SO de pacote de linguagem.** É a diferença
+entre `apk upgrade` (que não resolve nada) e remover o npm da imagem final:
+todas as vulnerabilidades de `node:22-alpine` estão em
+`/usr/local/lib/node_modules/npm/node_modules/`, isto é, nas dependências do
+npm que a imagem embute. Quando esse é o caso, a saída sugere as duas
+remediações concretas.
 
 O ID da CVE nunca é truncado: ele é a chave primária do achado, e `CVE-2026…`
 não pode ser consultado em lugar nenhum. Num terminal estreito quem cede
@@ -513,19 +547,33 @@ verificar.
 
 ## Níveis de segurança
 
-| Nível | Critério                                     | Pronto para produção |
-|-------|----------------------------------------------|----------------------|
-| S     | Critical = 0, High = 0                       | Sim*                 |
-| A     | Critical = 0, High <= 3, todas corrigíveis   | Sim*                 |
-| B     | Critical = 0, High <= 10                     | Condicional*         |
-| C     | Qualquer Critical, ou muitos High            | Não                  |
+O nível é derivado da **pontuação**, e a escala cobre toda a faixa 0-100:
+
+| Nível | Pontuação | Leitura                                  | Pronto para produção |
+|-------|-----------|------------------------------------------|----------------------|
+| A     | 90-100    | pronta para produção                     | Sim*                 |
+| B     | 75-89     | pronta para produção                     | Sim*                 |
+| C     | 60-74     | condicional: exige revisão humana        | Não                  |
+| D     | 40-59     | não pronta para produção                 | Não                  |
+| E     | 20-39     | não pronta para produção                 | Não                  |
+| F     | 0-19      | não usar                                 | Não                  |
 
 \* Uma imagem em EOL nunca é reportada como pronta para produção, qualquer que
 seja o nível.
 
+**Trava por CRITICAL:** uma imagem com CRITICAL **sem correção disponível**
+nunca passa de C, por mais alta que a pontuação tenha ficado. É um teto, não um
+piso -- uma imagem já em F não sobe para C por causa dele.
+
 Níveis que exigem ação aparecem numa seção `Requires review` na saída do
-`recommend`, nomeando cada imagem afetada -- um nível B na tabela não passa
+`recommend`, nomeando cada imagem afetada -- um nível C na tabela não passa
 despercebido.
+
+> **Mudança de contrato (não lançado).** A escala anterior era S/A/B/C e vinha
+> de contagens de vulnerabilidade, não da pontuação. Ela parava em C, então uma
+> imagem com pontuação 0,0, 6 CRITICAL e 170 achados recebia exatamente o mesmo
+> nível de uma imagem 36 pontos melhor. O nível **S deixou de existir**; quem
+> consome o campo `tier` em JSON/CSV/SARIF precisa ajustar.
 
 ---
 

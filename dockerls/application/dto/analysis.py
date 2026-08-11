@@ -61,6 +61,9 @@ class UnverifiedImage(BaseModel):
     image_reference: str
     status: str
     reason: str
+    # Causa classificada (DB_INIT_FAILED, TIMEOUT, NOT_FOUND, ...). O terminal
+    # mostra isto; `reason` guarda o stderr completo para log e --format json.
+    kind: str = "UNKNOWN"
 
 
 class AnalysisResult(BaseModel):

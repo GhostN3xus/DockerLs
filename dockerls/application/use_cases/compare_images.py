@@ -43,19 +43,18 @@ class CompareImagesUseCase:
                 cve_map[uid] for uid in unique_ids if uid in cve_map
             ]
 
-        summary_parts = [
-            f"Best: {winner.image.full_reference} "
-            f"(Score: {winner.security_score}, Tier: {winner.tier})"
-        ]
-        for a in analyses:
-            if a.image.full_reference != winner.image.full_reference:
-                diff = winner.security_score - a.security_score
-                summary_parts.append(f"{a.image.full_reference}: -{diff:.1f} points")
-
+        # Uma linha só, com vencedor, score absoluto e delta misturados e
+        # separados por ponto e vírgula, produzia
+        # `...; node:22-bookworm-slim: -36.0 points` -- em que o `-36.0` lê
+        # como um score negativo em vez de uma diferença. Os dados vão
+        # estruturados; quem renderiza decide o formato.
         return ComparisonResult(
             images=analyses,
             winner=winner.image.full_reference,
-            summary="; ".join(summary_parts),
+            summary=(
+                f"{winner.image.full_reference} scores highest "
+                f"({winner.security_score}, tier {winner.tier})"
+            ),
             common_vulns=common_vulns,
             unique_vulns=unique_vulns,
         )

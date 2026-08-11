@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
 from dockerls.application.dto.analysis import AnalysisResult, ImageAnalysis, UnverifiedImage
@@ -27,7 +28,7 @@ def _analysis(tag="22-alpine", score=95.0, divergence="", hub_verified=True, nam
             image_reference=image.full_reference, scan_timestamp="2026-01-01T00:00:00Z"
         ),
         security_score=score,
-        tier="S",
+        tier="A",
         remediation_score=100,
         scan_divergence=divergence,
         hub_url=f"https://hub.docker.com/_/{name}?tab=tags&name={tag}",
@@ -205,60 +206,55 @@ class TestJsonOutputCarriesVerificationData:
 
 class TestTierWarningsAreSurfaced:
     """`SecurityTier.production_ready` existed but was never read, and the
-    README's "Tier B = conditional" was nowhere in the terminal output. A
-    reader of the table had no way to know a row needs human review."""
+    README's tier obligations were nowhere in the terminal output. A reader of
+    the table had no way to know a row needs human review.
 
-    def _tiered(self, tier):
+    Na escala A-F, C é o tier condicional (exige revisão) e D/E/F não são
+    production-ready; A e B passam sem aviso.
+    """
+
+    def _tiered(self, tier, production_ready=True):
         a = _analysis()
         a.tier = tier
+        a.production_ready = production_ready
         return a
 
-    def test_tier_b_is_flagged_as_needing_review(self):
+    def _out(self, *analyses):
         result = AnalysisResult(
             query="node",
-            total_tags_scanned=1,
-            total_tags_analyzed=1,
+            total_tags_scanned=len(analyses),
+            total_tags_analyzed=len(analyses),
             baseline_met=False,
-            alternatives=[self._tiered("B")],
+            alternatives=list(analyses),
         )
-        out = _run(result).stdout
+        return _run(result).stdout
+
+    def test_tier_c_is_flagged_as_needing_review(self):
+        out = self._out(self._tiered("C"))
         assert "Requires review" in out
-        assert "Tier B" in out
+        assert "Tier C" in out
         assert "human review before production" in out
 
-    def test_tier_c_is_flagged_as_not_production_ready(self):
+    @pytest.mark.parametrize("tier", ["D", "E", "F"])
+    def test_low_tiers_are_flagged_as_not_production_ready(self, tier):
+        out = self._out(self._tiered(tier, production_ready=False))
+        assert "not production ready" in out
+
+    @pytest.mark.parametrize("tier", ["A", "B"])
+    def test_production_ready_tiers_get_no_warning(self, tier):
         result = AnalysisResult(
             query="node",
             total_tags_scanned=1,
             total_tags_analyzed=1,
-            baseline_met=False,
-            alternatives=[self._tiered("C")],
+            baseline_met=True,
+            recommendations=[self._tiered(tier)],
         )
-        out = _run(result).stdout
-        assert "not production ready" in out
-
-    def test_tier_s_and_a_get_no_warning(self):
-        for tier in ("S", "A"):
-            result = AnalysisResult(
-                query="node",
-                total_tags_scanned=1,
-                total_tags_analyzed=1,
-                baseline_met=True,
-                recommendations=[self._tiered(tier)],
-            )
-            assert "Requires review" not in _run(result).stdout
+        assert "Requires review" not in _run(result).stdout
 
     def test_warning_names_the_specific_image(self):
-        good, risky = _analysis(tag="22-alpine"), self._tiered("B")
+        good, risky = _analysis(tag="22-alpine"), self._tiered("C")
         risky.image = DockerImage(name="node", tag="18-bookworm")
-        result = AnalysisResult(
-            query="node",
-            total_tags_scanned=2,
-            total_tags_analyzed=2,
-            baseline_met=False,
-            alternatives=[good, risky],
-        )
-        out = _run(result).stdout
+        out = self._out(good, risky)
         block = out.split("Requires review")[1]
         assert "node:18-bookworm" in block
         assert "node:22-alpine" not in block

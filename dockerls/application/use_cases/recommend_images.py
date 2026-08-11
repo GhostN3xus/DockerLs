@@ -106,14 +106,56 @@ class RecommendImagesUseCase:
         )
         return hashlib.sha256(material.encode()).hexdigest()[:12]
 
-    def _cache_key(self, image_reference: str) -> str:
-        return f"analysis:{self._analysis_fingerprint}:{image_reference}"
+    def _cache_key(self, image: DockerImage) -> str:
+        """Chaveia a análise pelo **digest** do manifesto, não pela tag.
+
+        Tags são mutáveis: `node:22-alpine` de hoje não é a mesma imagem de
+        ontem. Uma entrada chaveada por tag continuava servindo o resultado
+        antigo por até 24h depois de um rebuild upstream -- ou seja, servia
+        um veredito de segurança sobre uma imagem que não existe mais. O
+        digest identifica bytes, então uma entrada só casa com a imagem que
+        de fato produziu aquele scan.
+
+        Sem digest (registries que listam só nomes de tag) a referência
+        continua sendo a chave, que é o melhor disponível.
+        """
+        identity = image.digest or image.full_reference
+        return f"analysis:{self._analysis_fingerprint}:{identity}"
 
     async def execute(self, image_name: str, limit: int = 100) -> AnalysisResult:
         try:
             return await self._execute(image_name, limit)
         finally:
             await self._close_scanners()
+
+    @staticmethod
+    def _fallback_pool(analyses: list[ImageAnalysis]) -> list[ImageAnalysis]:
+        """Ranking apresentado quando nada atinge o baseline.
+
+        O filtro aqui era `critical_count == 0 and not is_eol` -- os mesmos
+        critérios duros que o baseline já havia acabado de rejeitar. Quando
+        toda tag candidata carregava um CRITICAL (o caso comum no Docker Hub),
+        as "alternativas" saíam vazias também e o usuário recebia
+        "No suitable images found" depois de esperar por uma centena de scans.
+        Isso descarta a informação mais útil que a execução produziu: qual das
+        imagens ruins é a menos ruim.
+
+        Agora nada é descartado. As candidatas são apenas *ordenadas* pelo que
+        importa nessa situação -- menos CRITICAL, menos HIGH, mais fácil de
+        remediar, menos MEDIUM, maior score -- e a camada de apresentação diz
+        com todas as letras que estão abaixo do alvo.
+        """
+        return sorted(
+            analyses,
+            key=lambda a: (
+                a.is_eol,
+                a.scan.critical_count,
+                a.scan.high_count,
+                -a.remediation_score,
+                a.scan.medium_count,
+                -a.security_score,
+            ),
+        )
 
     def _baseline(self) -> BaselineCriteria:
         return BaselineCriteria(
@@ -124,9 +166,18 @@ class RecommendImagesUseCase:
 
     async def _execute(self, image_name: str, limit: int = 100) -> AnalysisResult:
         self._observer.phase("Preparing vulnerability database")
+        setup_errors: list[str] = []
         refresh_db = getattr(self._scanner, "refresh_db", None)
-        if callable(refresh_db):
-            await refresh_db()
+        if callable(refresh_db) and not await refresh_db():
+            # O retorno era descartado. Sem a DB pronta, cada worker sai
+            # baixando a própria cópia em paralelo e o run inteiro reprova com
+            # `init error: DB error` -- uma vez por tag. Registrar a causa raiz
+            # uma única vez é o que transforma 93 linhas iguais num diagnóstico.
+            logger.warning("Vulnerability database is not ready; scans are likely to fail")
+            setup_errors.append(
+                "Vulnerability database could not be prepared -- scan failures below are "
+                "most likely a consequence of this, not of the images themselves"
+            )
 
         self._observer.phase(f"Fetching tags for {image_name}")
         tags = await self._repository.search_tags(image_name, limit=limit)
@@ -141,6 +192,7 @@ class RecommendImagesUseCase:
             )
 
         analyses, unverified, errors = await self._scan_all(tags)
+        errors = [*setup_errors, *errors]
         analyses.sort(key=lambda a: a.security_score, reverse=True)
 
         baseline_images = [
@@ -157,8 +209,7 @@ class RecommendImagesUseCase:
             pool = baseline_images
         else:
             baseline_met = False
-            pool = [a for a in analyses if a.scan.critical_count == 0 and not a.is_eol]
-            pool.sort(key=lambda a: (a.scan.high_count, -a.remediation_score))
+            pool = self._fallback_pool(analyses)
 
         selected = await self._finalize(pool, unverified)
 
@@ -204,22 +255,23 @@ class RecommendImagesUseCase:
                 scan_cache[key] = scan
                 return scan
 
-        def _skip(image: DockerImage, status: str, reason: str) -> None:
-            logger.warning(f"Skipping {image.full_reference}: {status} ({reason})")
+        def _skip(image: DockerImage, status: str, reason: str, kind: str = "UNKNOWN") -> None:
+            logger.warning(f"Skipping {image.full_reference}: {status}/{kind} ({reason})")
             unverified.append(
                 UnverifiedImage(
                     image_reference=image.full_reference,
                     status=status,
                     reason=reason or "no details",
+                    kind=kind,
                 )
             )
-            errors.append(f"{image.full_reference}: {status} ({reason or 'no details'})")
+            errors.append(f"{image.full_reference}: {status}/{kind} ({reason or 'no details'})")
 
         async def analyze_tag(image: DockerImage) -> ImageAnalysis | None:
             self._observer.scanning(image.full_reference)
             analysis: ImageAnalysis | None = None
             try:
-                cached = await self._get_cached(image.full_reference)
+                cached = await self._get_cached(image)
                 if cached:
                     analysis = cached
                     return cached
@@ -228,7 +280,7 @@ class RecommendImagesUseCase:
                 # Single verification gate: anything short of a completed,
                 # parsed scan is reported as unverified and is never scored.
                 if not scan.is_verified:
-                    _skip(image, scan.status.value, scan.error_message)
+                    _skip(image, scan.status.value, scan.error_message, scan.error_kind.value)
                     return None
 
                 if self._ignored_cves:
@@ -241,7 +293,7 @@ class RecommendImagesUseCase:
                 is_lts = await self._eol_checker.is_lts(product, version)
 
                 score = SecurityScore(image, scan, is_eol=is_eol, is_lts=is_lts)
-                tier = SecurityTier(scan, is_eol=is_eol)
+                tier = SecurityTier(scan, score.value, is_eol=is_eol)
                 rem_score = RemediationScore(scan)
 
                 analysis = ImageAnalysis(
@@ -258,7 +310,7 @@ class RecommendImagesUseCase:
                     ),
                 )
 
-                await self._set_cached(image.full_reference, analysis)
+                await self._set_cached(image, analysis)
                 return analysis
             except Exception as e:
                 logger.warning(f"Failed to analyze {image.full_reference}: {e}")
@@ -365,10 +417,11 @@ class RecommendImagesUseCase:
                 except Exception as e:  # pragma: no cover - cleanup must not mask results
                     logger.warning(f"Scanner cleanup failed: {e}")
 
-    async def _get_cached(self, key: str) -> ImageAnalysis | None:
+    async def _get_cached(self, image: DockerImage) -> ImageAnalysis | None:
+        key = image.full_reference
         if not self._cache:
             return None
-        cache_key = self._cache_key(key)
+        cache_key = self._cache_key(image)
         try:
             data = await self._cache.get(cache_key)
         except Exception as e:
@@ -401,7 +454,8 @@ class RecommendImagesUseCase:
         except Exception as e:
             logger.warning(f"Could not evict cache entry {cache_key}: {e}")
 
-    async def _set_cached(self, key: str, analysis: ImageAnalysis) -> None:
+    async def _set_cached(self, image: DockerImage, analysis: ImageAnalysis) -> None:
+        key = image.full_reference
         """Persist an analysis, treating a storage failure as a cache miss.
 
         The cache is an optimisation, never a source of truth. Letting a
@@ -415,7 +469,7 @@ class RecommendImagesUseCase:
             return
         try:
             await self._cache.set(
-                self._cache_key(key),
+                self._cache_key(image),
                 analysis.model_dump(),
                 ttl_seconds=self._cache_ttl_seconds,
             )
