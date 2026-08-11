@@ -229,17 +229,106 @@ class TestTrivyErrorPathsAndScoring:
         ela o mesmo achado pontua diferente conforme a ordem do dicionário."""
         scanner = TrivyScanner()
         vuln = {"CVSS": {"redhat": {"V3Score": 5.0}, "nvd": {"V3Score": 9.8}}}
-        assert scanner._extract_cvss(vuln) == 9.8
+        assert scanner._extract_cvss(vuln) == (9.8, "nvd")
 
     def test_cvss_prefers_v4_over_v3_within_a_source(self):
         scanner = TrivyScanner()
-        assert scanner._extract_cvss({"CVSS": {"nvd": {"V3Score": 7.5, "V4Score": 8.2}}}) == 8.2
+        assert scanner._extract_cvss({"CVSS": {"nvd": {"V3Score": 7.5, "V4Score": 8.2}}}) == (
+            8.2,
+            "nvd",
+        )
 
     def test_cvss_falls_back_to_an_unranked_source(self):
         scanner = TrivyScanner()
-        assert scanner._extract_cvss({"CVSS": {"vendorx": {"V3Score": 6.1}}}) == 6.1
+        assert scanner._extract_cvss({"CVSS": {"vendorx": {"V3Score": 6.1}}}) == (6.1, "vendorx")
 
     def test_cvss_without_any_score_is_zero(self):
         scanner = TrivyScanner()
-        assert scanner._extract_cvss({"CVSS": {"nvd": {}}}) == 0.0
-        assert scanner._extract_cvss({}) == 0.0
+        assert scanner._extract_cvss({"CVSS": {"nvd": {}}}) == (0.0, "")
+        assert scanner._extract_cvss({}) == (0.0, "")
+
+
+class TestCvssMatchesTheSeveritySource:
+    """`CRITICAL` ao lado de `CVSS 7.5` parecia erro de conta da ferramenta.
+
+    Não era: o Trivy define `Severity` pela fonte em `SeveritySource` (em
+    geral o vendor da distro) enquanto o bloco `CVSS` traz o score de várias
+    bases ao mesmo tempo. Pegar a severidade de uma e o número de outra é o
+    que produzia a contradição. Quem desconfia de um número desconfia do
+    relatório inteiro, então as duas pontas passam a casar -- e a base que
+    respondeu é dita.
+    """
+
+    def _vuln(self, severity_source, cvss):
+        return {"SeveritySource": severity_source, "CVSS": cvss}
+
+    def test_the_score_comes_from_the_base_that_set_the_severity(self):
+        scanner = TrivyScanner()
+        vuln = self._vuln("redhat", {"nvd": {"V3Score": 9.8}, "redhat": {"V3Score": 7.5}})
+
+        assert scanner._extract_cvss(vuln) == (7.5, "redhat")
+
+    def test_it_falls_back_to_nvd_when_that_base_publishes_no_score(self):
+        """Debian, Alpine e Ubuntu classificam sem pontuar."""
+        scanner = TrivyScanner()
+        vuln = self._vuln("debian", {"nvd": {"V3Score": 9.8}})
+
+        assert scanner._extract_cvss(vuln) == (9.8, "nvd")
+
+    def test_no_severity_source_still_prefers_nvd(self):
+        scanner = TrivyScanner()
+        vuln = self._vuln("", {"redhat": {"V3Score": 5.0}, "nvd": {"V3Score": 9.8}})
+
+        assert scanner._extract_cvss(vuln) == (9.8, "nvd")
+
+    def test_the_source_reaches_the_parsed_vulnerability(self):
+        scanner = TrivyScanner()
+        data = {
+            "Results": [
+                {
+                    "Class": "os-pkgs",
+                    "Target": "node:22-alpine (alpine 3.21.0)",
+                    "Vulnerabilities": [
+                        {
+                            "VulnerabilityID": "CVE-2026-59873",
+                            "Severity": "CRITICAL",
+                            "SeveritySource": "redhat",
+                            "CVSS": {"redhat": {"V3Score": 7.5}, "nvd": {"V3Score": 9.1}},
+                            "PkgName": "tar",
+                        }
+                    ],
+                }
+            ]
+        }
+
+        vuln = scanner._parse_results("node:22-alpine", data).vulnerabilities[0]
+
+        assert vuln.severity.value == "CRITICAL"
+        assert vuln.cvss_score == 7.5
+        assert vuln.cvss_source == "redhat"
+
+    def test_package_origin_is_carried_from_class_and_target(self):
+        scanner = TrivyScanner()
+        data = {
+            "Results": [
+                {
+                    "Class": "lang-pkgs",
+                    "Target": "/usr/local/lib/node_modules/npm/package-lock.json",
+                    "Vulnerabilities": [
+                        {"VulnerabilityID": "CVE-1", "Severity": "HIGH", "PkgName": "tar"}
+                    ],
+                }
+            ]
+        }
+
+        vuln = scanner._parse_results("node:22-alpine", data).vulnerabilities[0]
+
+        assert vuln.package_type == "lang-pkgs"
+        assert "node_modules" in vuln.target
+
+    def test_a_malformed_cvss_block_does_not_break_the_parse(self):
+        scanner = TrivyScanner()
+
+        assert scanner._extract_cvss({"CVSS": None}) == (0.0, "")
+        assert scanner._extract_cvss({"CVSS": {"nvd": None}}) == (0.0, "")
+        assert scanner._extract_cvss({"CVSS": {"nvd": {"V3Score": "n/a"}}}) == (0.0, "")

@@ -243,7 +243,7 @@ class BuildImageUseCase:
                         image_sha256=build_result.image_sha256,
                         validation=validation,
                         analysis=validation_result.analysis,
-                        error=f"Vulnerabilities exceed threshold ({request.fail_on})",
+                        error=self._gate_failure_summary(scan_result, request.fail_on),
                         exit_code=EXIT_POLICY,
                     )
 
@@ -745,6 +745,33 @@ class BuildImageUseCase:
     #: Limiares aceitos por `--fail-on`, do mais severo para o mais brando.
     #: Cada um reprova também tudo que for pior que ele.
     FAIL_ON_THRESHOLDS = ("critical", "high", "medium", "low")
+
+    def _gate_failure_summary(self, scan_result: ScanResult, threshold: str) -> str:
+        """Nomeia os CVEs que dispararam o portão.
+
+        "Vulnerabilities exceed threshold (critical)" obriga quem lê o log do
+        CI a reabrir o relatório para descobrir *o quê*. O portão passa a
+        dizer qual achado o disparou, com pacote e versão de correção.
+        """
+        cutoff = self.FAIL_ON_THRESHOLDS.index(threshold.strip().lower())
+        tripping = {level.upper() for level in self.FAIL_ON_THRESHOLDS[: cutoff + 1]}
+        offenders = [
+            v for v in scan_result.vulnerabilities if str(v.get("severity", "")).upper() in tripping
+        ]
+        header = (
+            f"Vulnerabilities exceed threshold ({threshold}): "
+            f"{len(offenders)} finding(s) at or above {threshold.upper()}"
+        )
+        if not offenders:
+            return header
+        listed = "; ".join(
+            f"{v.get('cve_id') or '?'} ({v.get('severity')}) in "
+            f"{v.get('package') or '?'} {v.get('installed_version') or ''}".strip()
+            + (f" -> {v['fixed_version']}" if v.get("fixed_version") else " (no fix)")
+            for v in offenders[:10]
+        )
+        more = f"; ... and {len(offenders) - 10} more" if len(offenders) > 10 else ""
+        return f"{header} -- {listed}{more}"
 
     def _should_fail(self, scan_result: ScanResult, threshold: str) -> bool:
         """Verifica se deve falhar o build baseado no threshold.

@@ -137,6 +137,7 @@ async def build_recommend_use_case(
     cross_validate: bool | None = None,
     verify_hub_tags: bool | None = None,
     include_hardened: bool | None = None,
+    use_cache: bool = True,
 ) -> RecommendImagesUseCase:
     s = _settings()
     # None means "not given on the command line", so the configured value
@@ -154,7 +155,9 @@ async def build_recommend_use_case(
     if workers < 1:
         raise ValueError("--workers must be at least 1")
 
-    cache = build_cache()
+    # `--no-cache` força uma medição nova: o cache é uma otimização, e às
+    # vezes o que se quer é justamente contorná-lo.
+    cache = build_cache() if use_cache else None
     hub = await build_repository(cache=cache)
     hardened = (
         build_hardened_repositories()

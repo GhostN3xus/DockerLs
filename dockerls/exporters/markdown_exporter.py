@@ -37,7 +37,7 @@ class MarkdownExporter(ExporterInterface):
                 f"| {a.image.full_reference} | {a.security_score} | {a.tier} "
                 f"| {a.scan.critical_count} | {a.scan.high_count} "
                 f"| {a.scan.medium_count} | {a.scan.low_count} "
-                f"| {a.scan.fixable_count} | {a.remediation_score}% | {eol} |"
+                f"| {a.scan.fixable_count} | {a.remediation_score}/100 | {eol} |"
             )
 
         if items and items[0].recommendation:

@@ -31,7 +31,7 @@ def _key_for(use_case) -> str:
     ignore ativas, threat intel ligado ou não); um teste que reconstrói a
     string à mão passa a testar o formato, não o comportamento.
     """
-    return use_case._cache_key(TAG.full_reference)
+    return use_case._cache_key(TAG)
 
 
 class _Repo(ImageRepositoryInterface):
@@ -97,7 +97,7 @@ def _poisoned(status, timestamp="2026-01-01T00:00:00Z"):
             scan_timestamp=timestamp,
         ),
         security_score=100.0,
-        tier="S",
+        tier="A",
         remediation_score=100,
     ).model_dump()
 
@@ -182,7 +182,7 @@ class TestValidCacheEntriesAreStillUsed:
                 scan_timestamp="2026-01-01T00:00:00Z",
             ),
             security_score=98.0,
-            tier="S",
+            tier="A",
             remediation_score=100,
         ).model_dump()
 
@@ -308,3 +308,47 @@ class TestStorageFailuresNeverDiscardAScan:
         assert result.recommendations, f"a failing cache.{failing}() dropped a verified scan"
         assert result.recommendations[0].scan.is_verified
         assert result.unverified == []
+
+
+class TestCacheIsKeyedByDigestNotTag:
+    """Tags são mutáveis: `node:22-alpine` de hoje não é a mesma imagem de
+    ontem. Uma entrada chaveada por tag continuava servindo o resultado antigo
+    por até 24h depois de um rebuild upstream -- ou seja, um veredito de
+    segurança sobre bytes que não existem mais."""
+
+    def _use_case(self):
+        return RecommendImagesUseCase(
+            repository=_Repo(), scanner=_CountingScanner(), eol_checker=_EOL()
+        )
+
+    def test_same_tag_different_digest_is_a_different_entry(self):
+        uc = self._use_case()
+        before = DockerImage(name="node", tag="22-alpine", digest="sha256:aaa")
+        after = DockerImage(name="node", tag="22-alpine", digest="sha256:bbb")
+
+        assert uc._cache_key(before) != uc._cache_key(after), (
+            "a rebuilt tag reused the previous image's cached verdict"
+        )
+
+    def test_same_digest_under_different_tags_shares_the_entry(self):
+        """São os mesmos bytes -- escaneá-los duas vezes é desperdício."""
+        uc = self._use_case()
+        a = DockerImage(name="node", tag="22-alpine", digest="sha256:aaa")
+        b = DockerImage(name="node", tag="22", digest="sha256:aaa")
+
+        assert uc._cache_key(a) == uc._cache_key(b)
+
+    def test_it_falls_back_to_the_reference_without_a_digest(self):
+        """Registries que listam só nomes de tag não dão digest; a
+        referência é o melhor identificador disponível."""
+        uc = self._use_case()
+        image = DockerImage(name="cgr.dev/chainguard/node", tag="latest")
+
+        assert image.full_reference in uc._cache_key(image)
+
+    def test_different_untagged_images_still_differ(self):
+        uc = self._use_case()
+        a = DockerImage(name="node", tag="22-alpine")
+        b = DockerImage(name="node", tag="20-alpine")
+
+        assert uc._cache_key(a) != uc._cache_key(b)

@@ -22,7 +22,7 @@ def analysis_result():
         image=img,
         scan=scan,
         security_score=98.0,
-        tier="S",
+        tier="A",
         remediation_score=100,
     )
     return AnalysisResult(

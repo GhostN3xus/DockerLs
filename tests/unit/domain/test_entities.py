@@ -83,7 +83,7 @@ class TestRecommendation:
         rec = Recommendation(
             image_reference="node:22-alpine",
             security_score=95.0,
-            tier="S",
+            tier="A",
             remediation_score=100,
             steps=[
                 RemediationStep(
@@ -93,5 +93,5 @@ class TestRecommendation:
                 )
             ],
         )
-        assert rec.tier == "S"
+        assert rec.tier == "A"
         assert len(rec.steps) == 1

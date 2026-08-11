@@ -213,7 +213,7 @@ class TestFinalInvariant:
                 image_reference="node:22-alpine", status=status, scan_timestamp=timestamp
             ),
             security_score=100.0,
-            tier="S",
+            tier="A",
             remediation_score=100,
         )
 
@@ -226,11 +226,11 @@ class TestFinalInvariant:
             _assert_verified([self._analysis(status)])
 
     def test_perfect_score_does_not_bypass_the_gate(self):
-        # A score=100 / tier="S" row is exactly the shape a bad fallback
+        # A score=100 / tier="A" row is exactly the shape a bad fallback
         # produced; the gate must reject it on scan status alone.
         bogus = self._analysis(ScanStatus.ERROR)
         assert bogus.security_score == 100.0
-        assert bogus.tier == "S"
+        assert bogus.tier == "A"
         with pytest.raises(UnverifiedRecommendationError):
             _assert_verified([bogus])
 
@@ -253,7 +253,7 @@ class TestStaleCacheIsRevalidated:
                 scan_timestamp="2026-01-01T00:00:00Z",
             ),
             security_score=100.0,
-            tier="S",
+            tier="A",
             remediation_score=100,
         )
 
@@ -278,7 +278,7 @@ class TestStaleCacheIsRevalidated:
         # A chave carrega um fingerprint das regras de ignore e do threat
         # intel; perguntá-la ao caso de uso evita testar o formato dela.
         use_case = _use_case(_CleanScanner())
-        key = use_case._cache_key(TAGS[0].full_reference)
+        key = use_case._cache_key(TAGS[0])
         cache = _Cache(key)
         use_case._cache = cache
         result = await use_case.execute("node")

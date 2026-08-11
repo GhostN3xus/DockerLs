@@ -63,7 +63,7 @@ tr:nth-child(even) {{ background: #f2f2f2; }}
             f'<td class="{t}">{a.tier}</td>'
             f"<td>{a.scan.critical_count}</td><td>{a.scan.high_count}</td>"
             f"<td>{a.scan.medium_count}</td><td>{a.scan.low_count}</td>"
-            f"<td>{a.scan.fixable_count}</td><td>{a.remediation_score}%</td>"
+            f"<td>{a.scan.fixable_count}</td><td>{a.remediation_score}/100</td>"
             f"<td>{'Yes' if a.is_eol else 'No'}</td></tr>"
         )
 

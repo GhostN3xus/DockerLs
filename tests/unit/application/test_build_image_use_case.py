@@ -770,3 +770,75 @@ class TestImageInfo:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestFailOnGateNamesTheOffenders:
+    """`Vulnerabilities exceed threshold (critical)` obriga quem lê o log do
+    CI a reabrir o relatório para descobrir *o quê* reprovou."""
+
+    def _scan(self, **counts):
+        from dockerls.application.use_cases.build_image import ScanResult as BuildScanResult
+
+        vulns = []
+        for severity, n in counts.items():
+            vulns += [
+                {
+                    "cve_id": f"CVE-{severity[:1].upper()}{i}",
+                    "severity": severity.upper(),
+                    "package": "openssl",
+                    "installed_version": "1.0",
+                    "fixed_version": "1.1" if i % 2 == 0 else None,
+                }
+                for i in range(n)
+            ]
+        return BuildScanResult(
+            critical=counts.get("critical", 0),
+            high=counts.get("high", 0),
+            medium=counts.get("medium", 0),
+            low=counts.get("low", 0),
+            vulnerabilities=vulns,
+        )
+
+    def _use_case(self):
+        from unittest.mock import MagicMock
+
+        from dockerls.application.use_cases.build_image import BuildImageUseCase
+
+        return BuildImageUseCase(MagicMock(), MagicMock())
+
+    def test_it_names_the_cves(self):
+        summary = self._use_case()._gate_failure_summary(self._scan(critical=2), "critical")
+
+        assert "CVE-C0" in summary
+        assert "CVE-C1" in summary
+        assert "2 finding(s)" in summary
+
+    def test_it_includes_the_fix_when_there_is_one(self):
+        summary = self._use_case()._gate_failure_summary(self._scan(critical=1), "critical")
+
+        assert "-> 1.1" in summary
+
+    def test_it_says_so_when_there_is_no_fix(self):
+        scan = self._scan(critical=2)
+        summary = self._use_case()._gate_failure_summary(scan, "critical")
+
+        assert "(no fix)" in summary
+
+    def test_a_lower_threshold_also_lists_the_severer_findings(self):
+        summary = self._use_case()._gate_failure_summary(self._scan(critical=1, high=1), "high")
+
+        assert "CVE-C0" in summary
+        assert "CVE-H0" in summary
+
+    def test_it_does_not_list_findings_below_the_threshold(self):
+        summary = self._use_case()._gate_failure_summary(
+            self._scan(critical=1, medium=3), "critical"
+        )
+
+        assert "CVE-M0" not in summary
+
+    def test_long_lists_are_capped_but_counted(self):
+        summary = self._use_case()._gate_failure_summary(self._scan(critical=25), "critical")
+
+        assert "25 finding(s)" in summary
+        assert "and 15 more" in summary

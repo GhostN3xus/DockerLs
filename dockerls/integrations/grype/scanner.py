@@ -9,9 +9,10 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from dockerls.domain.entities.scan_result import ScanResult, ScanStatus
+from dockerls.domain.entities.scan_result import ScanErrorKind, ScanResult, ScanStatus
 from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.scanner import ScannerInterface
+from dockerls.integrations.scan_errors import classify_scanner_error
 from dockerls.utils.executables import ExecutableNotFoundError, resolve_executable
 from dockerls.utils.validation import sanitize_image_name
 
@@ -96,6 +97,7 @@ class GrypeScanner(ScannerInterface):
                     scan_timestamp=timestamp,
                     status=ScanStatus.ERROR,
                     error_message=err,
+                    error_kind=classify_scanner_error(err),
                 )
 
             if not stdout:
@@ -105,6 +107,7 @@ class GrypeScanner(ScannerInterface):
                     scan_timestamp=timestamp,
                     status=ScanStatus.ERROR,
                     error_message="Grype produced no output",
+                    error_kind=ScanErrorKind.INVALID_OUTPUT,
                 )
 
             raw = stdout.decode()
@@ -122,8 +125,19 @@ class GrypeScanner(ScannerInterface):
                 scan_timestamp=timestamp,
                 status=ScanStatus.TIMEOUT,
                 error_message=f"Scan exceeded {self._timeout}s timeout",
+                error_kind=ScanErrorKind.TIMEOUT,
             )
-        except (json.JSONDecodeError, OSError, ExecutableNotFoundError) as e:
+        except json.JSONDecodeError as e:
+            logger.error(f"Grype produced unparseable JSON for {safe_ref}: {e}")
+            return ScanResult(
+                image_reference=safe_ref,
+                scanner="grype",
+                scan_timestamp=timestamp,
+                status=ScanStatus.ERROR,
+                error_message=str(e),
+                error_kind=ScanErrorKind.INVALID_OUTPUT,
+            )
+        except ExecutableNotFoundError as e:
             logger.error(f"Grype scan failed for {safe_ref}: {e}")
             return ScanResult(
                 image_reference=safe_ref,
@@ -131,6 +145,17 @@ class GrypeScanner(ScannerInterface):
                 scan_timestamp=timestamp,
                 status=ScanStatus.ERROR,
                 error_message=str(e),
+                error_kind=ScanErrorKind.SCANNER_MISSING,
+            )
+        except OSError as e:
+            logger.error(f"Grype scan failed for {safe_ref}: {e}")
+            return ScanResult(
+                image_reference=safe_ref,
+                scanner="grype",
+                scan_timestamp=timestamp,
+                status=ScanStatus.ERROR,
+                error_message=str(e),
+                error_kind=classify_scanner_error(str(e)),
             )
 
     def _parse_results(self, image_ref: str, data: dict[str, Any]) -> ScanResult:
@@ -149,17 +174,22 @@ class GrypeScanner(ScannerInterface):
             fixed_versions = vd.get("fix", {}).get("versions", [])
             fixed_version = fixed_versions[0] if fixed_versions else ""
 
-            cvss_score = self._extract_cvss(vd.get("cvss", []))
+            cvss_score, cvss_source = self._extract_cvss(vd.get("cvss", []))
 
             vulns.append(
                 Vulnerability(
                     cve_id=vd.get("id", ""),
                     severity=severity,
                     cvss_score=cvss_score,
+                    cvss_source=cvss_source,
                     package_name=artifact.get("name", ""),
                     installed_version=artifact.get("version", ""),
                     fixed_version=fixed_version,
                     description=vd.get("description", "")[:200],
+                    package_type=str(artifact.get("type") or ""),
+                    target=str(artifact.get("locations", [{}])[0].get("path", ""))
+                    if artifact.get("locations")
+                    else "",
                 )
             )
 
@@ -171,12 +201,13 @@ class GrypeScanner(ScannerInterface):
         )
 
     @staticmethod
-    def _extract_cvss(entries: list[dict[str, Any]]) -> float:
+    def _extract_cvss(entries: list[dict[str, Any]]) -> tuple[float, str]:
         """Deterministic CVSS selection: NVD source > any other vendor
         source > first available, instead of an arbitrary max() across
-        differently-scored advisories."""
+        differently-scored advisories. Returns (score, source) so the report
+        can say which base produced the number."""
         if not entries:
-            return 0.0
+            return 0.0, ""
 
         def base_score(entry: dict[str, Any]) -> float:
             # Grype emits `"metrics": null` for advisories with no CVSS
@@ -191,7 +222,8 @@ class GrypeScanner(ScannerInterface):
                 return 0.0
 
         for entry in entries:
-            if "nvd" in str(entry.get("source", "")).lower():
-                return base_score(entry)
+            source = str(entry.get("source", ""))
+            if "nvd" in source.lower():
+                return base_score(entry), source or "nvd"
 
-        return base_score(entries[0])
+        return base_score(entries[0]), str(entries[0].get("source", ""))

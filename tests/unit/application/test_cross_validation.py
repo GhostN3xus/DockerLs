@@ -32,7 +32,7 @@ def _analyses(n=5, scanner="trivy", vulns=None):
                 scan_timestamp=TS,
             ),
             security_score=90.0,
-            tier="S",
+            tier="A",
             remediation_score=100,
         )
         for i in range(n)

@@ -102,29 +102,58 @@ class TestSecurityScore:
 
 
 class TestSecurityTier:
-    def test_tier_s(self):
-        tier = SecurityTier(_scan())
-        assert tier.tier == Tier.S
-        assert tier.production_ready is True
+    """A escala vai de A a F e é derivada do score.
 
-    def test_tier_a(self):
-        vulns = [
-            Vulnerability(cve_id="H1", severity=Severity.HIGH, fixed_version="1.0"),
-            Vulnerability(cve_id="H2", severity=Severity.HIGH, fixed_version="2.0"),
-        ]
-        tier = SecurityTier(_scan(vulns))
-        assert tier.tier == Tier.A
+    Antes ela parava em C: um score 0.0 com 6 CRITICAL e 170 vulnerabilidades
+    recebia o mesmo tier de uma imagem 36 pontos melhor. A nota deixava de
+    discriminar exatamente onde mais importava.
+    """
 
-    def test_tier_b(self):
-        vulns = [Vulnerability(cve_id=f"H{i}", severity=Severity.HIGH) for i in range(5)]
-        tier = SecurityTier(_scan(vulns))
-        assert tier.tier == Tier.B
+    @pytest.mark.parametrize(
+        ("score", "expected"),
+        [
+            (100.0, Tier.A),
+            (90.0, Tier.A),
+            (89.9, Tier.B),
+            (75.0, Tier.B),
+            (74.9, Tier.C),
+            (60.0, Tier.C),
+            (59.9, Tier.D),
+            (40.0, Tier.D),
+            (39.9, Tier.E),
+            (20.0, Tier.E),
+            (19.9, Tier.F),
+            (0.0, Tier.F),
+        ],
+    )
+    def test_every_band_of_the_scale(self, score, expected):
+        assert SecurityTier(_scan(), score).tier == expected
 
-    def test_tier_c(self):
+    def test_the_whole_range_is_covered(self):
+        """Nenhum score entre 0 e 100 pode ficar sem tier."""
+        for step in range(0, 1001):
+            assert SecurityTier(_scan(), step / 10).tier in tuple(Tier)
+
+    def test_score_zero_lands_in_f(self):
+        assert SecurityTier(_scan(), 0.0).tier == Tier.F
+
+    def test_unfixable_critical_caps_the_tier_at_c(self):
+        """Um CRITICAL que nem dá para consertar não é compensável por
+        nenhum outro sinal, por mais alto que o score tenha ficado."""
         vulns = [Vulnerability(cve_id="C1", severity=Severity.CRITICAL)]
-        tier = SecurityTier(_scan(vulns))
+        tier = SecurityTier(_scan(vulns), 98.0)
         assert tier.tier == Tier.C
         assert tier.production_ready is False
+
+    def test_a_fixable_critical_does_not_cap(self):
+        vulns = [Vulnerability(cve_id="C1", severity=Severity.CRITICAL, fixed_version="2.0")]
+        assert SecurityTier(_scan(vulns), 98.0).tier == Tier.A
+
+    def test_the_cap_never_improves_a_worse_tier(self):
+        """A trava é um teto, não um piso: uma imagem já em F não sobe para C
+        por ter um CRITICAL sem correção."""
+        vulns = [Vulnerability(cve_id="C1", severity=Severity.CRITICAL)]
+        assert SecurityTier(_scan(vulns), 5.0).tier == Tier.F
 
 
 class TestRemediationScore:
@@ -329,26 +358,31 @@ class TestProductionReadyIsCarriedNotReDerived:
     """`production_ready` was computed by the domain and read by nothing;
     the CLI restated the rule from the tier letter instead."""
 
-    def _tier(self, critical=0, high=0, is_eol=False):
+    def _tier(self, critical=0, high=0, is_eol=False, score=95.0):
         vulns = [Vulnerability(cve_id=f"C{i}", severity=Severity.CRITICAL) for i in range(critical)]
         vulns += [Vulnerability(cve_id=f"H{i}", severity=Severity.HIGH) for i in range(high)]
-        return SecurityTier(_scan(vulns), is_eol=is_eol)
+        return SecurityTier(_scan(vulns), score, is_eol=is_eol)
 
     def test_clean_image_is_production_ready(self):
         assert self._tier().production_ready is True
 
-    def test_tier_c_is_not_production_ready(self):
+    def test_capped_tier_c_is_not_production_ready(self):
         tier = self._tier(critical=1)
         assert tier.tier == Tier.C
         assert tier.production_ready is False
 
     def test_eol_is_never_production_ready_whatever_the_tier(self):
         tier = self._tier(is_eol=True)
-        assert tier.tier == Tier.S
+        assert tier.tier == Tier.A
         assert tier.production_ready is False
 
+    def test_low_tiers_are_not_production_ready(self):
+        for score in (59.0, 39.0, 5.0):
+            assert self._tier(score=score).production_ready is False
+
     def test_advice_is_given_only_for_tiers_needing_action(self):
-        assert SecurityTier.ADVICE.get(Tier.S, "") == ""
         assert SecurityTier.ADVICE.get(Tier.A, "") == ""
-        assert "human review" in SecurityTier.ADVICE[Tier.B]
-        assert "not production ready" in SecurityTier.ADVICE[Tier.C]
+        assert SecurityTier.ADVICE.get(Tier.B, "") == ""
+        assert "human review" in SecurityTier.ADVICE[Tier.C]
+        for tier in (Tier.D, Tier.E, Tier.F):
+            assert "not production ready" in SecurityTier.ADVICE[tier]
