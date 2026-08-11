@@ -7,6 +7,8 @@ ARG PYTHON_DIGEST=sha256:a3e58f9399353be051735f09be0316bfdeab571a5c6a24fd78b92df
 ARG TRIVY_DIGEST=sha256:addfb8fd6b9e520c25b22c61d8aa5d58ecd7879177aa959f952bf4734f4e3f60
 
 FROM python:3.12.4-slim-bookworm@${PYTHON_DIGEST} AS builder
+LABEL maintainer="GhostN3xus" \
+      security.scanner="dockerls"
 
 WORKDIR /build
 
