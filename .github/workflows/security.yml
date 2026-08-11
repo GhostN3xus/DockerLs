@@ -31,11 +31,20 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install bandit
-      - run: bandit -r dockerls/ -c pyproject.toml -f json -o bandit-report.json || true
+      # Full report for the artifact, all severities included. --exit-zero is
+      # deliberate here: this step only produces the report, the gate below
+      # decides whether the job fails.
+      - name: Bandit report (all severities)
+        run: bandit -r dockerls/ -c pyproject.toml -f json -o bandit-report.json --exit-zero
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: bandit-report
           path: bandit-report.json
+      # The actual gate: MEDIUM and HIGH findings fail the job, LOW stays
+      # informational (see the report artifact above).
+      - name: Fail on MEDIUM+ findings
+        run: bandit -r dockerls/ -c pyproject.toml --severity-level medium
 
   pip-audit:
     runs-on: ubuntu-latest
@@ -54,7 +63,7 @@ jobs:
       - name: Build image
         run: docker build -t dockerls:ci .
       - name: Trivy scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: dockerls:ci
           format: sarif

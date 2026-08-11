@@ -25,31 +25,29 @@ def sanitize_image_name(name: str) -> str:
         raise ValueError(f"Invalid image name: {name}")
     if ".." in name:
         raise ValueError("Path traversal detected in image name")
-    _reject_option_lookalike(name)
     return name
 
 
-def _reject_option_lookalike(name: str) -> None:
-    """Refuse references that a scanner would read as command-line options.
+_MAX_THRESHOLD = 10000
 
-    The reference is appended to `trivy image …` / `grype …` as the scan
-    target. Hyphen is a legal character mid-name, so strings like
-    `--ignore-unfixed` or `--offline-scan` satisfied the pattern above and
-    were handed to the scanner as *flags* rather than as an image -- turning
-    a reference that arrives from a CI variable or a config file into control
-    over how (or whether) the scan runs. Docker itself requires every path
-    component to start with an alphanumeric, so nothing legitimate is lost.
-    """
-    for component in name.split("/"):
-        if component.startswith("-"):
-            raise ValueError(
-                f"Invalid image name: {name} (a reference component may not start with '-')"
-            )
+# Each worker holds a slot on an asyncio.Semaphore; 0 would deadlock the
+# scan loop forever and anything much above this only adds contention and
+# rate-limit pressure on Docker Hub.
+MIN_WORKERS = 1
+MAX_WORKERS = 50
 
 
-def validate_threshold(value: int, name: str) -> int:
-    if value < 0:
-        raise ValueError(f"{name} must be non-negative")
-    if value > 10000:
-        raise ValueError(f"{name} exceeds maximum allowed value")
+def validate_threshold(value: int, name: str, *, minimum: int = 0) -> int:
+    if value < minimum:
+        if minimum == 0:
+            raise ValueError(f"{name} must be non-negative")
+        raise ValueError(f"{name} must be at least {minimum}")
+    if value > _MAX_THRESHOLD:
+        raise ValueError(f"{name} exceeds maximum allowed value ({_MAX_THRESHOLD})")
+    return value
+
+
+def validate_workers(value: int, name: str = "workers") -> int:
+    if value < MIN_WORKERS or value > MAX_WORKERS:
+        raise ValueError(f"{name} must be between {MIN_WORKERS} and {MAX_WORKERS}")
     return value

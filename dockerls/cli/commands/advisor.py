@@ -10,49 +10,34 @@ from rich.table import Table
 
 from dockerls.application.use_cases.recommend_images import build_recommendation
 from dockerls.cli.dependencies import build_recommend_use_case
+from dockerls.cli.options import OutputFormat
+from dockerls.cli.validators import check_workers
 
 console = Console()
 
 
-_FORMATS = ("table", "json")
-
-
 def advisor(
     image: str = typer.Argument(help="Docker image name (e.g., node, python, nginx)"),
-    workers: int | None = typer.Option(
-        None, "--workers", "-w", help="Concurrent workers [config: workers, default 10]"
-    ),
-    output_format: str = typer.Option(
-        "table", "--format", "-f", help="Output format: table or json"
+    workers: int = typer.Option(10, "--workers", "-w", help="Concurrent workers"),
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.TABLE, "--format", "-f", help="Output format"
     ),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
 ) -> None:
     """Security advisor: analyze and provide actionable remediation plan."""
     if no_color:
         console.no_color = True
-    # An unrecognised format silently fell through to the table, so
-    # `--format jsonn` in a pipeline produced Rich-decorated prose where a
-    # parser expected JSON.
-    if output_format not in _FORMATS:
-        console.print(
-            f"[red]Error:[/red] unsupported --format {output_format!r}. "
-            f"Use one of: {', '.join(_FORMATS)}"
-        )
-        raise typer.Exit(1)
-    try:
-        asyncio.run(_advisor(image, workers, output_format))
-    except ValueError as e:
-        console.print(f"[red]Invalid configuration:[/red] {e}")
-        raise typer.Exit(1) from e
+    workers = check_workers(workers)
+    asyncio.run(_advisor(image, workers, output_format))
 
 
-async def _advisor(image: str, workers: int | None, output_format: str) -> None:
+async def _advisor(image: str, workers: int, output_format: OutputFormat) -> None:
     use_case = await build_recommend_use_case(workers=workers)
     result = await use_case.execute(image)
 
     items = result.recommendations or result.alternatives
     if not items:
-        if output_format == "json":
+        if output_format == OutputFormat.JSON:
             error_payload = {"error": "No images found to advise on", "errors": result.errors}
             console.print(json.dumps(error_payload), soft_wrap=True)
         else:
@@ -62,7 +47,7 @@ async def _advisor(image: str, workers: int | None, output_format: str) -> None:
     best = items[0]
     rec = best.recommendation or build_recommendation(best)
 
-    if output_format == "json":
+    if output_format == OutputFormat.JSON:
         payload = best.model_dump()
         payload["remediation"] = rec.model_dump()
         console.print(json.dumps(payload, indent=2, default=str), soft_wrap=True)
@@ -81,7 +66,7 @@ async def _advisor(image: str, workers: int | None, output_format: str) -> None:
     info.add_row("High", f"[yellow]{best.scan.high_count}[/yellow]")
     info.add_row("Medium", str(best.scan.medium_count))
     info.add_row("Fixable High", str(best.scan.fixable_high_count))
-    info.add_row("Remediation Score", f"{best.remediation_score}/100")
+    info.add_row("Remediation Score", f"{best.remediation_score}%")
     info.add_row("EOL", "Yes" if best.is_eol else "No")
     info.add_row("LTS", "Yes" if best.is_lts else "No")
     console.print(info)

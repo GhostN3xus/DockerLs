@@ -12,16 +12,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from dockerls.cli.dependencies import (
-    build_recommend_use_case,
-    enable_console_logging,
-    resolve_tag_limit,
-)
-from dockerls.cli.progress import RichScanObserver
-from dockerls.domain.value_objects.security_tier import SecurityTier, Tier
-from dockerls.exit_codes import EXIT_ERROR as _EXIT_ERROR
-from dockerls.exit_codes import EXIT_OK
-from dockerls.infrastructure.evidence import slugify_reference
+from dockerls.cli.dependencies import build_recommend_use_case
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -79,8 +70,8 @@ def recommend(
     fail_on: FailOn = typer.Option(
         FailOn.NONE, "--fail-on", help="Exit non-zero if the top result has vulns at/above severity"
     ),
-    output_format: str = typer.Option(
-        "table", "--format", "-f", help="Output format: table or json"
+    output_format: OutputFormat = typer.Option(
+        OutputFormat.TABLE, "--format", "-f", help="Output format"
     ),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
     no_progress: bool = typer.Option(False, "--no-progress", help="Disable the progress display"),
@@ -103,31 +94,11 @@ def recommend(
     """Recommend the most secure Docker image tags."""
     if no_color:
         console.no_color = True
-    if verbose:
-        enable_console_logging()
-    try:
-        asyncio.run(
-            _recommend(
-                image,
-                max_critical,
-                max_high,
-                max_medium,
-                limit,
-                workers,
-                fail_on,
-                output_format,
-                show_progress=not no_progress and output_format != "json",
-                cross_validate=not no_cross_validate,
-                verify_hub_tags=not no_hub_check,
-                include_hardened=not no_hardened,
-                use_cache=not no_cache,
-            )
+    asyncio.run(
+        _recommend(
+            image, max_critical, max_high, max_medium, limit, workers, fail_on, output_format
         )
-    except ValueError as e:
-        # Bad thresholds are user error, not a crash: show the message, not
-        # a stack trace (pretty_exceptions_enable is off app-wide).
-        console.print(f"[red]Invalid configuration:[/red] {e}")
-        raise typer.Exit(EXIT_ERROR) from e
+    )
 
 
 async def _recommend(
@@ -139,11 +110,6 @@ async def _recommend(
     workers: int | None,
     fail_on: FailOn,
     output_format: str,
-    show_progress: bool = True,
-    cross_validate: bool = True,
-    verify_hub_tags: bool = True,
-    include_hardened: bool = True,
-    use_cache: bool = True,
 ) -> None:
     # The observer builds its own stderr console; `console` (stdout) is left
     # exclusively for results so the two streams cannot interleave.
@@ -161,7 +127,7 @@ async def _recommend(
         )
         result = await use_case.execute(image, limit=resolve_tag_limit(limit))
 
-    if output_format == "json":
+    if output_format == OutputFormat.JSON:
         console.print(json.dumps(result.model_dump(), indent=2, default=str), soft_wrap=True)
         raise typer.Exit(_exit_code(result, fail_on))
 
