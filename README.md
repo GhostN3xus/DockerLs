@@ -287,7 +287,24 @@ dockerls analyze node:22-alpine --format sarif -o results.sarif
 
 # Portão de CI: reprova se houver achado na severidade indicada ou acima
 dockerls analyze node:22-alpine --fail-on critical
+
+# Patch de Dockerfile derivado dos achados
+dockerls analyze node:22-alpine --fix
+dockerls analyze node:22-alpine --fix --output Dockerfile.hardened
 ```
+
+**`--fix` emite um patch, não "o seu Dockerfile corrigido".** A ferramenta
+analisa uma imagem publicada e nunca viu o seu Dockerfile -- não há como
+recuperar um do outro. O que sai é um `FROM <imagem-analisada>` seguido das
+camadas que os achados justificam: copie as linhas `RUN` para o seu build, ou
+construa a partir daí. Cada camada sai de um dado concreto — o gerenciador de
+pacotes vem da distro que o scanner reportou, e os pacotes de linguagem são
+**pinados na versão corrigida** que o próprio scanner entregou, em vez de um
+`upgrade` cego. Nada é inventado: uma distro que a ferramenta não reconhece não
+gera camada nenhuma, e os achados sem correção publicada aparecem listados como
+pendência em vez de sumirem. Quando as duas remediações do npm embutido se
+aplicam, ambas saem no patch — uma ativa, a outra comentada, porque são
+mutuamente exclusivas.
 
 Mostra todas as CVEs encontradas, pontuações CVSS, pacotes afetados e
 disponibilidade de correção.

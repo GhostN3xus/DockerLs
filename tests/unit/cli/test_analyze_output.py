@@ -158,3 +158,67 @@ class TestUnverifiedScanNeverPasses:
         result = _run(_analysis(verified=False))
 
         assert "DB_INIT_FAILED" in result.stdout
+
+
+class TestFixEmitsADockerfilePatch:
+    """`--fix` transforma o scanner em motor de remediação: a saída é
+    aplicável, não descritiva."""
+
+    def _npm_analysis(self):
+        analysis = _analysis(high=2)
+        for v in analysis.scan.vulnerabilities:
+            v.package_type = "lang-pkgs"
+            v.target = "/usr/local/lib/node_modules/npm/node_modules/package-lock.json"
+            v.fixed_version = "9.9.9"
+        return analysis
+
+    def test_it_prints_a_dockerfile(self):
+        result = _run(self._npm_analysis(), "--fix")
+
+        assert result.exit_code == EXIT_OK
+        assert "FROM node:22-alpine" in result.stdout
+        assert "RUN npm install -g npm@latest" in result.stdout
+
+    def test_it_writes_to_a_file(self, tmp_path):
+        out = tmp_path / "Dockerfile.hardened"
+        result = _run(self._npm_analysis(), "--fix", "-o", str(out))
+
+        assert result.exit_code == EXIT_OK
+        assert "FROM node:22-alpine" in out.read_text()
+        assert "patch written to" in result.stdout
+
+    def test_writing_reports_how_much_it_covers(self, tmp_path):
+        out = tmp_path / "Dockerfile.hardened"
+        result = _run(self._npm_analysis(), "--fix", "-o", str(out))
+
+        assert "addressing 2 finding(s)" in result.stdout
+
+    def test_an_unwritable_target_is_a_message(self, tmp_path):
+        blocked = tmp_path / "afile"
+        blocked.write_text("x")
+        result = _run(self._npm_analysis(), "--fix", "-o", str(blocked / "n" / "D"))
+
+        assert result.exit_code == EXIT_ERROR
+        assert "Could not write" in result.stdout
+
+    def test_it_cannot_be_combined_with_a_report_format(self):
+        """`--fix` produz um Dockerfile e `--format json` um relatório; um
+        `--output` só recebe um dos dois, e adivinhar seria pior que recusar."""
+        result = _run(self._npm_analysis(), "--fix", "--format", "json")
+
+        assert result.exit_code == EXIT_ERROR
+        assert "--fix" in result.stdout
+
+    def test_it_still_honours_the_gate(self):
+        analysis = self._npm_analysis()
+        analysis.scan.vulnerabilities[0].severity = Severity.CRITICAL
+        result = _run(analysis, "--fix", "--fail-on", "critical")
+
+        assert result.exit_code == EXIT_POLICY
+
+    def test_an_unverified_scan_produces_no_patch(self):
+        """Um patch derivado de um scan que não rodou seria invenção."""
+        result = _run(_analysis(verified=False), "--fix")
+
+        assert result.exit_code == EXIT_ERROR
+        assert "FROM" not in result.stdout

@@ -10,6 +10,10 @@ from rich.measure import Measurement
 from rich.table import Table
 
 from dockerls.application.dto.analysis import AnalysisResult
+from dockerls.application.services.remediation import (
+    build_remediation_plan,
+    render_dockerfile_patch,
+)
 from dockerls.cli.dependencies import build_analyze_use_case
 from dockerls.cli.vulnerability_view import (
     count_by_origin,
@@ -23,6 +27,7 @@ from dockerls.exporters.factory import ExporterFactory
 
 if TYPE_CHECKING:
     from dockerls.application.dto.analysis import ImageAnalysis
+    from dockerls.application.services.remediation import RemediationPlan
     from dockerls.domain.entities.scan_result import ScanResult
 
 console = Console()
@@ -41,7 +46,12 @@ def analyze(
     output_format: str = typer.Option(
         "table", "--format", "-f", help="Output format: table, json or sarif"
     ),
-    output: str = typer.Option("", "--output", "-o", help="Write the report to a file"),
+    output: str = typer.Option(
+        "", "--output", "-o", help="Write the report (or, with --fix, the patch) to a file"
+    ),
+    fix: bool = typer.Option(
+        False, "--fix", help="Emit a Dockerfile patch that remediates the findings"
+    ),
     fail_on: str | None = typer.Option(
         None,
         "--fail-on",
@@ -61,6 +71,15 @@ def analyze(
             f"Use one of: {', '.join(_FORMATS)}"
         )
         raise typer.Exit(EXIT_ERROR)
+    # `--fix` produz um Dockerfile; `json`/`sarif` produzem um relatório. Um
+    # `--output` só pode receber um dos dois, e adivinhar qual seria pior que
+    # recusar.
+    if fix and output_format != "table":
+        console.print(
+            f"[red]Error:[/red] --fix produces a Dockerfile patch and cannot be combined "
+            f"with --format {output_format}. Run it on its own, or with --output."
+        )
+        raise typer.Exit(EXIT_ERROR)
     # Um limiar que a ferramenta não entende viraria um portão aberto com cara
     # de fechado -- rejeitado antes de qualquer scan começar.
     if fail_on is not None and fail_on.strip().lower() not in FAIL_ON_THRESHOLDS:
@@ -70,7 +89,14 @@ def analyze(
         )
         raise typer.Exit(EXIT_ERROR)
     asyncio.run(
-        _analyze(image, wide=wide, output_format=output_format, output=output, fail_on=fail_on)
+        _analyze(
+            image,
+            wide=wide,
+            output_format=output_format,
+            output=output,
+            fail_on=fail_on,
+            fix=fix,
+        )
     )
 
 
@@ -91,6 +117,7 @@ async def _analyze(
     output_format: str = "table",
     output: str = "",
     fail_on: str | None = None,
+    fix: bool = False,
 ) -> None:
     use_case = await build_analyze_use_case()
     try:
@@ -112,8 +139,42 @@ async def _analyze(
         _emit_machine_readable(result, output_format, output)
         raise typer.Exit(_fail_on_exit_code(result, fail_on))
 
+    if fix:
+        _emit_fix(result, output)
+        raise typer.Exit(_fail_on_exit_code(result, fail_on))
+
     _render_table(result, wide)
     raise typer.Exit(_fail_on_exit_code(result, fail_on))
+
+
+def _emit_fix(result: ImageAnalysis, output: str) -> None:
+    """Emit the Dockerfile patch derived from this image's findings."""
+    plan = build_remediation_plan(result)
+    patch = render_dockerfile_patch(plan)
+
+    if output:
+        path = Path(output)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(patch, encoding="utf-8")
+        except OSError as e:
+            console.print(f"[red]Could not write {path}:[/red] {e}")
+            raise typer.Exit(EXIT_ERROR) from e
+        console.print(f"[green]Dockerfile patch written to {path}[/green]")
+        console.print(_fix_summary(plan))
+        return
+
+    # soft_wrap: o destino provável é um `>` ou um copiar-e-colar, e o Rich
+    # quebraria as linhas na largura do terminal.
+    console.print(patch, soft_wrap=True, highlight=False)
+
+
+def _fix_summary(plan: RemediationPlan) -> str:
+    resolved = plan.resolved_count
+    parts = [f"[dim]{len(plan.actions)} layer(s), addressing {resolved} finding(s)"]
+    if plan.unresolved:
+        parts.append(f"{len(plan.unresolved)} with no published fix")
+    return " | ".join(parts) + "[/dim]"
 
 
 def _fail_on_exit_code(result: ImageAnalysis, fail_on: str | None) -> int:
