@@ -15,7 +15,7 @@ MASK = "***MASKED***"
 
 # Key names that introduce a credential, in any casing or word shape
 # ("apiKey", "api_key", "API-KEY", "dockerhub_token", "senha").
-_SECRET_KEY = r"[\w.-]*(?:token|password|passwd|senha|secret|api[-_]?key|credential|auth)[\w.-]*"  # noqa: S105
+_SECRET_KEY = r"[\w.-]*(?:token|password|passwd|senha|secret|api[-_]?key|credential|auth)[\w.-]*"  # nosec: B105
 
 # A quoted key/value pair, as it appears in JSON or a dict repr:
 #   "token": "value"      'apiKey' : 'value'      "auth": {"token": "value"}

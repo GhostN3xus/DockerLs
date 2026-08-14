@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import subprocess
+import subprocess  # nosec: B404 -- subprocess é necessário para executar docker/trivy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -504,7 +504,7 @@ class BuildImageUseCase:
             if options.buildkit:
                 env["DOCKER_BUILDKIT"] = "1"
 
-            result = subprocess.run(  # noqa: S603 -- argv, sem shell; argv[0] resolvido
+            result = subprocess.run(  # nosec: B603 -- argv, sem shell; argv[0] resolvido
                 cmd,
                 capture_output=True,
                 text=True,
@@ -564,7 +564,7 @@ class BuildImageUseCase:
         """Publica a imagem no registry. Devolve a mensagem de erro, ou None."""
         logger.debug(f"Publicando imagem: {tag}")
         try:
-            result = subprocess.run(  # noqa: S603 -- argv, sem shell; argv[0] resolvido
+            result = subprocess.run(  # nosec: B603 -- argv, sem shell; argv[0] resolvido
                 [resolve_executable("docker"), "push", tag],
                 capture_output=True,
                 text=True,
@@ -581,7 +581,7 @@ class BuildImageUseCase:
     def _get_image_info(self, tag: str) -> dict[str, Any]:
         """Obtém informações da imagem construída."""
         try:
-            result = subprocess.run(  # noqa: S603 -- argv, sem shell; argv[0] resolvido
+            result = subprocess.run(  # nosec: B603 -- argv, sem shell; argv[0] resolvido
                 [resolve_executable("docker"), "image", "inspect", tag],
                 capture_output=True,
                 text=True,
@@ -607,7 +607,7 @@ class BuildImageUseCase:
 
         try:
             # Tentar usar Trivy
-            result = subprocess.run(  # noqa: S603 -- argv, sem shell; argv[0] resolvido
+            result = subprocess.run(  # nosec: B603 -- argv, sem shell; argv[0] resolvido
                 [
                     resolve_executable("trivy"),
                     "image",
@@ -636,7 +636,7 @@ class BuildImageUseCase:
 
         # Fallback: tentar Grype
         try:
-            result = subprocess.run(  # noqa: S603 -- argv, sem shell; argv[0] resolvido
+            result = subprocess.run(  # nosec: B603 -- argv, sem shell; argv[0] resolvido
                 [
                     resolve_executable("grype"),
                     image_tag,
@@ -908,7 +908,7 @@ class BuildImageUseCase:
         """
         try:
             resolved = [resolve_executable(argv[0]), *argv[1:]]
-            result = subprocess.run(  # noqa: S603 -- argv, sem shell; argv[0] resolvido
+            result = subprocess.run(  # nosec: B603 -- argv, sem shell; argv[0] resolvido
                 resolved,
                 capture_output=True,
                 text=True,
