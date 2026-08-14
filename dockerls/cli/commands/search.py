@@ -6,12 +6,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-<<<<<<< HEAD
 from dockerls.cli.dependencies import build_search_use_case
-=======
-from dockerls.cli.dependencies import build_repository
 from dockerls.cli.validators import check_limit
->>>>>>> origin/claude/dockerls-validation-security-gx06bb
 
 console = Console()
 
@@ -21,19 +17,8 @@ def search(
     limit: int = typer.Option(100, "--limit", "-l", help="Maximum tags to retrieve"),
 ) -> None:
     """Search Docker Hub for available tags of an image."""
-<<<<<<< HEAD
-    try:
-        asyncio.run(_search(image, limit))
-    except ValueError as e:
-        # `sanitize_image_name` rejects malformed references. That is user
-        # error -- every other command already reported it as a message, and
-        # only `search` still answered with a stack trace.
-        console.print(f"[red]Invalid image reference:[/red] {e}")
-        raise typer.Exit(1) from e
-=======
     limit = check_limit(limit)
     asyncio.run(_search(image, limit))
->>>>>>> origin/claude/dockerls-validation-security-gx06bb
 
 
 async def _search(image: str, limit: int) -> None:
