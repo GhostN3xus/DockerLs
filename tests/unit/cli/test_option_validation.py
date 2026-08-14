@@ -22,7 +22,7 @@ _BUILDERS = (
     "dockerls.cli.commands.recommend.build_recommend_use_case",
     "dockerls.cli.commands.advisor.build_recommend_use_case",
     "dockerls.cli.commands.export.build_recommend_use_case",
-    "dockerls.cli.commands.search.build_repository",
+    "dockerls.cli.commands.search.build_search_use_case",
 )
 
 

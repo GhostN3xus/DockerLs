@@ -13,6 +13,8 @@ from rich.panel import Panel
 from rich.table import Table
 
 from dockerls.cli.dependencies import build_recommend_use_case
+from dockerls.cli.options import OutputFormat
+from dockerls.exit_codes import EXIT_ERROR, EXIT_OK
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -29,7 +31,7 @@ console = Console()
 # 0 e 1 vêm do contrato compartilhado; 2 e 3 são próprios de `recommend`,
 # que escolhe entre candidatos em vez de avaliar um artefato do usuário.
 EXIT_BASELINE_MET = EXIT_OK
-EXIT_ERROR = _EXIT_ERROR
+EXIT_ERROR_CODE = EXIT_ERROR
 EXIT_ALTERNATIVES_FOUND = 2
 EXIT_NONE_FOUND = 3
 
@@ -378,12 +380,12 @@ def _exit_code(result: AnalysisResult, fail_on: FailOn) -> int:
     if items and fail_on != FailOn.NONE:
         counter = _FAIL_ON_COUNT[fail_on]
         if counter(items[0]) > 0:
-            return EXIT_ERROR
+            return EXIT_ERROR_CODE
 
     if result.baseline_met and result.recommendations:
         return EXIT_BASELINE_MET
     if result.alternatives:
         return EXIT_ALTERNATIVES_FOUND
     if result.total_tags_scanned == 0:
-        return EXIT_ERROR
+        return EXIT_ERROR_CODE
     return EXIT_NONE_FOUND
