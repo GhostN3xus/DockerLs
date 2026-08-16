@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
-from sqlalchemy import CursorResult, delete, select
+from sqlalchemy import CursorResult, delete, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from dockerls.domain.interfaces.cache_store import CacheStoreInterface
@@ -23,9 +23,25 @@ if TYPE_CHECKING:
 CACHE_SCHEMA_VERSION = "v2"
 
 
+class CacheStats(NamedTuple):
+    """What `dockerls cache stats` reports.
+
+    Entries expire lazily -- a stale row is dropped when it is next read --
+    so `expired` is the amount `dockerls cache cleanup` would reclaim right
+    now, and the gap between it and `total` is what the cache is holding on
+    to for nothing.
+    """
+
+    total: int
+    expired: int
+    size_bytes: int
+    path: str
+
+
 class SQLiteCache(CacheStoreInterface):
     def __init__(self, db_path: Path):
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db_path = db_path
         self._engine, self._session_factory = create_db_engine(str(db_path))
 
     def _session(self) -> Session:
@@ -100,3 +116,36 @@ class SQLiteCache(CacheStoreInterface):
             result = cast("CursorResult[Any]", session.execute(stmt))
             session.commit()
             return result.rowcount
+
+    async def stats(self) -> CacheStats:
+        return await asyncio.to_thread(self._stats_sync)
+
+    def _stats_sync(self) -> CacheStats:
+        now = time.time()
+        with self._session() as session:
+            total = session.execute(select(func.count()).select_from(CacheEntry)).scalar_one()
+            expired = session.execute(
+                select(func.count()).select_from(CacheEntry).where(CacheEntry.expires_at < now)
+            ).scalar_one()
+        return CacheStats(
+            total=int(total),
+            expired=int(expired),
+            size_bytes=self._size_on_disk(),
+            path=str(self._db_path),
+        )
+
+    def _size_on_disk(self) -> int:
+        """Bytes the cache occupies, including the WAL sidecar.
+
+        The write-ahead log holds committed data that has not been
+        checkpointed back into the main file yet, so reporting only the
+        `.db` would understate the footprint -- sometimes by most of it.
+        """
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            part = self._db_path.with_name(self._db_path.name + suffix)
+            try:
+                total += part.stat().st_size
+            except OSError:
+                continue
+        return total
