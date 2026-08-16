@@ -13,6 +13,19 @@ class TestSettings:
         s = Settings()
         assert s.db_path.name == "cache.db"
 
+    def test_runtime_artifacts_default_to_xdg_state_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        s = Settings()
+        assert s.log_dir == tmp_path / "state" / "dockerls" / "logs"
+        assert s.evidence_dir == tmp_path / "state" / "dockerls" / "scans"
+
+    def test_runtime_artifact_dirs_can_be_overridden(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DOCKERLS_LOG_DIR", str(tmp_path / "project-logs"))
+        monkeypatch.setenv("DOCKERLS_EVIDENCE_DIR", str(tmp_path / "project-scans"))
+        s = Settings()
+        assert s.log_dir == tmp_path / "project-logs"
+        assert s.evidence_dir == tmp_path / "project-scans"
+
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("DOCKERHUB_USERNAME", "testuser")
         monkeypatch.setenv("DOCKERHUB_TOKEN", "testtoken")

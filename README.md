@@ -250,7 +250,7 @@ encontrado**; a segunda, **quanto trabalho custou**:
 ```
 OK 12/24 analyzed | X 12 skipped (technical error) | sources: Docker Hub, Chainguard, Distroless
 scans: 9 | cache: 3 hit (25%) | deduped: 12 | cross-validated: 5 | workers: 10
-log: logs/dockerls_2026-08-06_13-36-15.log
+log: ~/.local/state/dockerls/logs/dockerls_2026-08-06_13-36-15.log
 ```
 
 A segunda linha existe porque `12/24 analyzed` não diz se aquilo custou 24 scans
@@ -274,7 +274,7 @@ fingir um veredito. Saída real, numa máquina sem scanner instalado
 ```
 OK 0/3 analyzed | X 3 skipped (technical error) | sources: Docker Hub
 scans: 2 | deduped: 1 | workers: 10
-log: logs/dockerls_2026-08-16_19-09-16.log
+log: ~/.local/state/dockerls/logs/dockerls_2026-08-16_19-09-16.log
 
 No image could be scanned.
 All 3 candidate(s) failed with: SCANNER_MISSING
@@ -326,8 +326,12 @@ para consultar apenas o Docker Hub.
 
 O terminal mostra apenas um indicador de progresso e os resultados. Todos os
 diagnósticos -- inclusive o stderr do scanner -- vão para
-`logs/dockerls_<timestamp>.log`; use `--verbose` para espelhá-los também no
-stderr. Defina `DOCKERLS_LOG_DIR` para mudar o diretório de log.
+`$XDG_STATE_HOME/dockerls/logs/dockerls_<timestamp>.log` quando
+`XDG_STATE_HOME` estiver definido, ou para
+`~/.local/state/dockerls/logs/dockerls_<timestamp>.log` por padrão; use
+`--verbose` para espelhá-los também no stderr. Defina `DOCKERLS_LOG_DIR` para
+mudar o diretório de log, inclusive se você quiser manter logs no diretório do
+projeto.
 
 Nenhum comando emite log de nível `INFO` no stderr em uso normal: o piso do sink
 de console é `WARNING`, independente de `DOCKERLS_LOG_LEVEL` (que controla o
@@ -335,18 +339,22 @@ nível do **arquivo** de log). `--verbose` reabre o stderr no nível configurado
 `INFO` por padrão, `DEBUG` com `DOCKERLS_LOG_LEVEL=DEBUG`.
 
 O JSON bruto de cada scan é gravado em
-`.dockerls/scans/<imagem>_<tag>__<scanner>__<timestamp>.json`, e o bloco
-`Details` abaixo da tabela aponta cada imagem para seus próprios arquivos:
+`$XDG_STATE_HOME/dockerls/scans/<imagem>_<tag>__<scanner>__<timestamp>.json`
+quando `XDG_STATE_HOME` estiver definido, ou em
+`~/.local/state/dockerls/scans/<imagem>_<tag>__<scanner>__<timestamp>.json` por
+padrão. Isso evita que uma execução casual polua o repositório analisado com
+evidências e logs. O bloco `Details` abaixo da tabela aponta cada imagem para
+seus próprios arquivos:
 
 ```
 Details
   1. node:trixie-slim  Docker Hub
      link:     https://hub.docker.com/_/node?tab=tags&name=trixie-slim
-     trivy:    .dockerls/scans/node_trixie-slim__trivy__20260806T153113154282.json
-     grype:    .dockerls/scans/node_trixie-slim__grype__20260806T153119491147.json
+     trivy:    ~/.local/state/dockerls/scans/node_trixie-slim__trivy__20260806T153113154282.json
+     grype:    ~/.local/state/dockerls/scans/node_trixie-slim__grype__20260806T153119491147.json
   2. node:slim  Docker Hub
      link:     https://hub.docker.com/_/node?tab=tags&name=slim
-     trivy:    .dockerls/scans/node_trixie-slim__trivy__20260806T153113154282.json  (shared digest)
+     trivy:    ~/.local/state/dockerls/scans/node_trixie-slim__trivy__20260806T153113154282.json  (shared digest)
 ```
 
 `(shared digest)` marca evidências produzidas sob o nome de uma tag irmã: tags
@@ -1143,9 +1151,10 @@ Uma pontuação que não pode ser conferida é uma opinião. Toda execução dei
 material que permite refazer a conta.
 
 **JSON bruto de cada scan.** A saída completa do scanner é gravada em
-`.dockerls/scans/<imagem>_<tag>__<scanner>__<timestamp>.json`, e o bloco
-`Details` liga cada imagem aos arquivos que sustentam a nota dela — um por
-scanner que a mediu.
+`$XDG_STATE_HOME/dockerls/scans/...` ou, por padrão, em
+`~/.local/state/dockerls/scans/...`. O bloco `Details` liga cada imagem aos
+arquivos que sustentam a nota dela — um por scanner que a mediu. Defina
+`DOCKERLS_EVIDENCE_DIR` quando quiser guardar esses artefatos junto do projeto.
 
 **Manifesto por execução.** Cada execução grava um manifesto ligando cada
 pontuação exibida à sua evidência, com digest, contagens por severidade, status
@@ -1301,7 +1310,7 @@ make lint
 # Rodar o verificador de tipos
 make type-check
 
-# Rodar os testes
+# Rodar os testes; falha cedo com uma mensagem clara se os extras dev não estiverem instalados
 make test
 
 # Rodar a auditoria completa (lint + tipos + testes + segurança)
