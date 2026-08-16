@@ -13,6 +13,7 @@ from rich.progress import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from types import TracebackType
 
 
@@ -92,6 +93,35 @@ class RichScanObserver:
             self._task_id = self._progress.add_task(description, total=None)
         else:
             self._progress.update(self._task_id, description=description)
+
+    def phase_result(self, title: str, facts: Sequence[tuple[str, str]]) -> None:
+        """Print what a phase produced, above the live progress line.
+
+        Rendered as a small tree so a run reads as a sequence of accounted
+        steps rather than a spinner that may or may not be stuck:
+
+            Discovering tags
+            ├─ found            100
+            ├─ unique digests    84
+            └─ duplicates        16
+
+        Written through `self._console` (stderr), so it never mixes with
+        results on stdout and `dockerls recommend > out.txt` still yields a
+        clean file. When the display is disabled -- `--no-progress`, or
+        `--format json` -- nothing is emitted at all.
+        """
+        if self._progress is None or not facts:
+            return
+        width = max(len(label) for label, _ in facts)
+        # Leading blank line: consecutive phases run together otherwise, and
+        # in a CI log they are the only structure the reader gets.
+        lines = ["", f"[bold]{title}[/bold]"]
+        for index, (label, value) in enumerate(facts):
+            branch = "└─" if index == len(facts) - 1 else "├─"
+            lines.append(f"[dim]{branch}[/dim] {label:<{width}}  [cyan]{value}[/cyan]")
+        # `Progress.console.print` routes through the live display, which
+        # moves the bar down and prints above it instead of tearing it.
+        self._progress.console.print("\n".join(lines))
 
     def start(self, total: int) -> None:
         self._total = total

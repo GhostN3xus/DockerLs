@@ -12,6 +12,7 @@ from dockerls.application.dto.analysis import (
     AnalysisResult,
     BaselineCriteria,
     ImageAnalysis,
+    RunMetrics,
     UnverifiedImage,
 )
 from dockerls.application.services.progress import NullObserver
@@ -93,6 +94,7 @@ class RecommendImagesUseCase:
         self._log_file = log_file
         self._cache_ttl_seconds = cache_ttl_seconds
         self._analysis_fingerprint = self._compute_analysis_fingerprint()
+        self._metrics = RunMetrics()
 
     def _compute_analysis_fingerprint(self) -> str:
         """Identifica as entradas, fora a própria imagem, que mudam o
@@ -199,9 +201,31 @@ class RecommendImagesUseCase:
                 baseline=self._baseline(),
             )
 
+        self._observer.phase_result(
+            "Discovered tags",
+            [
+                ("found", str(len(tags))),
+                ("sources", ", ".join(_sources_of(tags)) or "none"),
+            ],
+        )
+
         analyses, unverified, errors = await self._scan_all(tags)
         errors = [*setup_errors, *errors]
         analyses.sort(key=lambda a: a.security_score, reverse=True)
+
+        # Reported after the fact rather than before: the cache-hit and
+        # scan counts are only known once the pass is done, and stating them
+        # up front would mean guessing at them.
+        self._observer.phase_result(
+            "Scanned candidates",
+            [
+                ("unique digests", str(self._metrics.unique_digests)),
+                ("duplicates collapsed", str(self._metrics.duplicates_collapsed)),
+                ("cache hits", str(self._metrics.cache_hits)),
+                ("scans performed", str(self._metrics.scans_performed)),
+                ("unverified", str(len(unverified))),
+            ],
+        )
 
         baseline_images = [
             a
@@ -233,6 +257,7 @@ class RecommendImagesUseCase:
             log_file=str(self._log_file or ""),
             baseline=self._baseline(),
             sources_searched=_sources_of(tags),
+            metrics=self._metrics,
         )
         result.evidence_manifest = await self._write_manifest(image_name, selected)
         return result
@@ -252,6 +277,10 @@ class RecommendImagesUseCase:
         def _dedup_key(image: DockerImage) -> str:
             return image.digest or image.full_reference
 
+        self._metrics.tags_discovered = len(tags)
+        self._metrics.unique_digests = len({_dedup_key(tag) for tag in tags})
+        self._metrics.workers = self._workers
+
         async def get_scan(image: DockerImage) -> Any:
             key = _dedup_key(image)
             lock = scan_locks.setdefault(key, asyncio.Lock())
@@ -260,6 +289,9 @@ class RecommendImagesUseCase:
                     return scan_cache[key]
                 async with semaphore:
                     scan = await self._scanner.scan(image.full_reference)
+                # Counted here rather than at the call site so a tag served
+                # from a sibling's digest is never counted as a scan.
+                self._metrics.scans_performed += 1
                 scan_cache[key] = scan
                 return scan
 
@@ -281,6 +313,7 @@ class RecommendImagesUseCase:
             try:
                 cached = await self._get_cached(image)
                 if cached:
+                    self._metrics.cache_hits += 1
                     analysis = cached
                     return cached
 
@@ -355,6 +388,7 @@ class RecommendImagesUseCase:
 
         if self._cross_validator is not None and self._cross_validator.enabled and selected:
             self._observer.phase(f"Cross-validating top {len(selected)} candidates")
+            self._metrics.cross_validations = len(selected)
             await self._cross_validator.validate(selected)
         _assert_verified(selected)
         for analysis in selected:

@@ -249,10 +249,40 @@ def _print_summary(result: AnalysisResult) -> None:
     if result.sources_searched:
         parts.append(f"[magenta]sources: {', '.join(result.sources_searched)}[/magenta]")
     console.print(" | ".join(parts))
+
+    work = _work_line(result)
+    if work:
+        # Second line rather than more fields on the first: the first line
+        # answers "what did it find", this one answers "what did it do",
+        # and cramming both together made neither readable at 80 columns.
+        console.print(work)
     if result.log_file:
         # Its own line: a wrapped path is a path the user cannot copy.
         console.print(f"[dim]log: {result.log_file}[/dim]", soft_wrap=True)
     console.print()
+
+
+def _work_line(result: AnalysisResult) -> str:
+    """Account for the work the run did, not just what it found.
+
+    "Analyzed 84/100" says nothing about whether those 84 cost 84 scans or
+    5, which is the difference between four minutes and twenty seconds. The
+    numbers were already being computed and thrown away.
+    """
+    m = result.metrics
+    if not m.tags_discovered:
+        return ""
+
+    parts = [f"scans: {m.scans_performed}"]
+    if m.cache_hits:
+        parts.append(f"cache: {m.cache_hits} hit ({m.cache_hit_rate:.0%})")
+    if m.duplicates_collapsed:
+        parts.append(f"deduped: {m.duplicates_collapsed}")
+    if m.cross_validations:
+        parts.append(f"cross-validated: {m.cross_validations}")
+    if m.workers:
+        parts.append(f"workers: {m.workers}")
+    return f"[dim]{' | '.join(parts)}[/dim]"
 
 
 def _hub_status(analysis: ImageAnalysis) -> str:

@@ -66,6 +66,40 @@ class UnverifiedImage(BaseModel):
     kind: str = "UNKNOWN"
 
 
+class RunMetrics(BaseModel):
+    """What the run actually did, as opposed to what it found.
+
+    The pipeline already knew every one of these numbers and discarded all
+    of them, so "why did that take four minutes" and "is the cache working"
+    were unanswerable from the outside. They are the difference between
+    tags *discovered* and scans *performed*, which the digest deduplication
+    and the cache can make very different.
+
+    Carried on the result rather than printed, so `--format json` and the
+    terminal report the same figures.
+    """
+
+    tags_discovered: int = 0
+    # Tags left after collapsing those that share a manifest digest. The gap
+    # between this and `tags_discovered` is what deduplication saved.
+    unique_digests: int = 0
+    cache_hits: int = 0
+    # Scanner invocations actually made, excluding cache hits and duplicates.
+    scans_performed: int = 0
+    cross_validations: int = 0
+    workers: int = 0
+
+    @property
+    def duplicates_collapsed(self) -> int:
+        return max(0, self.tags_discovered - self.unique_digests)
+
+    @property
+    def cache_hit_rate(self) -> float:
+        """Share of candidates answered from cache, 0.0-1.0."""
+        considered = self.cache_hits + self.scans_performed
+        return self.cache_hits / considered if considered else 0.0
+
+
 class AnalysisResult(BaseModel):
     query: str
     total_tags_scanned: int
@@ -81,6 +115,7 @@ class AnalysisResult(BaseModel):
     baseline: BaselineCriteria | None = None
     # Catalogues that returned at least one candidate for this query.
     sources_searched: list[str] = []
+    metrics: RunMetrics = Field(default_factory=RunMetrics)
 
     @property
     def unverified_count(self) -> int:
