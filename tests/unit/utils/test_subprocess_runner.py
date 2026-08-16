@@ -19,9 +19,7 @@ import pytest
 
 from dockerls.utils.subprocess_runner import run_capture
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32", reason="POSIX process semantics"
-)
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX process semantics")
 
 _SLEEPER = [sys.executable, "-c", "import time; time.sleep(30)"]
 _QUICK = [sys.executable, "-c", "import sys; sys.stdout.write('hi'); sys.exit(3)"]
@@ -102,9 +100,7 @@ class TestCancellationKillsTheChild:
 class TestUncooperativeChild:
     async def test_a_process_ignoring_sigterm_is_killed(self, monkeypatch):
         """The grace period is bounded: SIGTERM first, SIGKILL after."""
-        monkeypatch.setattr(
-            "dockerls.utils.subprocess_runner._TERMINATE_GRACE_SECONDS", 0.3
-        )
+        monkeypatch.setattr("dockerls.utils.subprocess_runner._TERMINATE_GRACE_SECONDS", 0.3)
         argv = [
             sys.executable,
             "-c",

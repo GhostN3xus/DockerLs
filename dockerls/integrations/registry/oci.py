@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -53,15 +54,52 @@ class OCIRegistryClient:
     Implements only the anonymous pull-scope token dance that public
     registries use: request the endpoint, and if it answers 401 with a
     Bearer challenge, fetch a token from the advertised realm and retry.
+
+    A listing is fetched **once per repository per run**. `recommend` asks
+    for the same listing many times over -- once during discovery, then once
+    more for every candidate whose tag `_verify_tags` confirms -- and each
+    call previously opened a fresh connection, ate a 401, fetched a token,
+    and re-downloaded a payload identical to the one it already had. For a
+    single repository with ten candidates that is 33 requests where 3 do the
+    job.
+
+    Three things close that gap, and they compose:
+
+    * One `httpx.AsyncClient` for the client's lifetime, so connections and
+      the TLS handshake are reused (HTTP keep-alive) instead of rebuilt.
+    * A per-repository result cache.
+    * A per-repository lock, so ten *concurrent* first calls collapse into
+      one request rather than ten -- a cache with no single-flight guard
+      would still stampede, because verification runs them in parallel.
+
+    The cache lives on the instance, so it lasts exactly one run and cannot
+    serve a listing from a previous invocation.
     """
 
     def __init__(self, host: str, timeout: int = 30):
         self._host = host
         self._timeout = timeout
+        self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
+        self._listings: dict[str, dict[str, Any] | None] = {}
+        self._listing_locks: dict[str, asyncio.Lock] = {}
 
     @property
     def host(self) -> str:
         return self._host
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            async with self._client_lock:
+                if self._client is None:
+                    self._client = httpx.AsyncClient(timeout=self._timeout, follow_redirects=True)
+        return self._client
+
+    async def close(self) -> None:
+        """Release the shared connection pool."""
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()
 
     async def _token(self, client: httpx.AsyncClient, challenge: str) -> str:
         realm, params = parse_www_authenticate(challenge)
@@ -76,24 +114,42 @@ class OCIRegistryClient:
 
     async def list_tags(self, repository: str) -> dict[str, Any] | None:
         """Return the raw `/v2/<repository>/tags/list` payload, or None when
-        the repository does not exist or cannot be reached."""
+        the repository does not exist or cannot be reached.
+
+        Memoised per repository for the lifetime of this client, including
+        the `None` outcome: a repository that does not exist should be asked
+        about once, not once per candidate.
+        """
+        if repository in self._listings:
+            return self._listings[repository]
+
+        lock = self._listing_locks.setdefault(repository, asyncio.Lock())
+        async with lock:
+            # A concurrent caller may have filled it while we waited.
+            if repository in self._listings:
+                return self._listings[repository]
+            payload = await self._fetch_tags(repository)
+            self._listings[repository] = payload
+            return payload
+
+    async def _fetch_tags(self, repository: str) -> dict[str, Any] | None:
         url = f"https://{self._host}/v2/{repository}/tags/list"
         try:
-            async with httpx.AsyncClient(timeout=self._timeout, follow_redirects=True) as client:
-                resp = await client.get(url)
-                if resp.status_code == 401:
-                    token = await self._token(client, resp.headers.get("WWW-Authenticate", ""))
-                    if not token:
-                        logger.warning(f"No anonymous token available for {self._host}")
-                        return None
-                    resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
-
-                if resp.status_code == 404:
-                    logger.info(f"Repository not found: {self._host}/{repository}")
+            client = await self._get_client()
+            resp = await client.get(url)
+            if resp.status_code == 401:
+                token = await self._token(client, resp.headers.get("WWW-Authenticate", ""))
+                if not token:
+                    logger.warning(f"No anonymous token available for {self._host}")
                     return None
-                resp.raise_for_status()
-                payload: dict[str, Any] = resp.json()
-                return payload
+                resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+
+            if resp.status_code == 404:
+                logger.info(f"Repository not found: {self._host}/{repository}")
+                return None
+            resp.raise_for_status()
+            payload: dict[str, Any] = resp.json()
+            return payload
         except (httpx.HTTPError, ValueError) as e:
             logger.warning(f"Tag listing failed for {self._host}/{repository}: {e}")
             return None

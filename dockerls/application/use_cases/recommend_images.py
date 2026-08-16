@@ -134,6 +134,7 @@ class RecommendImagesUseCase:
             return await self._execute(image_name, limit)
         finally:
             await self._close_scanners()
+            await self._close_repositories()
 
     @staticmethod
     def _fallback_pool(analyses: list[ImageAnalysis]) -> list[ImageAnalysis]:
@@ -423,6 +424,28 @@ class RecommendImagesUseCase:
                     await close()
                 except Exception as e:  # pragma: no cover - cleanup must not mask results
                     logger.warning(f"Scanner cleanup failed: {e}")
+
+    async def _close_repositories(self) -> None:
+        """Release the HTTP connection pools the image sources hold.
+
+        The clients keep one `httpx.AsyncClient` alive for the whole run so
+        connections are reused; that makes closing them the caller's job.
+        Duck-typed like `_close_scanners`, so a repository that has no pool
+        (or a test double) needs no cooperation.
+        """
+        sources = getattr(self._repository, "sources", None)
+        if not isinstance(sources, list | tuple):
+            # `CompositeImageRepository` exposes a real list; anything else
+            # (a single client, a test double whose attributes are
+            # auto-created) is treated as the one source it is.
+            sources = [self._repository]
+        for source in sources:
+            close = getattr(source, "close", None)
+            if callable(close):
+                try:
+                    await close()
+                except Exception as e:  # pragma: no cover - cleanup must not mask results
+                    logger.warning(f"Repository cleanup failed: {e}")
 
     async def _get_cached(self, image: DockerImage) -> ImageAnalysis | None:
         key = image.full_reference

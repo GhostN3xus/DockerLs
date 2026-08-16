@@ -51,16 +51,43 @@ class DockerHubClient(ImageRepositoryInterface):
         self._max_attempts = max_attempts
         self._backoff_base = backoff_base
         self._tag_ttl_seconds = tag_ttl_seconds
+        self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
+        # In-flight `tag_exists` checks, keyed by cache key. `_verify_tags`
+        # runs up to ten of them concurrently and several candidates can
+        # share a tag, so without this a cold cache means every one of them
+        # goes to the network before the first result is written back --
+        # a textbook stampede against a rate-limited API.
+        self._tag_checks: dict[str, asyncio.Future[bool | None]] = {}
 
     async def _get_client(self) -> httpx.AsyncClient:
-        headers = {"Accept": "application/json"}
-        if self._auth_token:
-            headers["Authorization"] = f"Bearer {self._auth_token}"
-        return httpx.AsyncClient(
-            timeout=self._timeout,
-            headers=headers,
-            follow_redirects=True,
-        )
+        """One client for this repository's lifetime.
+
+        A fresh `AsyncClient` per call meant a new connection pool and a new
+        TLS handshake for every page of a listing and every tag check, with
+        nothing kept alive between them. Sharing one gives HTTP keep-alive
+        across the whole run.
+        """
+        if self._client is None:
+            async with self._client_lock:
+                if self._client is None:
+                    self._client = httpx.AsyncClient(
+                        timeout=self._timeout,
+                        headers={"Accept": "application/json"},
+                        follow_redirects=True,
+                    )
+        return self._client
+
+    def _auth_headers(self) -> dict[str, str]:
+        """Per-request auth, so a token obtained by a later `authenticate()`
+        applies to a client that was already created."""
+        return {"Authorization": f"Bearer {self._auth_token}"} if self._auth_token else {}
+
+    async def close(self) -> None:
+        """Release the shared connection pool."""
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()
 
     async def authenticate(self) -> bool:
         if not self._username or not self._token:
@@ -95,7 +122,7 @@ class DockerHubClient(ImageRepositoryInterface):
         return resp
 
     async def _get_once(self, client: httpx.AsyncClient, url: str) -> httpx.Response:
-        resp = await client.get(url)
+        resp = await client.get(url, headers=self._auth_headers())
         if resp.status_code == 429:
             retry_after = resp.headers.get("Retry-After")
             wait_s = float(retry_after) if retry_after and retry_after.isdigit() else 2.0
@@ -133,49 +160,49 @@ class DockerHubClient(ImageRepositoryInterface):
             f"?page_size={page_size}&ordering=last_updated"
         )
 
-        async with await self._get_client() as client:
-            while url and len(tags) < limit:
-                try:
-                    resp = await self._get_json(client, url)
-                    if resp.status_code == 404:
-                        logger.warning(f"Image not found: {safe_name}")
-                        return []
-                    resp.raise_for_status()
-                    data = resp.json()
+        client = await self._get_client()
+        while url and len(tags) < limit:
+            try:
+                resp = await self._get_json(client, url)
+                if resp.status_code == 404:
+                    logger.warning(f"Image not found: {safe_name}")
+                    return []
+                resp.raise_for_status()
+                data = resp.json()
 
-                    for tag_data in data.get("results", []):
-                        tag_name = tag_data.get("name", "")
-                        if not tag_name:
-                            continue
+                for tag_data in data.get("results", []):
+                    tag_name = tag_data.get("name", "")
+                    if not tag_name:
+                        continue
 
-                        last_updated = None
-                        lu_str = tag_data.get("last_updated")
-                        if lu_str:
-                            with contextlib.suppress(ValueError):
-                                last_updated = datetime.fromisoformat(lu_str.replace("Z", "+00:00"))
+                    last_updated = None
+                    lu_str = tag_data.get("last_updated")
+                    if lu_str:
+                        with contextlib.suppress(ValueError):
+                            last_updated = datetime.fromisoformat(lu_str.replace("Z", "+00:00"))
 
-                        size, digest, arch, archs = self._parse_images(tag_data.get("images", []))
+                    size, digest, arch, archs = self._parse_images(tag_data.get("images", []))
 
-                        tags.append(
-                            DockerImage(
-                                name=safe_name,
-                                tag=tag_name,
-                                digest=digest,
-                                size_bytes=size,
-                                architecture=arch,
-                                available_architectures=archs,
-                                last_updated=last_updated,
-                                is_official=namespace == "library",
-                            )
+                    tags.append(
+                        DockerImage(
+                            name=safe_name,
+                            tag=tag_name,
+                            digest=digest,
+                            size_bytes=size,
+                            architecture=arch,
+                            available_architectures=archs,
+                            last_updated=last_updated,
+                            is_official=namespace == "library",
                         )
+                    )
 
-                    url = data.get("next")
-                except httpx.HTTPError as e:
-                    # Network blips or non-429 API errors degrade to a
-                    # partial result (whatever pages already fetched)
-                    # instead of crashing the whole search.
-                    logger.error(f"Docker Hub API error, returning partial results: {e}")
-                    break
+                url = data.get("next")
+            except httpx.HTTPError as e:
+                # Network blips or non-429 API errors degrade to a
+                # partial result (whatever pages already fetched)
+                # instead of crashing the whole search.
+                logger.error(f"Docker Hub API error, returning partial results: {e}")
+                break
 
         return tags[:limit]
 
@@ -186,6 +213,11 @@ class DockerHubClient(ImageRepositoryInterface):
         answer is unknown -- the image is not hosted on Docker Hub, or the
         network call failed. `None` must not be reported to the user as
         "tag missing"; it means "not verified".
+
+        Concurrent checks for the same tag are coalesced onto one request:
+        `_verify_tags` fires up to ten of these at once, and on a cold cache
+        every one of them would otherwise reach the network before the first
+        answer was written back.
         """
         url = build_tag_api_url(image_name, tag)
         if not url:
@@ -197,9 +229,30 @@ class DockerHubClient(ImageRepositoryInterface):
             if isinstance(cached, bool):
                 return cached
 
+        in_flight = self._tag_checks.get(cache_key)
+        if in_flight is not None:
+            return await asyncio.shield(in_flight)
+
+        future: asyncio.Future[bool | None] = asyncio.get_running_loop().create_future()
+        self._tag_checks[cache_key] = future
         try:
-            async with await self._get_client() as client:
-                resp = await self._get_json(client, url)
+            result = await self._check_tag(image_name, tag, url, cache_key)
+        except BaseException as e:
+            future.set_exception(e)
+            # Nobody may be awaiting this future; without retrieving the
+            # exception asyncio logs a spurious "never retrieved" warning.
+            future.exception()
+            raise
+        else:
+            future.set_result(result)
+            return result
+        finally:
+            self._tag_checks.pop(cache_key, None)
+
+    async def _check_tag(self, image_name: str, tag: str, url: str, cache_key: str) -> bool | None:
+        try:
+            client = await self._get_client()
+            resp = await self._get_json(client, url)
         except httpx.HTTPError as e:
             logger.warning(f"Could not verify tag {image_name}:{tag} on Docker Hub: {e}")
             return None
@@ -225,32 +278,32 @@ class DockerHubClient(ImageRepositoryInterface):
 
         url = f"{self.BASE_URL}/repositories/{namespace}/{repo}/tags/{tag}"
 
-        async with await self._get_client() as client:
-            try:
-                resp = await self._get_json(client, url)
-                if resp.status_code == 404:
-                    return None
-                resp.raise_for_status()
-                data = resp.json()
-
-                last_updated = None
-                lu_str = data.get("last_updated")
-                if lu_str:
-                    with contextlib.suppress(ValueError):
-                        last_updated = datetime.fromisoformat(lu_str.replace("Z", "+00:00"))
-
-                size, digest, arch, archs = self._parse_images(data.get("images", []))
-
-                return DockerImage(
-                    name=safe_name,
-                    tag=tag,
-                    digest=digest,
-                    size_bytes=size,
-                    architecture=arch,
-                    available_architectures=archs,
-                    last_updated=last_updated,
-                    is_official=namespace == "library",
-                )
-            except httpx.HTTPError as e:
-                logger.error(f"Failed to get metadata for {safe_name}:{tag}: {e}")
+        client = await self._get_client()
+        try:
+            resp = await self._get_json(client, url)
+            if resp.status_code == 404:
                 return None
+            resp.raise_for_status()
+            data = resp.json()
+
+            last_updated = None
+            lu_str = data.get("last_updated")
+            if lu_str:
+                with contextlib.suppress(ValueError):
+                    last_updated = datetime.fromisoformat(lu_str.replace("Z", "+00:00"))
+
+            size, digest, arch, archs = self._parse_images(data.get("images", []))
+
+            return DockerImage(
+                name=safe_name,
+                tag=tag,
+                digest=digest,
+                size_bytes=size,
+                architecture=arch,
+                available_architectures=archs,
+                last_updated=last_updated,
+                is_official=namespace == "library",
+            )
+        except httpx.HTTPError as e:
+            logger.error(f"Failed to get metadata for {safe_name}:{tag}: {e}")
+            return None
