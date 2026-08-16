@@ -96,6 +96,7 @@ FRAMEWORK_INVOKED = {
     "settings_customise_sources",  # pydantic-settings hook
     "cache_clear",  # typer subcommand
     "cache_cleanup",  # typer subcommand
+    "cache_stats",  # typer subcommand
     "recommend",
     "analyze",
     "advisor",

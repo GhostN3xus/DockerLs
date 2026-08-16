@@ -1,5 +1,11 @@
 # DockerLs
 
+[![CI](https://github.com/GhostN3xus/DockerLs/actions/workflows/ci.yml/badge.svg)](https://github.com/GhostN3xus/DockerLs/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/GhostN3xus/DockerLs/actions/workflows/codeql.yml/badge.svg)](https://github.com/GhostN3xus/DockerLs/actions/workflows/codeql.yml)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Typed](https://img.shields.io/badge/mypy-strict-blue)](pyproject.toml)
+
 Consultor de segurança de imagens Docker para uso corporativo. Descobre as imagens
 Docker mais seguras disponíveis no Docker Hub escaneando vulnerabilidades,
 verificando status de fim de vida (EOL) e produzindo planos de correção acionáveis.
@@ -9,15 +15,44 @@ melhor imagem para produção e diz exatamente como corrigir o que encontra.
 
 ---
 
+## Por que o DockerLs?
+
+Um scanner responde *"quantas CVEs esta imagem tem?"*. Essa quase nunca é a
+pergunta que você precisa responder. As perguntas reais são *"qual imagem eu
+deveria usar?"* e *"o que eu faço com o que foi encontrado?"* — e é sobre elas
+que o DockerLs foi construído.
+
+| | Scanner comum | DockerLs |
+|---|---|---|
+| Escopo | uma imagem que você já escolheu | **todas as tags candidatas**, ranqueadas |
+| Fontes | um registry | Docker Hub + Chainguard + Distroless, no mesmo pipeline |
+| Confiança | a palavra de um scanner | **validação cruzada** com um segundo scanner; divergência material é sinalizada, não escondida |
+| EOL | fora do escopo | penaliza no score, e uma base EOL nunca é `production ready` |
+| Exploração real | só severidade | CISA KEV + EPSS pesam no score |
+| Falha técnica | vira "0 vulnerabilidades" | vira **`Unverified`**, com causa classificada e exit code de erro |
+| Correção | lista de CVEs | plano de remediação com versões corrigidas **vindas do scanner** |
+| Prova | um número | caminho do JSON bruto de cada scan + manifesto por execução |
+
+O princípio que organiza tudo isso: **uma imagem que não pôde ser medida nunca é
+apresentada como uma imagem segura.** Um scan que falhou, expirou ou saiu pela
+metade manda a tag para a seção `Unverified` — ela não recebe pontuação, não
+recebe nível e não entra na recomendação.
+
+---
+
 ## Índice
 
+- [Por que o DockerLs?](#por-que-o-dockerls)
 - [Instalação](#instalação)
 - [Início rápido](#início-rápido)
 - [Comandos](#comandos)
 - [Exit codes](#exit-codes)
+- [Como a recomendação funciona](#como-a-recomendação-funciona)
 - [Algoritmo de pontuação](#algoritmo-de-pontuação)
 - [Níveis de segurança](#níveis-de-segurança)
 - [Modo alternativo](#modo-alternativo)
+- [Performance](#performance)
+- [Evidências e reprodutibilidade](#evidências-e-reprodutibilidade)
 - [Arquitetura](#arquitetura)
 - [Configuração](#configuração)
 - [Uso com Docker](#uso-com-docker)
@@ -27,6 +62,27 @@ melhor imagem para produção e diz exatamente como corrigir o que encontra.
 - [Solução de problemas](#solução-de-problemas)
 - [Perguntas frequentes](#perguntas-frequentes)
 - [Licença](#licença)
+
+---
+
+## Comandos em resumo
+
+| Comando | O que faz | Exit codes |
+|---|---|---|
+| [`search`](#search) | Lista as tags disponíveis de uma imagem | `0` / `1` |
+| [`recommend`](#recommend) | Ranqueia as tags mais seguras e recomenda uma | `0` `1` `2` `3` |
+| [`advisor`](#advisor) | Plano de correção completo para a melhor imagem | `0` / `1` |
+| [`analyze`](#analyze) | Análise profunda de uma tag: CVEs, CVSS, origem, correção | `0` `1` `2` |
+| [`compare`](#compare) | Compara duas ou mais imagens lado a lado | `0` / `1` |
+| [`sbom`](#sbom) | Gera SBOM (CycloneDX ou SPDX) via Trivy | `0` / `1` |
+| [`export`](#export) | Exporta o relatório em JSON/CSV/HTML/Markdown/SARIF | `0` / `1` |
+| [`analyze-dockerfile`](#analyze-dockerfile) | Valida um Dockerfile contra regras de hardening | `0` `1` `2` |
+| [`build`](#build) | Valida, constrói, escaneia e (opcionalmente) publica | `0` `1` `2` |
+| [`doctor`](#doctor) | Checa as dependências locais (scanners) | `0` / `1` |
+| [`health`](#health) | Checa a conectividade com os serviços externos | `0` / `1` |
+| [`cache`](#cache) | Inspeciona e limpa o cache de análises | `0` / `1` |
+| [`login`](#login) / [`logout`](#logout) | Credenciais do Docker Hub no keyring do sistema | `0` / `1` |
+| [`version`](#version) | Versão instalada | `0` |
 
 ---
 
@@ -85,12 +141,40 @@ dockerls export node --format json --output report.json
 
 ### search
 
-Busca tags disponíveis no Docker Hub.
+Busca tags disponíveis no Docker Hub. Não escaneia nada — é a forma barata de ver
+o que existe antes de decidir o que medir.
 
 ```bash
 dockerls search node
 dockerls search python --limit 50
 ```
+
+Saída real (`dockerls search node --limit 5`):
+
+```
+                               Tags for node
+┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━┓
+┃ Tag                 ┃ Size (MB) ┃ Architecture ┃ Last Updated ┃ Official ┃
+┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━┩
+│ trixie-slim         │      80.8 │ amd64        │ 2026-08-06   │   Yes    │
+│ trixie              │     422.4 │ amd64        │ 2026-08-06   │   Yes    │
+│ slim                │      80.8 │ amd64        │ 2026-08-06   │   Yes    │
+│ latest              │     422.4 │ amd64        │ 2026-08-06   │   Yes    │
+│ current-trixie-slim │      80.8 │ amd64        │ 2026-08-06   │   Yes    │
+└─────────────────────┴───────────┴──────────────┴──────────────┴──────────┘
+
+Total: 5 tags
+```
+
+**Como ler.** As tags saem ordenadas por `last_updated` (mais recentes primeiro),
+que é a ordem em que o Docker Hub as devolve. `Size` e `Architecture` descrevem o
+manifesto **amd64** quando ele existe, e o primeiro manifesto disponível caso
+contrário. Repare que `trixie-slim`, `slim` e `current-trixie-slim` reportam o
+mesmo tamanho: são apelidos do mesmo digest, e é exatamente essa redundância que
+o `recommend` colapsa antes de escanear.
+
+**Exit codes:** `0` com tags encontradas, `1` quando não há nenhuma tag ou a
+referência é malformada.
 
 ### recommend
 
@@ -114,9 +198,16 @@ de portão em CI:
 | Código de saída | Significado                                             |
 |-----------------|---------------------------------------------------------|
 | 0               | Encontrou imagem que atende ao baseline                  |
-| 1               | Erro grave, ou limite de `--fail-on` foi violado         |
-| 2               | Nenhuma imagem no baseline, mas há alternativas          |
-| 3               | Nada utilizável foi encontrado                           |
+| 1               | Erro operacional: nenhuma tag encontrada, **nenhuma tag pôde ser escaneada**, configuração inválida, ou `--fail-on` violado |
+| 2               | Nenhuma imagem no baseline, mas há alternativas ranqueadas |
+| 3               | Tags foram escaneadas e nenhuma delas serve               |
+
+A diferença entre `1` e `3` é deliberada e importa num portão de CI. `3` é um
+**veredito**: as candidatas foram medidas e nenhuma passou. `1` é "não sei" —
+inclui o caso em que tags foram descobertas mas nenhuma chegou a ser escaneada
+(scanner ausente, banco de vulnerabilidades indisponível, rate limit). Um pipeline
+que trata os dois como a mesma coisa não consegue distinguir uma infraestrutura
+quebrada de um catálogo de imagens ruim.
 
 `advisor` usa apenas `0` (produziu um plano) e `1` (não havia nada sobre o que
 aconselhar): ele reporta uma única imagem, então "baseline" e "alternativa" não
@@ -153,22 +244,64 @@ não passa nos três, ela é reportada à parte e nunca recebe pontuação:
    jeito ou de outro, a coluna `Tag` reflete uma resposta real do registry, nunca
    uma string montada.
 
-A execução abre com um resumo de uma linha: quantas tags foram analisadas versus
-puladas, quais catálogos foram consultados, e o caminho do arquivo de log:
+A execução abre com duas linhas de resumo. A primeira diz **o que foi
+encontrado**; a segunda, **quanto trabalho custou**:
 
 ```
 OK 12/24 analyzed | X 12 skipped (technical error) | sources: Docker Hub, Chainguard, Distroless
+scans: 9 | cache: 3 hit (25%) | deduped: 12 | cross-validated: 5 | workers: 10
 log: logs/dockerls_2026-08-06_13-36-15.log
 ```
+
+A segunda linha existe porque `12/24 analyzed` não diz se aquilo custou 24 scans
+ou 9. Aqui custou 9: doze tags foram colapsadas por apontarem para digests já
+vistos, três vieram do cache, e apenas as nove restantes chegaram ao scanner. Os
+mesmos números saem em `--format json`, sob a chave `metrics`.
 
 Quando nada atinge o baseline, os critérios exatos são impressos em vez de apenas
 o veredito:
 
 ```
-No image found matching baseline.
+No image meets the baseline.
 Baseline: 0 Critical, 0 High, 5 Medium (and not EOL).
-No image met it -- showing the closest alternatives.
+Showing the best candidates found -- all of them below target.
 ```
+
+E quando **nada pôde ser medido**, a saída diz isso com todas as letras em vez de
+fingir um veredito. Saída real, numa máquina sem scanner instalado
+(`dockerls recommend node --limit 3 --no-hardened`):
+
+```
+OK 0/3 analyzed | X 3 skipped (technical error) | sources: Docker Hub
+scans: 2 | deduped: 1 | workers: 10
+log: logs/dockerls_2026-08-16_19-09-16.log
+
+No image could be scanned.
+All 3 candidate(s) failed with: SCANNER_MISSING
+
+Suggested action
+  Install Trivy or Grype, then re-run. `dockerls doctor` checks for both.
+
+This is a technical failure, not a security verdict: nothing was measured, so
+nothing can be said about these images.
+
+! Unverified (technical error)
+  These tags were never scored -- no successful scan, no recommendation.
+  Causes: SCANNER_MISSING x3
+  node:trixie-slim  SCANNER_MISSING: 'trivy' was not found on PATH. Install it ...
+  node:trixie       SCANNER_MISSING: 'trivy' was not found on PATH. Install it ...
+  node:slim         SCANNER_MISSING: 'trivy' was not found on PATH. Install it ...
+  Run with --verbose for the full scanner output.
+```
+
+Isso termina em **`1`** (erro operacional), nunca em `3`. O código `3` significa
+"procurei e não achei nada utilizável" — uma afirmação sobre as *imagens*, que um
+portão de CI tem o direito de tratar como veredito. Aqui nada foi medido, e
+reportar isso como veredito seria a única troca que uma ferramenta de segurança
+não pode fazer.
+
+Repare também em `deduped: 1`: das três tags, duas apontavam para o mesmo
+manifesto, então foram feitos dois scans e não três.
 
 #### Fontes de imagens
 
@@ -382,11 +515,45 @@ dockerls logout
 
 ### doctor
 
-Verifica as dependências do sistema.
+Verifica as dependências locais. É o pré-voo de um job de CI: rode antes de
+escanear qualquer coisa.
 
 ```bash
 dockerls doctor
 ```
+
+Saída real, numa máquina sem scanner nenhum:
+
+```
+DockerLs System Check
+
+  trivy (Primary vulnerability scanner)          Not found
+  grype (Fallback scanner / cross-validation)    Not found
+  httpx                                          Available
+  keyring                                        Available
+
+DockerLs cannot measure anything on this machine.
+
+Cause
+  No vulnerability scanner is installed (needs Trivy or Grype).
+
+Suggested action
+  Install Trivy:  https://aquasecurity.github.io/trivy
+  or install Grype: https://github.com/anchore/grype
+
+Without a scanner, `recommend`, `analyze` and `advisor` report every tag as
+unverified rather than as safe.
+```
+
+**Como ler.** O requisito é *um* scanner, não o Trivy especificamente — o
+`ScannerFactory` funciona só com o Grype. Com apenas um dos dois instalados o
+comando passa (`0`) e avisa que a validação cruzada fica indisponível; sem
+nenhum, reprova.
+
+**Exit codes:** `0` quando dá para medir, `1` quando não dá. Ele **reprova de
+verdade**: um `doctor` que imprime "faltam componentes" e sai `0` deixa o runner
+passar no próprio pré-voo e falhar depois, dentro do scan, onde a causa é muito
+menos óbvia.
 
 ### health
 
@@ -399,19 +566,66 @@ portão em CI.
 dockerls health
 ```
 
+Saída real:
+
+```
+Service Health Check
+
+  Docker Hub API          OK (200)
+  Chainguard (cgr.dev)    OK (200)
+  Distroless (gcr.io)     OK (200)
+  endoflife.date          OK (200)
+  CISA KEV                OK (200)
+  EPSS (FIRST)            OK (200)
+
+All services reachable.
+```
+
+Cada endpoint da lista é um serviço do qual a ferramenta realmente depende **e**
+que responde 2xx quando saudável. Um serviço inacessível vira
+`Unreachable: ConnectError` e a execução termina em `1`; os demais continuam
+sendo checados, então uma indisponibilidade não esconde as outras.
+
+**Exit codes:** `0` com tudo acessível, `1` com qualquer serviço degradado.
+
 ### cache
 
-Gerencia o cache de scans.
+Inspeciona e limpa o cache de análises.
 
 ```bash
-dockerls cache clear
-dockerls cache cleanup
+dockerls cache stats     # o que o cache está guardando
+dockerls cache cleanup   # remove só as entradas vencidas
+dockerls cache clear     # esvazia tudo
 ```
+
+Saída real de `dockerls cache stats`:
+
+```
+  Location                 /root/.cache/dockerls/cache.db
+  Entries                  0
+  Expired (reclaimable)    0
+  Size on disk             44.0 KB
+```
+
+**Como ler.** As entradas vencem preguiçosamente — uma linha velha é descartada
+quando alguém tenta lê-la de novo. Uma tag que ninguém consulta mais nunca é
+lida, então fica ocupando espaço: `Expired (reclaimable)` é exatamente quanto o
+`cleanup` recuperaria agora. `Size on disk` inclui o arquivo `-wal`, que entre
+checkpoints pode conter a maior parte dos dados.
+
+O cache é chaveado pelo **digest do manifesto**, não pela tag, e a chave carrega
+uma versão de schema. Um rebuild upstream de `node:22-alpine` não é servido pela
+entrada antiga, e uma entrada gravada por uma versão anterior do DockerLs nunca é
+lida como se fosse atual.
 
 ### version
 
 ```bash
 dockerls version
+```
+
+```
+DockerLs v1.1.0
 ```
 
 ### analyze-dockerfile
@@ -425,7 +639,85 @@ dockerls analyze-dockerfile ./app/Dockerfile --no-suggestions
 dockerls analyze-dockerfile . --format json
 ```
 
-Termina com código `2` se algum check falhar (`errors > 0`). Avisos não reprovam.
+Saída real, contra este Dockerfile deliberadamente ruim:
+
+```dockerfile
+FROM node:latest
+RUN apt-get update && apt-get install -y curl
+ENV API_TOKEN=supersecret123
+COPY . /app
+CMD ["node", "/app/index.js"]
+```
+
+```
+╭────────────────────────────╮
+│ Dockerfile Analysis Report │
+│ Dockerfile.demo            │
+╰────────────────────────────╯
+
+Summary: ✅ 2 passed | ⚠️ 6 warnings | ❌ 3 errors
+
+                              Validation Checks
+┏━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┓
+┃ Status   ┃ Check                ┃ Message                                 ┃ Severity ┃
+┡━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━┩
+│ ❌ FAIL  │ base_image_pinned    │ Base image uses 'latest' tag or no tag  │   HIGH   │
+│          │                      │ (implies latest)                        │          │
+│ ❌ FAIL  │ non_root_user        │ Container runs as root (no USER         │   HIGH   │
+│          │                      │ directive or USER root)                 │          │
+│ ⚠️ WARN  │ multi_stage_build    │ Single-stage build detected             │  MEDIUM  │
+│ ❌ FAIL  │ secrets_not_in_env   │ Potential secrets in ENV: API_TOKEN     │ CRITICAL │
+│ ⚠️ WARN  │ package_cache_clean  │ Package manager cache not cleaned       │  MEDIUM  │
+│ ⚠️ WARN  │ healthcheck_present  │ No HEALTHCHECK directive                │   LOW    │
+│ ⚠️ WARN  │ security_labels      │ Missing security labels:                │   LOW    │
+│          │                      │ security.scanner, maintainer            │          │
+│ ⚠️ WARN  │ minimal_base         │ Base image may not be minimal (consider │  MEDIUM  │
+│          │                      │ Alpine or Distroless)                   │          │
+│ ✅ PASS  │ no_sudo              │ No sudo usage detected                  │   INFO   │
+│ ➖ SKIP  │ entrypoint_exec_form │ No ENTRYPOINT directive to check         │   INFO   │
+│ ✅ PASS  │ shell_usage          │ CMD uses exec form                      │   INFO   │
+│ ⚠️ WARN  │ dockerignore_exists  │ .dockerignore not found                 │   LOW    │
+└──────────┴──────────────────────┴─────────────────────────────────────────┴──────────┘
+
+╭────────────────────────╮
+│ Security Score: 30/100 │
+│ Tier: C                │
+│ Production Ready: No   │
+╰────────────────────────╯
+
+╭────────────────────╮
+│ 💡 Recommendations │
+╰────────────────────╯
+
+#1. Upgrade base image
+   Use a pinned, minimal base image
+   Current: node:latest
+   Fix: FROM node:22-alpine or FROM chainguard/node:latest-dev
+   Reason: Pinned versions ensure reproducibility; minimal bases reduce attack surface
+
+#2. Add non-root user
+   Container should not run as root
+   Current: No USER directive
+   Fix: RUN adduser -D appuser && USER appuser
+   Reason: Running as root increases impact of container breakout
+
+#3. Remove secrets from ENV
+   Secrets in ENV are visible in image history
+   Current: Secrets: API_TOKEN
+   Fix: Use BuildKit secrets: RUN --mount=type=secret,id=token
+   Reason: ENV values persist in all layers and can be extracted
+```
+
+(sete recomendações no total; as quatro restantes foram omitidas aqui)
+
+**Como ler.** `FAIL` reprova, `WARN` não. Cada recomendação traz o estado atual,
+a correção concreta e o motivo — a intenção é que a linha possa ser colada no
+Dockerfile, não que sirva de lembrete genérico. `SKIP` significa que a diretiva
+não existe para ser checada, e não que ela passou.
+
+**Exit codes:** `2` quando algum check falha (`errors > 0`), `1` quando o
+Dockerfile não existe ou não pôde ser lido, `0` quando passa. Avisos nunca
+reprovam.
 
 ### build
 
@@ -451,6 +743,58 @@ dockerls build -t minha-app:1.0 --fail-on high --push .
 # Templates hardened disponíveis para --base
 dockerls build --list-templates
 ```
+
+Saída real de `dockerls build demoapp --validate-only` (mesmo Dockerfile da seção
+anterior), com o rodapé que fecha a validação:
+
+```
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ ❌ Validation Failed                                                         │
+│                                                                              │
+│ Dockerfile validation failed: 3 error(s) -- base_image_pinned: Base image     │
+│ uses 'latest' tag or no tag (implies latest); non_root_user: Container runs   │
+│ as root (no USER directive or USER root); secrets_not_in_env: Potential       │
+│ secrets in ENV: API_TOKEN                                                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+Exit code: `2`. Nada foi construído.
+
+A mesma execução com `--ci-mode` produz JSON estruturado em stdout, que é o que o
+pipeline consome (saída real, truncada):
+
+```json
+{
+  "status": "FAILED",
+  "exit_code": 2,
+  "report": {
+    "build_id": "0a822d4afbd9c950",
+    "timestamp": "2026-08-16T19:12:06.007864+00:00",
+    "image": "",
+    "dockerfile_path": "demoapp/Dockerfile",
+    "security_score": 30,
+    "security_tier": "C",
+    "validation": {
+      "dockerfile_path": "demoapp/Dockerfile",
+      "passed": 2,
+      "warnings": 6,
+      "errors": 3,
+      "checks": [
+        {
+          "check": "base_image_pinned",
+          "status": "FAIL",
+          "message": "Base image uses 'latest' tag or no tag (implies latest)",
+          "severity": "HIGH",
+          "line": null
+        }
+      ]
+    }
+  }
+}
+```
+
+Repare que o `exit_code` também vem **dentro** do documento: um consumidor que já
+capturou o stdout não precisa correlacionar com o status do processo.
 
 `--validate-only` e `--suggest-hardening` renderizam a mesma tabela de checks que
 `analyze-dockerfile`, com o resumo das regras violadas ao final. Em `--ci-mode` a
@@ -499,6 +843,61 @@ achei alternativas" é um desfecho que `0`/`1`/`2` não sabem expressar, então
 (`search`, `compare`, `analyze`, `advisor`, `sbom`, `export`, `login`, `logout`,
 `cache`) usam apenas `0` para sucesso e `1` para falha; `health` usa `1` para
 "algum serviço degradado".
+
+---
+
+## Como a recomendação funciona
+
+O pipeline, na ordem em que roda. Cada etapa existe para reduzir trabalho da
+seguinte ou para impedir que um resultado não comprovado chegue à tabela.
+
+```
+1. Descobrir       Docker Hub + Chainguard + Distroless, em paralelo.
+   │               Assinaturas cosign, atestados, SBOMs, apelidos de arquitetura
+   │               e duplicatas fixadas por commit são filtrados aqui.
+   ▼
+2. Deduplicar      Tags que compartilham um digest de manifesto viram uma só
+   │               unidade de trabalho.
+   ▼
+3. Consultar       Análise em cache, chaveada por digest + regras de ignore
+   │  o cache      ativas. Um hit pula direto para a etapa 6.
+   ▼
+4. Escanear        Só o que sobrou. Trivy como principal, Grype como fallback
+   │               por scan. Um scan que falha NÃO vira zero: vira Unverified.
+   ▼
+5. Enriquecer      EOL (endoflife.date), CISA KEV e EPSS.
+   │
+   ▼
+6. Pontuar         SecurityScore -> SecurityTier -> RemediationScore.
+   │
+   ▼
+7. Verificar       A tag existe mesmo no registry de origem? Isso vem ANTES da
+   │  a tag        validação cruzada, para não gastar um scan secundário em quem
+   │               vai cair -- e para que um candidato promovido no lugar de um
+   │               descartado não entre na tabela sem ter sido checado.
+   ▼
+8. Validar         Os melhores candidatos são reescaneados com o segundo
+   │  cruzado      scanner. Divergência material vira `!disputed`.
+   ▼
+9. Ranquear        Baseline atingido -> Recommended Images.
+                   Baseline não atingido -> as melhores candidatas mesmo assim,
+                   marcadas como abaixo do alvo.
+```
+
+**O portão final.** Antes de qualquer coisa sair do use case, a lista selecionada
+é reconferida: nenhuma imagem sem scan concluído e com timestamp pode ser
+apresentada como recomendação. Se alguma passasse, isso seria um erro de
+programação e a execução falha alto em vez de recomendar algo não medido.
+
+**Por que a imagem venceu.** A tabela responde isso em colunas: `Score` e `Tier`
+dizem o veredito, `C/H/M` diz o que foi medido, `Fix` diz quanto disso tem
+correção disponível, `Rem` diz o quão remediável é, `Source` diz de que catálogo
+veio e `Tag` diz que o registry confirmou a existência dela. O bloco `Details`
+abaixo aponta cada linha para o JSON bruto que a sustenta.
+
+**O que ainda não está resolvido** aparece explicitamente: `! Requires review`
+lista os níveis que obrigam a uma decisão humana, `! Scanner divergence` lista as
+pontuações contestadas, e `! Unverified` lista o que não pôde ser medido.
 
 ---
 
@@ -637,6 +1036,140 @@ retorna resultado vazio. Em vez disso, ele:
 
 ---
 
+## Performance
+
+O custo de uma execução do `recommend` é dominado por duas coisas: chamadas de
+rede aos registries e processos de scanner. Praticamente todo o trabalho de
+performance aqui é sobre **não fazer** o que já foi feito.
+
+### O que reduz trabalho
+
+**Deduplicação por digest.** Tags são apelidos. `node:slim`, `node:trixie-slim` e
+`node:current-trixie-slim` apontam para o mesmo manifesto, e escanear as três é
+escanear a mesma imagem três vezes. As candidatas são agrupadas pelo digest do
+manifesto e escaneadas uma vez só; as irmãs compartilham o resultado, e a
+evidência é marcada com `(shared digest)` para que o caminho do arquivo não pareça
+pertencer à imagem errada.
+
+**Cache chaveado por digest.** Uma análise é guardada sob o digest, não sob a
+tag, com TTL configurável (`DOCKERLS_CACHE_TTL_SECONDS`, padrão 24h). Um rebuild
+upstream muda o digest, então o cache nunca serve um veredito sobre bytes que não
+existem mais. A chave também carrega as regras de ignore ativas e o estado do
+threat intel: uma isenção que venceu deixa de valer imediatamente, em vez de
+ficar viva até o TTL expirar.
+
+**SQLite em WAL.** O cache é lido e escrito por um pool de threads. Com o journal
+padrão do SQLite um escritor tranca o banco inteiro, os leitores ficam na fila, e
+um leitor que desiste é tratado como *miss* — o que significa escanear a imagem de
+novo. O cache parava de funcionar exatamente sob carga, e em silêncio. Em WAL
+leitores e escritor convivem, inclusive entre dois processos `dockerls`
+compartilhando o mesmo arquivo.
+
+**Reuso de conexões HTTP.** Cada cliente mantém um `httpx.AsyncClient` durante
+toda a execução, então conexões e handshakes TLS são reaproveitados
+(keep-alive) em vez de refeitos a cada requisição.
+
+**Listagens memoizadas com single-flight.** Uma listagem de tags de um registry
+hardened é buscada **uma vez por execução**. Antes, cada candidato verificado
+refazia a listagem inteira — incluindo o 401 e a busca de token —, e como a
+verificação roda em paralelo, um cache simples ainda deixaria todas passarem
+juntas; por isso a primeira chamada é serializada por repositório.
+
+**Isolamento do cache do Trivy.** O Trivy tranca com exclusividade o diretório de
+cache dele. O banco de vulnerabilidades é baixado uma vez no início e vinculado
+por *hard link* no diretório de cada worker, de modo que scans paralelos não
+disputam a mesma trava. Sem hard link, o pool degrada para um cache único e
+serializa — mais lento, nunca em disputa.
+
+**Banco do Grype atualizado uma vez.** O Grype checa atualização a cada
+invocação, o que é uma ida à rede por imagem. A validação cruzada roda
+`grype db update` uma vez para o lote e depois escaneia com
+`GRYPE_DB_AUTO_UPDATE=false`.
+
+**Validação cruzada só onde importa.** Apenas os melhores candidatos passam pelo
+segundo scanner, e só depois da verificação de tag — não faz sentido gastar um
+scan secundário num candidato que vai cair.
+
+### Medições
+
+Os números abaixo foram medidos neste repositório e são reproduzíveis. Nenhum
+deles é estimativa.
+
+**Descoberta e verificação de tags** (`python benchmarks/bench_discovery.py`).
+Cenário: listar as tags de um repositório hardened e depois verificar os dez
+candidatos sobreviventes, contra um registry simulado que se comporta como os
+reais (desafio 401, busca de token, dados), com 20 ms de latência por requisição.
+
+| Métrica | Antes | Depois | Melhoria |
+| --- | ---: | ---: | ---: |
+| Requisições HTTP | 33 | 3 | −91% |
+| Tempo de parede | 0,128 s | 0,064 s | −50% |
+
+**Cache sob concorrência.** 200 escritas + 200 leituras simultâneas, que é o
+padrão de acesso de `recommend --workers 10`:
+
+| Métrica | Antes (journal padrão) | Depois (WAL) | Melhoria |
+| --- | ---: | ---: | ---: |
+| Tempo de parede | ~0,72 s | ~0,50 s | −31% |
+
+**O que não foi medido, e por quê.** Os tempos ponta a ponta de `recommend`,
+`analyze` e `advisor` contra imagens reais dependem do Trivy e do Grype, que não
+puderam ser instalados no ambiente onde estas medições foram feitas (o download
+dos binários é bloqueado). O tempo de scan e o de validação cruzada portanto
+**não têm número aqui** — preferimos declarar a lacuna a publicar uma estimativa.
+
+### Onde olhar quando estiver lento
+
+A segunda linha do resumo do `recommend` é o começo do diagnóstico:
+
+```
+scans: 9 | cache: 3 hit (25%) | deduped: 12 | cross-validated: 5 | workers: 10
+```
+
+- `scans` alto com `cache` em zero → o cache não está sendo aproveitado; confira
+  `dockerls cache stats` e se `--no-cache` não está ligado.
+- `deduped` em zero com muitas tags → a fonte não reportou digests, então cada
+  tag foi tratada como uma imagem distinta.
+- `cross-validated` alto pesa no tempo total; `--no-cross-validate` desliga, ao
+  custo de perder a confirmação por um segundo scanner.
+
+Os mesmos números saem em `--format json`, sob `metrics`.
+
+---
+
+## Evidências e reprodutibilidade
+
+Uma pontuação que não pode ser conferida é uma opinião. Toda execução deixa o
+material que permite refazer a conta.
+
+**JSON bruto de cada scan.** A saída completa do scanner é gravada em
+`.dockerls/scans/<imagem>_<tag>__<scanner>__<timestamp>.json`, e o bloco
+`Details` liga cada imagem aos arquivos que sustentam a nota dela — um por
+scanner que a mediu.
+
+**Manifesto por execução.** Cada execução grava um manifesto ligando cada
+pontuação exibida à sua evidência, com digest, contagens por severidade, status
+do scan, divergência entre scanners e estado da verificação de tag.
+
+**Digest, não tag.** O cache e a deduplicação são chaveados pelo digest do
+manifesto. Uma evidência sempre corresponde aos bytes que a produziram.
+
+**Divergência é mostrada, não resolvida.** Quando os dois scanners discordam de
+forma material na contagem de CRITICAL/HIGH, a pontuação aparece como
+`!disputed` em vez de um número, com a discrepância logo abaixo. Escolher um dos
+dois números seria apresentar uma confiança que o dado não sustenta.
+
+**Nada de versão inventada.** As versões corrigidas dos planos de remediação vêm
+do campo `FixedVersion` do scanner. Um achado sem correção publicada é listado
+como pendência, não convertido num `upgrade` genérico.
+
+**O que não é reprodutível, e é honesto dizer.** Bancos de vulnerabilidades mudam
+todo dia: a mesma imagem escaneada com uma semana de diferença pode dar
+contagens diferentes sem que nada tenha mudado na imagem. É por isso que a
+evidência guarda o timestamp do scan, e não apenas o resultado.
+
+---
+
 ## Arquitetura
 
 O DockerLs segue Clean Architecture, com separação clara de camadas:
@@ -691,7 +1224,8 @@ depois `~/.config/dockerls/config.toml` (ou
 | DOCKERHUB_TOKEN                 | Token de acesso do Docker Hub              |
 | XDG_CACHE_HOME                  | Sobrescreve o diretório de cache           |
 | XDG_CONFIG_HOME                 | Sobrescreve o diretório do arquivo de config |
-| DOCKERLS_DISABLE_THREAT_INTEL   | Desativa as consultas a CISA KEV / EPSS    |
+| DOCKERLS_ENABLE_THREAT_INTEL    | `false` desativa as consultas a CISA KEV / EPSS |
+| DOCKERLS_DISABLE_THREAT_INTEL   | Idem, forma legada (mantida por compatibilidade) |
 | DOCKERLS_<NOME_DA_CONFIG>       | Sobrescreve qualquer outra configuração abaixo (ex.: `DOCKERLS_MAX_TAGS=200`) |
 
 ### Arquivo de configuração
@@ -815,14 +1349,84 @@ Ele não:
 - Acessa registries privados sem credenciais explícitas
 - Transmite dados do usuário a terceiros
 
+### Que dados saem da sua máquina
+
+| Destino | O que é enviado | Quando |
+| --- | --- | --- |
+| `hub.docker.com` | Nome do repositório e da tag consultados | `search`, `recommend`, `export`, verificação de tag |
+| `hub.docker.com` | Usuário e token, num POST de login | Só em `dockerls login` / com `DOCKERHUB_*` definidos |
+| `cgr.dev`, `gcr.io` | Nome do repositório consultado | Descoberta em fontes hardened |
+| `endoflife.date` | Nome do produto e versão (`node`, `22`) | Checagem de EOL |
+| `cisa.gov` (KEV) | Nada: o feed inteiro é baixado | Enriquecimento de threat intel |
+| `api.first.org` (EPSS) | **Os IDs de CVE encontrados na imagem** | Enriquecimento de threat intel |
+| Trivy / Grype | A referência da imagem, como argumento | Cada scan |
+
+O único item dessa lista que descreve *a sua* imagem é a consulta ao EPSS, que
+envia IDs de CVE de imagens públicas. Desligue com
+`DOCKERLS_ENABLE_THREAT_INTEL=false` se mesmo isso não for aceitável.
+
+**Nunca é enviado:** conteúdo de imagem, camadas, SBOMs, seu Dockerfile, o
+código do seu projeto, nomes de host internos ou credenciais de registry
+(exceto o login explícito no Docker Hub).
+
+### Como os subprocessos são executados
+
+- Sempre com **lista de argumentos**, nunca `shell=True` — não há string de
+  comando para escapar em lugar nenhum.
+- `argv[0]` é resolvido para **caminho absoluto** antes da execução, então um
+  diretório gravável no início do `$PATH` não decide qual binário roda. Sequestrar
+  o `$PATH` de um scanner de segurança é sequestrar o veredito de um pipeline.
+- Referências de imagem passam por validação que rejeita, entre outras coisas,
+  qualquer componente começando com `-`. Sem isso, uma referência vinda de uma
+  variável de CI como `--ignore-unfixed` chegaria ao `trivy image` como *flag*, e
+  não como alvo — controle sobre como (ou se) o scan roda.
+- Todo processo é **morto e coletado** no timeout ou no cancelamento. Um scanner
+  que sobrevive ao seu timeout continua segurando a trava exclusiva do cache do
+  Trivy e atrapalha a execução seguinte.
+
+### Onde ficam as credenciais
+
+No keyring do sistema (`dockerls login`), ou nas variáveis `DOCKERHUB_USERNAME` /
+`DOCKERHUB_TOKEN`. Nunca em arquivo de configuração, nunca no cache, nunca nos
+arquivos de evidência. Um backend de keyring indisponível degrada para acesso
+anônimo — nunca aborta o comando.
+
+### Como os logs mascaram segredos
+
+O mascaramento roda em **todos** os sinks de log e cobre as formas em que uma
+credencial costuma aparecer: pares chave/valor em JSON e em `repr` de dicionário,
+pares sem aspas (`token=...`), esquemas de autorização (`Bearer`, `Basic`),
+credenciais embutidas em URL (`https://user:senha@host`), `curl -u`, corpos
+multipart, e formatos autoidentificáveis mesmo sem chave que os introduza (PAT do
+Docker, token do GitHub, JWT, chave AWS, token do Slack). O mascaramento é
+deliberadamente agressivo: mascarar demais uma linha inócua custa pouco, vazar um
+token para um arquivo de log não.
+
+### Operações somente leitura
+
+Tudo, exceto três coisas explícitas: `dockerls build` (roda `docker build`),
+`dockerls build --push` (publica, e só depois dos portões), e a escrita do
+`Dockerfile.hardened` com `--hardened`/`--base` (que **não** acontece sob
+`--validate-only` — um dry-run não tem efeito colateral). O DockerLs não baixa
+nem executa imagens; o Trivy e o Grype cuidam disso internamente para escanear.
+
+### Limitações conhecidas
+
+- **A ferramenta confia nos scanners.** Se o Trivy e o Grype não conhecem uma
+  vulnerabilidade, o DockerLs também não. A validação cruzada reduz o ponto cego
+  de um scanner só, não o elimina.
+- **Não há verificação de assinatura.** `is_signed` vem de metadados, não de uma
+  verificação cosign feita aqui.
+- **Bancos de vulnerabilidades mudam diariamente.** Duas execuções da mesma
+  imagem em dias diferentes podem discordar sem que a imagem tenha mudado.
+- **Um digest só é tão confiável quanto o registry.** A deduplicação e o cache
+  confiam no digest que o registry reporta.
+
 ### Alinhamento com a OWASP
 
 - Validação de entrada em todos os nomes de imagem (prevenção de injeção)
 - Sem `shell=True` nas chamadas de subprocesso (prevenção de injeção de comando)
-- Mascaramento de credenciais em toda saída de log, cobrindo JSON, TOML,
-  querystrings, corpos multipart, credenciais embutidas em URL, `curl -u` e
-  formatos de credencial autoidentificáveis (PAT do Docker, token do GitHub,
-  JWT, chave AWS, token do Slack)
+- Mascaramento de credenciais em toda saída de log
 - Detecção de path traversal em nomes de imagem
 - Armazenamento seguro de credenciais via keyring do sistema
 - Scan de dependências em CI (pip-audit, Dependabot)
@@ -854,16 +1458,64 @@ dockerls login
 
 ### Scans lentos
 
+Comece pelos números da execução, não pelos parâmetros. A segunda linha do
+resumo diz onde o tempo foi:
+
+```
+scans: 9 | cache: 3 hit (25%) | deduped: 12 | cross-validated: 5 | workers: 10
+```
+
 - Reduza a quantidade de tags: `--limit 20`
-- Aumente os workers: `--workers 20`
-- Os resultados ficam em cache por 24 horas
-- Pule a validação cruzada com `--no-cross-validate`
+- Pule a validação cruzada: `--no-cross-validate`
+- Confira o cache: `dockerls cache stats`
+- Aumente os workers: `--workers 20` — mas veja abaixo
+
+**Aumentar `--workers` nem sempre acelera.** Cada worker é um processo de scanner
+com o próprio diretório de cache; passado o ponto em que a máquina fica sem I/O
+ou CPU, mais workers só adicionam disputa. O limite é 50, e valores altos também
+pressionam os limites de requisição do Docker Hub. Se `scans` já está baixo por
+causa do cache e da deduplicação, workers não é a variável que importa.
+
+### "Unverified (technical error)" em todas as tags
+
+Isso não é um veredito sobre as imagens — é uma falha da execução, e o exit code
+é `1`. Olhe a linha `Causes:` do bloco: ela agrupa as falhas por causa
+classificada, então noventa tags falhando dizem *um* problema, não noventa.
+
+| Causa | O que significa | O que fazer |
+| --- | --- | --- |
+| `SCANNER_MISSING` | Nenhum scanner no PATH | `dockerls doctor` |
+| `DB_INIT_FAILED` | Banco de vulnerabilidades não ficou pronto | Libere acesso a `ghcr.io` e repita |
+| `TIMEOUT` | Scans estouraram o tempo | Aumente `DOCKERLS_SCANNER_TIMEOUT` ou reduza `--workers` |
+| `RATE_LIMITED` | Registry limitou as requisições | `dockerls login`, ou repita mais tarde |
+| `AUTH_REQUIRED` | O registry exige credencial | `dockerls login` |
+| `NOT_FOUND` | As tags não puderam ser baixadas | Confira o nome da imagem |
+
+### Ruído do keyring antes da saída
+
+Se você via algo assim antes dos resultados:
+
+```
+ModuleNotFoundError: No module named '_cffi_backend'
+thread '<unnamed>' panicked at pyo3-0.20.2/src/err/mod.rs:788:5
+```
+
+era um backend de keyring quebrado — comum em container e em runner de CI. A
+falha sempre foi tratada (a execução segue anonimamente), mas o texto vinha do
+runtime Rust direto no descritor 2, abaixo do ponto onde o Python pode capturar.
+Isso está silenciado desde a versão atual; a causa continua registrada no arquivo
+de log.
 
 ### Problemas de cache
 
 ```bash
-dockerls cache clear
+dockerls cache stats     # veja o que está guardado antes de apagar
+dockerls cache cleanup   # remove só o que já venceu
+dockerls cache clear     # esvazia tudo
 ```
+
+Uma base de cache corrompida ou ilegível é tratada como *miss*, nunca como falha
+de scan: no pior caso a imagem é escaneada de novo.
 
 ---
 

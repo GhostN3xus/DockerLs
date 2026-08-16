@@ -10,28 +10,37 @@ from rich.table import Table
 
 from dockerls.application.use_cases.recommend_images import build_recommendation
 from dockerls.cli.dependencies import build_recommend_use_case
-from dockerls.cli.options import OutputFormat
+from dockerls.cli.options import OutputFormat, parse_output_format
 from dockerls.cli.validators import check_workers
+from dockerls.exit_codes import EXIT_ERROR
 
 console = Console()
 
 
 def advisor(
     image: str = typer.Argument(help="Docker image name (e.g., node, python, nginx)"),
-    workers: int = typer.Option(10, "--workers", "-w", help="Concurrent workers"),
-    output_format: OutputFormat = typer.Option(
-        OutputFormat.TABLE, "--format", "-f", help="Output format"
+    workers: int | None = typer.Option(
+        None, "--workers", "-w", help="Concurrent workers [config: workers, default 10]"
+    ),
+    output_format: str = typer.Option(
+        OutputFormat.TABLE.value, "--format", "-f", help="Output format: table or json"
     ),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
 ) -> None:
     """Security advisor: analyze and provide actionable remediation plan."""
     if no_color:
         console.no_color = True
-    workers = check_workers(workers)
-    asyncio.run(_advisor(image, workers, output_format))
+    fmt = parse_output_format(output_format)
+    if workers is not None:
+        workers = check_workers(workers)
+    try:
+        asyncio.run(_advisor(image, workers, fmt))
+    except ValueError as e:
+        console.print(f"[red]Invalid configuration:[/red] {e}")
+        raise typer.Exit(EXIT_ERROR) from e
 
 
-async def _advisor(image: str, workers: int, output_format: OutputFormat) -> None:
+async def _advisor(image: str, workers: int | None, output_format: OutputFormat) -> None:
     use_case = await build_recommend_use_case(workers=workers)
     result = await use_case.execute(image)
 
@@ -42,7 +51,7 @@ async def _advisor(image: str, workers: int, output_format: OutputFormat) -> Non
             console.print(json.dumps(error_payload), soft_wrap=True)
         else:
             console.print("[red]No images found to advise on.[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(EXIT_ERROR)
 
     best = items[0]
     rec = best.recommendation or build_recommendation(best)

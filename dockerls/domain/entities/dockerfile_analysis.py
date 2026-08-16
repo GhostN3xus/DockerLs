@@ -10,7 +10,8 @@ from typing import Any
 class ValidationStatus(StrEnum):
     """Status de uma validação de Dockerfile."""
 
-    PASS = "PASS"  # nosec: B105 -- "a verificação passou", não uma senha
+    # "a verificação passou", não uma senha.
+    PASS = "PASS"  # nosec B105  # noqa: S105
     WARN = "WARN"
     FAIL = "FAIL"
     SKIP = "SKIP"

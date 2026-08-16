@@ -22,8 +22,9 @@ if TYPE_CHECKING:
         HardeningRule,
     )
 
-_STATUS_ICONS = {  # nosec: B105 -- valores de status, não senhas
-    "PASS": "[green]✅ PASS[/green]",  # nosec: B105 -- status literal, não senha
+# Valores de status renderizados, não senhas.
+_STATUS_ICONS = {  # nosec B105
+    "PASS": "[green]✅ PASS[/green]",  # nosec B105
     "WARN": "[yellow]⚠️ WARN[/yellow]",
     "FAIL": "[red]❌ FAIL[/red]",
     "SKIP": "[dim]➖ SKIP[/dim]",

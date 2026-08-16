@@ -14,6 +14,7 @@ from dockerls.domain.interfaces.scanner import ScannerInterface
 from dockerls.integrations.scan_errors import classify_scanner_error
 from dockerls.integrations.trivy.cache_pool import TrivyCachePool, default_trivy_cache_dir
 from dockerls.utils.executables import ExecutableNotFoundError, resolve_executable
+from dockerls.utils.subprocess_runner import run_capture
 from dockerls.utils.validation import sanitize_image_name
 
 if TYPE_CHECKING:
@@ -68,13 +69,8 @@ class TrivyScanner(ScannerInterface):
                     cmd.append("--skip-db-update")
                 cmd.append(safe_ref)
 
-                proc = await asyncio.create_subprocess_exec(  # noqa: S603 -- argv[0] resolvido
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
-                if proc.returncode != 0 or not stdout:
+                returncode, stdout, stderr = await run_capture(cmd, timeout=self._timeout)
+                if returncode != 0 or not stdout:
                     logger.error(f"SBOM generation failed for {safe_ref}: {stderr.decode()[:300]}")
                     return None
                 return stdout.decode()
@@ -130,22 +126,22 @@ class TrivyScanner(ScannerInterface):
     async def _download_db(self, base: Path) -> tuple[bool, str]:
         """One `--download-db-only` attempt. Returns (ok, detail)."""
         try:
-            proc = await asyncio.create_subprocess_exec(  # noqa: S603 -- argv[0] resolvido
-                resolve_executable("trivy"),
-                "image",
-                "--download-db-only",
-                "--quiet",
-                *self._cache_args(base),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            returncode, _, stderr = await run_capture(
+                [
+                    resolve_executable("trivy"),
+                    "image",
+                    "--download-db-only",
+                    "--quiet",
+                    *self._cache_args(base),
+                ],
+                timeout=self._timeout,
             )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
         except ExecutableNotFoundError as e:
             # Binário ausente não melhora com repetição.
             return False, str(e)
         except (TimeoutError, OSError) as e:
             return False, str(e)
-        if proc.returncode != 0:
+        if returncode != 0:
             return False, stderr.decode(errors="replace")[:200]
         return True, ""
 
@@ -178,19 +174,14 @@ class TrivyScanner(ScannerInterface):
                     cmd.extend(["--skip-db-update", "--skip-java-db-update"])
                 cmd.append(safe_ref)
 
-                proc = await asyncio.create_subprocess_exec(  # noqa: S603 -- argv[0] resolvido
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
+                returncode, stdout, stderr = await run_capture(cmd, timeout=self._timeout)
 
-                if proc.returncode != 0:
+                if returncode != 0:
                     # Trivy writes its own diagnostics to stderr; they are
                     # captured into the log file and folded into the run
                     # summary rather than dumped raw onto the terminal.
                     err = stderr.decode(errors="replace")[:500]
-                    logger.error(f"Trivy returned code {proc.returncode} for {safe_ref}: {err}")
+                    logger.error(f"Trivy returned code {returncode} for {safe_ref}: {err}")
                     return ScanResult(
                         image_reference=safe_ref,
                         scanner="trivy",

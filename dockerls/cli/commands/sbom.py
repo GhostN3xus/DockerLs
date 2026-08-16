@@ -6,6 +6,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from dockerls.exit_codes import EXIT_ERROR
 from dockerls.integrations.trivy.scanner import TrivyScanner
 
 console = Console()
@@ -24,7 +25,7 @@ def sbom(
         console.print(
             f"[red]Unsupported SBOM format: {output_format}. Use cyclonedx or spdx.[/red]"
         )
-        raise typer.Exit(1)
+        raise typer.Exit(EXIT_ERROR)
     try:
         asyncio.run(_sbom(image, fmt, output))
     except ValueError as e:
@@ -32,19 +33,19 @@ def sbom(
         # inside the scanner; surfacing it as a message keeps `sbom` in line
         # with every other command.
         console.print(f"[red]Invalid image reference:[/red] {e}")
-        raise typer.Exit(1) from e
+        raise typer.Exit(EXIT_ERROR) from e
 
 
 async def _sbom(image: str, fmt: str, output: str) -> None:
     scanner = TrivyScanner()
     if not await scanner.is_available():
         console.print("[red]Trivy is required for SBOM generation. Run `dockerls doctor`.[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(EXIT_ERROR)
 
     content = await scanner.generate_sbom(image, fmt=fmt)
     if content is None:
         console.print(f"[red]Failed to generate SBOM for {image}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(EXIT_ERROR)
 
     if output:
         path = Path(output)
@@ -54,7 +55,7 @@ async def _sbom(image: str, fmt: str, output: str) -> None:
         except OSError as e:
             # An unwritable destination is user error, not a traceback.
             console.print(f"[red]Could not write {path}:[/red] {e}")
-            raise typer.Exit(1) from e
+            raise typer.Exit(EXIT_ERROR) from e
         console.print(f"[green]SBOM written to {output}[/green]")
     else:
         console.print(content, soft_wrap=True)

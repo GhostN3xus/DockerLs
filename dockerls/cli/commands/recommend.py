@@ -12,9 +12,17 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from dockerls.cli.dependencies import build_recommend_use_case
-from dockerls.cli.options import OutputFormat
+from dockerls.cli.dependencies import (
+    build_recommend_use_case,
+    enable_console_logging,
+    resolve_tag_limit,
+)
+from dockerls.cli.options import OutputFormat, parse_output_format
+from dockerls.cli.progress import RichScanObserver
+from dockerls.cli.validators import check_limit, check_threshold, check_workers
+from dockerls.domain.value_objects.security_tier import SecurityTier, Tier
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK
+from dockerls.infrastructure.evidence import slugify_reference
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -72,8 +80,8 @@ def recommend(
     fail_on: FailOn = typer.Option(
         FailOn.NONE, "--fail-on", help="Exit non-zero if the top result has vulns at/above severity"
     ),
-    output_format: OutputFormat = typer.Option(
-        OutputFormat.TABLE, "--format", "-f", help="Output format"
+    output_format: str = typer.Option(
+        OutputFormat.TABLE.value, "--format", "-f", help="Output format: table or json"
     ),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
     no_progress: bool = typer.Option(False, "--no-progress", help="Disable the progress display"),
@@ -96,11 +104,48 @@ def recommend(
     """Recommend the most secure Docker image tags."""
     if no_color:
         console.no_color = True
-    asyncio.run(
-        _recommend(
-            image, max_critical, max_high, max_medium, limit, workers, fail_on, output_format
+    if verbose:
+        enable_console_logging()
+    fmt = parse_output_format(output_format)
+
+    # Validated here, before any dependency is built: an out-of-range value
+    # must produce a readable CLI error rather than a traceback from deep
+    # inside the use case (or, for `--workers 0`, a semaphore nobody can
+    # acquire). `None` means "not given", so the configured default applies.
+    if max_critical is not None:
+        max_critical = check_threshold(max_critical, "max_critical")
+    if max_high is not None:
+        max_high = check_threshold(max_high, "max_high")
+    if max_medium is not None:
+        max_medium = check_threshold(max_medium, "max_medium")
+    if limit is not None:
+        limit = check_limit(limit)
+    if workers is not None:
+        workers = check_workers(workers)
+
+    try:
+        asyncio.run(
+            _recommend(
+                image,
+                max_critical,
+                max_high,
+                max_medium,
+                limit,
+                workers,
+                fail_on,
+                fmt,
+                show_progress=not no_progress and fmt != OutputFormat.JSON,
+                cross_validate=not no_cross_validate,
+                verify_hub_tags=not no_hub_check,
+                include_hardened=not no_hardened,
+                use_cache=not no_cache,
+            )
         )
-    )
+    except ValueError as e:
+        # Bad thresholds are user error, not a crash: show the message, not
+        # a stack trace (pretty_exceptions_enable is off app-wide).
+        console.print(f"[red]Invalid configuration:[/red] {e}")
+        raise typer.Exit(EXIT_ERROR_CODE) from e
 
 
 async def _recommend(
@@ -111,7 +156,12 @@ async def _recommend(
     limit: int | None,
     workers: int | None,
     fail_on: FailOn,
-    output_format: str,
+    output_format: OutputFormat,
+    show_progress: bool = True,
+    cross_validate: bool = True,
+    verify_hub_tags: bool = True,
+    include_hardened: bool = True,
+    use_cache: bool = True,
 ) -> None:
     # The observer builds its own stderr console; `console` (stdout) is left
     # exclusively for results so the two streams cannot interleave.
@@ -145,6 +195,8 @@ async def _recommend(
         _print_table(result.alternatives)
         _print_details(result.alternatives)
         _print_divergences(result.alternatives)
+    elif _nothing_could_be_measured(result):
+        console.print(_measurement_failure_message(result))
     else:
         console.print("[red]No suitable images found.[/red]")
         console.print(f"[dim]{_baseline_line(result)}[/dim]")
@@ -197,10 +249,40 @@ def _print_summary(result: AnalysisResult) -> None:
     if result.sources_searched:
         parts.append(f"[magenta]sources: {', '.join(result.sources_searched)}[/magenta]")
     console.print(" | ".join(parts))
+
+    work = _work_line(result)
+    if work:
+        # Second line rather than more fields on the first: the first line
+        # answers "what did it find", this one answers "what did it do",
+        # and cramming both together made neither readable at 80 columns.
+        console.print(work)
     if result.log_file:
         # Its own line: a wrapped path is a path the user cannot copy.
         console.print(f"[dim]log: {result.log_file}[/dim]", soft_wrap=True)
     console.print()
+
+
+def _work_line(result: AnalysisResult) -> str:
+    """Account for the work the run did, not just what it found.
+
+    "Analyzed 84/100" says nothing about whether those 84 cost 84 scans or
+    5, which is the difference between four minutes and twenty seconds. The
+    numbers were already being computed and thrown away.
+    """
+    m = result.metrics
+    if not m.tags_discovered:
+        return ""
+
+    parts = [f"scans: {m.scans_performed}"]
+    if m.cache_hits:
+        parts.append(f"cache: {m.cache_hits} hit ({m.cache_hit_rate:.0%})")
+    if m.duplicates_collapsed:
+        parts.append(f"deduped: {m.duplicates_collapsed}")
+    if m.cross_validations:
+        parts.append(f"cross-validated: {m.cross_validations}")
+    if m.workers:
+        parts.append(f"workers: {m.workers}")
+    return f"[dim]{' | '.join(parts)}[/dim]"
 
 
 def _hub_status(analysis: ImageAnalysis) -> str:
@@ -375,6 +457,55 @@ def _print_unverified(result: AnalysisResult) -> None:
     console.print("  [dim]Run with --verbose for the full scanner output.[/dim]")
 
 
+def _nothing_could_be_measured(result: AnalysisResult) -> bool:
+    """True when tags were found but not one of them could be scanned.
+
+    This is the difference between "we looked and nothing was good enough"
+    and "we never managed to look". Both end with an empty table, and only
+    the second is a technical failure.
+    """
+    return result.total_tags_analyzed == 0 and bool(result.unverified)
+
+
+def _measurement_failure_message(result: AnalysisResult) -> str:
+    """Lead with the cause rather than with a verdict about the images.
+
+    `No suitable images found` on a machine with no scanner installed reads
+    as a statement about the tags -- that they were examined and rejected.
+    Nothing was examined. Naming the dominant cause up front turns the
+    output into something the reader can act on.
+    """
+    causes = Counter(item.kind for item in result.unverified)
+    dominant, count = causes.most_common(1)[0]
+    hint = _CAUSE_HINTS.get(
+        dominant, "Run with --verbose for the scanner output, or see the log file above."
+    )
+    return (
+        f"[bold red]No image could be scanned.[/bold red]\n"
+        f"[red]All {count} candidate(s) failed with: {dominant}[/red]\n\n"
+        f"[bold]Suggested action[/bold]\n  {hint}\n\n"
+        f"[dim]This is a technical failure, not a security verdict: "
+        f"nothing was measured, so nothing can be said about these images.[/dim]"
+    )
+
+
+#: What to do about each classified failure cause, in the reader's terms.
+_CAUSE_HINTS = {
+    "SCANNER_MISSING": "Install Trivy or Grype, then re-run. `dockerls doctor` checks for both.",
+    "DB_INIT_FAILED": (
+        "The vulnerability database could not be prepared. Check network access to "
+        "ghcr.io, then re-run."
+    ),
+    "TIMEOUT": (
+        "Scans exceeded the timeout. Raise DOCKERLS_SCANNER_TIMEOUT, or lower --workers "
+        "to reduce contention."
+    ),
+    "RATE_LIMITED": "Rate limited by the registry. Run `dockerls login`, or retry later.",
+    "AUTH_REQUIRED": "The registry requires credentials. Run `dockerls login`.",
+    "NOT_FOUND": "None of the discovered tags could be pulled. Check the image name.",
+}
+
+
 def _exit_code(result: AnalysisResult, fail_on: FailOn) -> int:
     items = result.recommendations or result.alternatives
     if items and fail_on != FailOn.NONE:
@@ -387,5 +518,13 @@ def _exit_code(result: AnalysisResult, fail_on: FailOn) -> int:
     if result.alternatives:
         return EXIT_ALTERNATIVES_FOUND
     if result.total_tags_scanned == 0:
+        return EXIT_ERROR_CODE
+    # Tags were discovered but not one could be scanned. Code 3 is published
+    # as "nothing usable was found" -- a statement about the *images*, which
+    # a CI gate is entitled to act on. With no scanner installed, or a
+    # vulnerability database that would not download, nothing was measured
+    # at all, and reporting that as a verdict is exactly the substitution
+    # this tool must never make. It is an operational failure: code 1.
+    if _nothing_could_be_measured(result):
         return EXIT_ERROR_CODE
     return EXIT_NONE_FOUND

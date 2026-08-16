@@ -20,6 +20,33 @@ _SEVERITY_TO_LEVEL = {
     Severity.UNKNOWN: "note",
 }
 
+# GitHub code scanning reads `security-severity` as a number and buckets it:
+# >= 9.0 critical, >= 7.0 high, >= 4.0 medium, > 0.0 low. These are the floor
+# of each bucket, used only when the scanner classified a finding without
+# publishing a CVSS score -- which is the *normal* case for Debian, Alpine and
+# Ubuntu advisories, as `TrivyScanner._extract_cvss` documents.
+#
+# Emitting the literal 0.0 for those, as this exporter used to, filed every
+# unscored CRITICAL in the security dashboard at the bottom of the scale. The
+# severity the scanner actually assigned was thrown away on the way out.
+#
+# This is a translation of a category into GitHub's numeric channel, not an
+# invented measurement, so the rule records which of the two it was in
+# `properties.severity-source`.
+_SEVERITY_FLOOR = {
+    Severity.CRITICAL: 9.0,
+    Severity.HIGH: 7.0,
+    Severity.MEDIUM: 4.0,
+    Severity.LOW: 1.0,
+    Severity.UNKNOWN: 0.0,
+}
+
+# SARIF requires `reportingDescriptor.id` to be a non-empty string, and a
+# scanner can report a finding with no advisory ID at all (Trivy leaves
+# `VulnerabilityID` empty). Grouping those by package keeps the document
+# valid and keeps unrelated unnamed findings from collapsing into one rule.
+_UNIDENTIFIED_PREFIX = "DOCKERLS-UNIDENTIFIED"
+
 
 class SARIFExporter(ExporterInterface):
     """Exports scan findings as SARIF 2.1.0 for consumption by GitHub code
@@ -35,19 +62,12 @@ class SARIFExporter(ExporterInterface):
 
         for analysis in images:
             for vuln in analysis.scan.vulnerabilities:
-                if vuln.cve_id not in rules:
-                    rules[vuln.cve_id] = {
-                        "id": vuln.cve_id,
-                        "shortDescription": {"text": vuln.description or vuln.cve_id},
-                        "helpUri": f"https://nvd.nist.gov/vuln/detail/{vuln.cve_id}",
-                        "properties": {
-                            "security-severity": str(vuln.cvss_score),
-                            "tags": ["security", vuln.severity.value],
-                        },
-                    }
+                rule_id = _rule_id(vuln)
+                if rule_id not in rules:
+                    rules[rule_id] = _rule_for(vuln, rule_id)
                 sarif_results.append(
                     {
-                        "ruleId": vuln.cve_id,
+                        "ruleId": rule_id,
                         "level": _SEVERITY_TO_LEVEL.get(vuln.severity, "warning"),
                         "message": {
                             "text": (
@@ -84,3 +104,44 @@ class SARIFExporter(ExporterInterface):
             ],
         }
         return json.dumps(sarif, indent=2, default=str)
+
+
+def _rule_id(vuln: Any) -> str:
+    """A stable, non-empty rule identifier for a finding."""
+    cve_id = (vuln.cve_id or "").strip()
+    if cve_id:
+        return cve_id
+    package = (vuln.package_name or "").strip() or "unknown-package"
+    return f"{_UNIDENTIFIED_PREFIX}-{package}"
+
+
+def _security_severity(vuln: Any) -> tuple[str, str]:
+    """Return (value, source) for GitHub's `security-severity` property.
+
+    `cvss` means the number is the scanner's measured CVSS base score.
+    `severity-band` means the advisory carried no score, so the floor of the
+    bucket matching the severity the scanner assigned is used instead --
+    otherwise an unscored CRITICAL is published to code scanning as 0.0.
+    """
+    score = float(vuln.cvss_score or 0.0)
+    if score > 0.0:
+        return str(score), "cvss"
+    return str(_SEVERITY_FLOOR.get(vuln.severity, 0.0)), "severity-band"
+
+
+def _rule_for(vuln: Any, rule_id: str) -> dict[str, Any]:
+    severity_value, severity_source = _security_severity(vuln)
+    rule: dict[str, Any] = {
+        "id": rule_id,
+        "shortDescription": {"text": vuln.description or rule_id},
+        "properties": {
+            "security-severity": severity_value,
+            "severity-source": severity_source,
+            "tags": ["security", vuln.severity.value],
+        },
+    }
+    # Only link to NVD for a real advisory ID -- the bare detail URL for an
+    # empty ID is a 404 pointing nowhere.
+    if (vuln.cve_id or "").strip():
+        rule["helpUri"] = f"https://nvd.nist.gov/vuln/detail/{vuln.cve_id.strip()}"
+    return rule

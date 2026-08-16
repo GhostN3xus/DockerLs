@@ -4,6 +4,7 @@ import re
 from typing import TYPE_CHECKING
 
 from dockerls.application.dto.analysis import ImageAnalysis
+from dockerls.application.services.teardown import close_quietly, sources_of
 from dockerls.application.use_cases.recommend_images import _enrich_with_threat_intel
 from dockerls.domain.entities.image import DockerImage
 from dockerls.domain.value_objects.remediation_score import RemediationScore
@@ -71,6 +72,15 @@ class AnalyzeImageUseCase:
             is_eol=is_eol,
             is_lts=is_lts,
         )
+
+    async def close(self) -> None:
+        """Release the scanner and the repository's connection pool.
+
+        Not done inside `execute`, because `CompareImagesUseCase` calls it
+        once per image: closing there would leave the second comparison
+        talking to a client that had already been shut down.
+        """
+        await close_quietly(self._scanner, *sources_of(self._repository))
 
     def _parse_reference(self, reference: str) -> tuple[str, str]:
         if ":" in reference:

@@ -87,7 +87,12 @@ class HardenedRepository(ImageRepositoryInterface):
         return self._build_image(repository, tag, payload)
 
     async def tag_exists(self, image_name: str, tag: str) -> bool | None:
-        """A tag returned by a live listing is confirmed by construction."""
+        """A tag returned by a live listing is confirmed by construction.
+
+        The listing is memoised by `OCIRegistryClient`, so verifying ten
+        candidates against this source costs the one request discovery
+        already made rather than ten more.
+        """
         repository = self.repository_for(image_name)
         if repository is None:
             return None
@@ -95,6 +100,10 @@ class HardenedRepository(ImageRepositoryInterface):
         if payload is None:
             return None
         return tag in (payload.get("tags") or [])
+
+    async def close(self) -> None:
+        """Release the shared HTTP connection pool."""
+        await self._client.close()
 
 
 _PREFERRED_TAGS = ("latest", "latest-dev", "nonroot", "debug", "static")

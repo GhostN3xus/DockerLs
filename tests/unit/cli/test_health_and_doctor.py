@@ -96,7 +96,10 @@ class TestDoctorDetectsMissingScanners:
         result = runner.invoke(app, ["doctor"])
 
         assert "Not found" in result.stdout
-        assert "Some components are missing" in result.stdout
+        assert "cannot measure anything" in result.stdout
+        # It gates as well as reports: exiting 0 here let a runner with no
+        # scanner installed pass its own pre-flight check.
+        assert result.exit_code == 1
 
     def test_present_scanners_report_available(self, monkeypatch):
         monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")

@@ -12,9 +12,11 @@ from dockerls.application.dto.analysis import (
     AnalysisResult,
     BaselineCriteria,
     ImageAnalysis,
+    RunMetrics,
     UnverifiedImage,
 )
 from dockerls.application.services.progress import NullObserver
+from dockerls.application.services.teardown import close_quietly, sources_of
 from dockerls.domain.entities.recommendation import (
     ActionType,
     Recommendation,
@@ -25,6 +27,7 @@ from dockerls.domain.value_objects.security_score import SecurityScore
 from dockerls.domain.value_objects.security_tier import SecurityTier
 from dockerls.integrations.registry.urls import source_url
 from dockerls.utils.ignore_file import active_ignored_cve_ids, load_ignore_rules
+from dockerls.utils.validation import validate_threshold, validate_workers
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -69,14 +72,20 @@ class RecommendImagesUseCase:
         log_file: Path | None = None,
         cache_ttl_seconds: int = 86400,
     ):
+        # Guarded at construction rather than only at the CLI boundary: the
+        # use case is the last place that can refuse a value which would
+        # otherwise deadlock the scan loop (`workers=0` blocks forever on a
+        # semaphore) or silently invert the baseline (a negative threshold
+        # can never be met). Any caller -- CLI, tests, a future API -- gets
+        # the same refusal.
         self._repository = repository
         self._scanner = scanner
         self._eol_checker = eol_checker
         self._cache = cache
-        self._max_critical = max_critical
-        self._max_high = max_high
-        self._max_medium = max_medium
-        self._workers = workers
+        self._max_critical = validate_threshold(max_critical, "max_critical")
+        self._max_high = validate_threshold(max_high, "max_high")
+        self._max_medium = validate_threshold(max_medium, "max_medium")
+        self._workers = validate_workers(workers)
         self._ignored_cves = active_ignored_cve_ids(load_ignore_rules(ignore_path))
         self._threat_intel = threat_intel
         self._observer: ScanObserver = observer or NullObserver()
@@ -86,6 +95,7 @@ class RecommendImagesUseCase:
         self._log_file = log_file
         self._cache_ttl_seconds = cache_ttl_seconds
         self._analysis_fingerprint = self._compute_analysis_fingerprint()
+        self._metrics = RunMetrics()
 
     def _compute_analysis_fingerprint(self) -> str:
         """Identifica as entradas, fora a própria imagem, que mudam o
@@ -127,6 +137,7 @@ class RecommendImagesUseCase:
             return await self._execute(image_name, limit)
         finally:
             await self._close_scanners()
+            await self._close_repositories()
 
     @staticmethod
     def _fallback_pool(analyses: list[ImageAnalysis]) -> list[ImageAnalysis]:
@@ -191,9 +202,31 @@ class RecommendImagesUseCase:
                 baseline=self._baseline(),
             )
 
+        self._observer.phase_result(
+            "Discovered tags",
+            [
+                ("found", str(len(tags))),
+                ("sources", ", ".join(_sources_of(tags)) or "none"),
+            ],
+        )
+
         analyses, unverified, errors = await self._scan_all(tags)
         errors = [*setup_errors, *errors]
         analyses.sort(key=lambda a: a.security_score, reverse=True)
+
+        # Reported after the fact rather than before: the cache-hit and
+        # scan counts are only known once the pass is done, and stating them
+        # up front would mean guessing at them.
+        self._observer.phase_result(
+            "Scanned candidates",
+            [
+                ("unique digests", str(self._metrics.unique_digests)),
+                ("duplicates collapsed", str(self._metrics.duplicates_collapsed)),
+                ("cache hits", str(self._metrics.cache_hits)),
+                ("scans performed", str(self._metrics.scans_performed)),
+                ("unverified", str(len(unverified))),
+            ],
+        )
 
         baseline_images = [
             a
@@ -225,6 +258,7 @@ class RecommendImagesUseCase:
             log_file=str(self._log_file or ""),
             baseline=self._baseline(),
             sources_searched=_sources_of(tags),
+            metrics=self._metrics,
         )
         result.evidence_manifest = await self._write_manifest(image_name, selected)
         return result
@@ -244,6 +278,10 @@ class RecommendImagesUseCase:
         def _dedup_key(image: DockerImage) -> str:
             return image.digest or image.full_reference
 
+        self._metrics.tags_discovered = len(tags)
+        self._metrics.unique_digests = len({_dedup_key(tag) for tag in tags})
+        self._metrics.workers = self._workers
+
         async def get_scan(image: DockerImage) -> Any:
             key = _dedup_key(image)
             lock = scan_locks.setdefault(key, asyncio.Lock())
@@ -252,6 +290,9 @@ class RecommendImagesUseCase:
                     return scan_cache[key]
                 async with semaphore:
                     scan = await self._scanner.scan(image.full_reference)
+                # Counted here rather than at the call site so a tag served
+                # from a sibling's digest is never counted as a scan.
+                self._metrics.scans_performed += 1
                 scan_cache[key] = scan
                 return scan
 
@@ -273,6 +314,7 @@ class RecommendImagesUseCase:
             try:
                 cached = await self._get_cached(image)
                 if cached:
+                    self._metrics.cache_hits += 1
                     analysis = cached
                     return cached
 
@@ -347,6 +389,7 @@ class RecommendImagesUseCase:
 
         if self._cross_validator is not None and self._cross_validator.enabled and selected:
             self._observer.phase(f"Cross-validating top {len(selected)} candidates")
+            self._metrics.cross_validations = len(selected)
             await self._cross_validator.validate(selected)
         _assert_verified(selected)
         for analysis in selected:
@@ -409,13 +452,15 @@ class RecommendImagesUseCase:
 
     async def _close_scanners(self) -> None:
         secondary = self._cross_validator.scanner if self._cross_validator else None
-        for scanner in (self._scanner, secondary):
-            close = getattr(scanner, "close", None)
-            if callable(close):
-                try:
-                    await close()
-                except Exception as e:  # pragma: no cover - cleanup must not mask results
-                    logger.warning(f"Scanner cleanup failed: {e}")
+        await close_quietly(self._scanner, secondary)
+
+    async def _close_repositories(self) -> None:
+        """Release the HTTP connection pools the image sources hold.
+
+        The clients keep one `httpx.AsyncClient` alive for the whole run so
+        connections are reused; that makes closing them the caller's job.
+        """
+        await close_quietly(*sources_of(self._repository))
 
     async def _get_cached(self, image: DockerImage) -> ImageAnalysis | None:
         key = image.full_reference
