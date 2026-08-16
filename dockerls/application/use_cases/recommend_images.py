@@ -16,6 +16,7 @@ from dockerls.application.dto.analysis import (
     UnverifiedImage,
 )
 from dockerls.application.services.progress import NullObserver
+from dockerls.application.services.teardown import close_quietly, sources_of
 from dockerls.domain.entities.recommendation import (
     ActionType,
     Recommendation,
@@ -451,35 +452,15 @@ class RecommendImagesUseCase:
 
     async def _close_scanners(self) -> None:
         secondary = self._cross_validator.scanner if self._cross_validator else None
-        for scanner in (self._scanner, secondary):
-            close = getattr(scanner, "close", None)
-            if callable(close):
-                try:
-                    await close()
-                except Exception as e:  # pragma: no cover - cleanup must not mask results
-                    logger.warning(f"Scanner cleanup failed: {e}")
+        await close_quietly(self._scanner, secondary)
 
     async def _close_repositories(self) -> None:
         """Release the HTTP connection pools the image sources hold.
 
         The clients keep one `httpx.AsyncClient` alive for the whole run so
         connections are reused; that makes closing them the caller's job.
-        Duck-typed like `_close_scanners`, so a repository that has no pool
-        (or a test double) needs no cooperation.
         """
-        sources = getattr(self._repository, "sources", None)
-        if not isinstance(sources, list | tuple):
-            # `CompositeImageRepository` exposes a real list; anything else
-            # (a single client, a test double whose attributes are
-            # auto-created) is treated as the one source it is.
-            sources = [self._repository]
-        for source in sources:
-            close = getattr(source, "close", None)
-            if callable(close):
-                try:
-                    await close()
-                except Exception as e:  # pragma: no cover - cleanup must not mask results
-                    logger.warning(f"Repository cleanup failed: {e}")
+        await close_quietly(*sources_of(self._repository))
 
     async def _get_cached(self, image: DockerImage) -> ImageAnalysis | None:
         key = image.full_reference

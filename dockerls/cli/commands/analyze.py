@@ -125,6 +125,11 @@ async def _analyze(
     except ValueError as e:
         console.print(f"[red]Scan failed: {e}[/red]")
         raise typer.Exit(EXIT_ERROR) from e
+    finally:
+        # The scanner and the repository's connection pool are held for the
+        # length of the run; releasing them is the caller's job. Rendering
+        # below needs only `result`, so this is the right moment.
+        await use_case.close()
 
     if not result.scan.is_verified:
         # Sem scan não há veredito. Sair 0 aqui deixaria um portão de CI

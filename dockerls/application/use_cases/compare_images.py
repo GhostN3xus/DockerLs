@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from dockerls.application.dto.analysis import ComparisonResult, ImageAnalysis
+from dockerls.application.services.teardown import close_quietly
 
 if TYPE_CHECKING:
     from dockerls.application.use_cases.analyze_image import AnalyzeImageUseCase
@@ -14,6 +15,15 @@ class CompareImagesUseCase:
         self._analyze = analyze_use_case
 
     async def execute(self, references: list[str]) -> ComparisonResult:
+        try:
+            return await self._compare(references)
+        finally:
+            # The inner use case holds the scanner and the repository's
+            # connection pool; it cannot release them itself because it is
+            # called once per image.
+            await close_quietly(self._analyze)
+
+    async def _compare(self, references: list[str]) -> ComparisonResult:
         analyses: list[ImageAnalysis] = []
         for ref in references:
             analysis = await self._analyze.execute(ref)
