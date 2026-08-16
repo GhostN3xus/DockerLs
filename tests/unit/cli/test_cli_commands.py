@@ -263,7 +263,11 @@ class TestLoginCommand:
 
 
 class TestDoctorCommand:
-    def test_doctor_runs(self):
+    def test_doctor_runs(self, monkeypatch):
+        # `doctor` gates on its findings now, so the outcome depends on what
+        # is installed on the host. Pinning the lookup keeps the test about
+        # the command running cleanly rather than about this machine.
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
         result = runner.invoke(app, ["doctor"])
         assert result.exit_code == 0
 

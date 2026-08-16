@@ -9,6 +9,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from dockerls.cli.dependencies import build_compare_use_case
+from dockerls.exit_codes import EXIT_ERROR
 
 if TYPE_CHECKING:
     from dockerls.application.dto.analysis import ComparisonResult
@@ -25,7 +26,7 @@ def compare(
         console.no_color = True
     if len(images) < 2:
         console.print("[red]Provide at least two images to compare.[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(EXIT_ERROR)
     asyncio.run(_compare(images))
 
 
@@ -35,7 +36,7 @@ async def _compare(images: list[str]) -> None:
         result = await use_case.execute(images)
     except ValueError as e:
         console.print(f"[red]Scan failed: {e}[/red]")
-        raise typer.Exit(1) from e
+        raise typer.Exit(EXIT_ERROR) from e
 
     console.print(Panel("[bold]Image Comparison[/bold]", expand=False))
 

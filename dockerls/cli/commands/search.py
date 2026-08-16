@@ -35,7 +35,7 @@ async def _search(image: str, limit: int) -> None:
 
     if not tags:
         console.print(f"[red]No tags found for '{image}'[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(EXIT_ERROR)
 
     table = Table(title=f"Tags for {image}")
     table.add_column("Tag", style="cyan")

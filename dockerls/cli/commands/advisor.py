@@ -51,7 +51,7 @@ async def _advisor(image: str, workers: int | None, output_format: OutputFormat)
             console.print(json.dumps(error_payload), soft_wrap=True)
         else:
             console.print("[red]No images found to advise on.[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(EXIT_ERROR)
 
     best = items[0]
     rec = best.recommendation or build_recommendation(best)
