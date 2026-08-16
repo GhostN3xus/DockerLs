@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import shutil
@@ -14,6 +13,7 @@ from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.scanner import ScannerInterface
 from dockerls.integrations.scan_errors import classify_scanner_error
 from dockerls.utils.executables import ExecutableNotFoundError, resolve_executable
+from dockerls.utils.subprocess_runner import run_capture
 from dockerls.utils.validation import sanitize_image_name
 
 if TYPE_CHECKING:
@@ -51,15 +51,10 @@ class GrypeScanner(ScannerInterface):
         GRYPE_DB_AUTO_UPDATE=false so they go straight to matching.
         """
         try:
-            proc = await asyncio.create_subprocess_exec(  # noqa: S603 -- argv[0] resolvido
-                resolve_executable("grype"),
-                "db",
-                "update",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            returncode, _, stderr = await run_capture(
+                [resolve_executable("grype"), "db", "update"], timeout=self._timeout
             )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
-            if proc.returncode != 0:
+            if returncode != 0:
                 logger.warning(f"Grype DB refresh failed: {stderr.decode()[:200]}")
                 return False
         except (TimeoutError, OSError, ExecutableNotFoundError) as e:
@@ -76,21 +71,15 @@ class GrypeScanner(ScannerInterface):
         timestamp = datetime.now(tz=UTC).isoformat()
 
         try:
-            proc = await asyncio.create_subprocess_exec(  # noqa: S603 -- argv[0] resolvido
-                resolve_executable("grype"),
-                safe_ref,
-                "-o",
-                "json",
-                "--quiet",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            returncode, stdout, stderr = await run_capture(
+                [resolve_executable("grype"), safe_ref, "-o", "json", "--quiet"],
+                timeout=self._timeout,
                 env=self._scan_env(),
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout)
 
-            if proc.returncode != 0:
+            if returncode != 0:
                 err = stderr.decode(errors="replace")[:500]
-                logger.error(f"Grype returned code {proc.returncode} for {safe_ref}: {err}")
+                logger.error(f"Grype returned code {returncode} for {safe_ref}: {err}")
                 return ScanResult(
                     image_reference=safe_ref,
                     scanner="grype",
