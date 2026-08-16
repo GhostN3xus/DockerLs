@@ -1,4 +1,4 @@
-.PHONY: install dev lint type-check test security audit build run clean
+.PHONY: install dev check-dev-deps lint type-check test security audit build run clean
 
 install:
 	pip install .
@@ -17,7 +17,10 @@ format:
 type-check:
 	mypy dockerls/
 
-test:
+check-dev-deps:
+	python -c "import pytest_asyncio" || (echo "pytest-asyncio is required; run: make dev" && exit 1)
+
+test: check-dev-deps
 	pytest tests/ -v --cov=dockerls --cov-report=term-missing
 
 security:

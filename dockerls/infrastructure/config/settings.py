@@ -20,12 +20,19 @@ def _default_cache_dir() -> Path:
     return Path.home() / ".cache" / "dockerls"
 
 
+def _default_state_dir() -> Path:
+    xdg = os.environ.get("XDG_STATE_HOME")
+    if xdg:
+        return Path(xdg) / "dockerls"
+    return Path.home() / ".local" / "state" / "dockerls"
+
+
 def _default_log_dir() -> Path:
-    return Path("logs")
+    return _default_state_dir() / "logs"
 
 
 def _default_evidence_dir() -> Path:
-    return Path(".dockerls") / "scans"
+    return _default_state_dir() / "scans"
 
 
 def _default_config_path() -> Path:
