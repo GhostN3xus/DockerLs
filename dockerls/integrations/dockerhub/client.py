@@ -34,8 +34,9 @@ class DockerHubClient(ImageRepositoryInterface):
 
     def __init__(
         self,
-        username: str = "",  # nosec: B107 -- valor default vazio, não uma senha
-        token: str = "",  # nosec: B107 -- valor default vazio, não uma senha
+        # Defaults vazios: "sem credencial", não uma senha embutida.
+        username: str = "",  # nosec B107
+        token: str = "",  # nosec B107
         timeout: int = 30,
         cache: CacheStoreInterface | None = None,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,

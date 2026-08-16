@@ -14,21 +14,25 @@ if TYPE_CHECKING:
 MASK = "***MASKED***"
 
 # Key names that introduce a credential, in any casing or word shape
-# ("apiKey", "api_key", "API-KEY", "dockerhub_token", "senha").
-_SECRET_KEY = r"[\w.-]*(?:token|password|passwd|senha|secret|api[-_]?key|credential|auth)[\w.-]*"  # nosec: B105
+# ("apiKey", "api_key", "API-KEY", "dockerhub_token", "senha"). Named for
+# what it is -- a detection *pattern* -- so neither Bandit nor ruff has to
+# be told to ignore a constant that merely looks like it holds a secret.
+_SENSITIVE_KEY_PATTERN = (
+    r"[\w.-]*(?:token|password|passwd|senha|secret|api[-_]?key|credential|auth)[\w.-]*"
+)
 
 # A quoted key/value pair, as it appears in JSON or a dict repr:
 #   "token": "value"      'apiKey' : 'value'      "auth": {"token": "value"}
 # The quote between the key and the separator is exactly what the previous
 # pattern could not cross, which left every JSON-shaped log line in clear.
 _QUOTED_KV = re.compile(
-    rf"""(?P<prefix>["']?{_SECRET_KEY}["']?\s*[:=]\s*)(?P<quote>["'])(?P<value>(?:\\.|[^"'\\])*)(?P=quote)""",
+    rf"""(?P<prefix>["']?{_SENSITIVE_KEY_PATTERN}["']?\s*[:=]\s*)(?P<quote>["'])(?P<value>(?:\\.|[^"'\\])*)(?P=quote)""",
     re.IGNORECASE,
 )
 
 # An unquoted key/value pair: token=abc, senha: abc, x-api-key: abc.
 _BARE_KV = re.compile(
-    rf"(?P<prefix>\b{_SECRET_KEY}\s*[=:]\s*)(?P<value>[^\s,;&\"'}}\]]+)", re.IGNORECASE
+    rf"(?P<prefix>\b{_SENSITIVE_KEY_PATTERN}\s*[=:]\s*)(?P<value>[^\s,;&\"'}}\]]+)", re.IGNORECASE
 )
 
 # Authorization schemes.
@@ -60,7 +64,7 @@ _KNOWN_SECRET_VALUE = re.compile(
 # multipart/form-data, where the value sits on its own line after a blank
 # line rather than next to the key.
 _MULTIPART = re.compile(
-    rf"""(?P<prefix>name=["']{_SECRET_KEY}["'][^\n]*\r?\n\r?\n)(?P<value>[^\r\n]+)""",
+    rf"""(?P<prefix>name=["']{_SENSITIVE_KEY_PATTERN}["'][^\n]*\r?\n\r?\n)(?P<value>[^\r\n]+)""",
     re.IGNORECASE,
 )
 

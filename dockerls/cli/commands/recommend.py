@@ -12,9 +12,17 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from dockerls.cli.dependencies import build_recommend_use_case
-from dockerls.cli.options import OutputFormat
+from dockerls.cli.dependencies import (
+    build_recommend_use_case,
+    enable_console_logging,
+    resolve_tag_limit,
+)
+from dockerls.cli.options import OutputFormat, parse_output_format
+from dockerls.cli.progress import RichScanObserver
+from dockerls.cli.validators import check_limit, check_threshold, check_workers
+from dockerls.domain.value_objects.security_tier import SecurityTier, Tier
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK
+from dockerls.infrastructure.evidence import slugify_reference
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -72,8 +80,8 @@ def recommend(
     fail_on: FailOn = typer.Option(
         FailOn.NONE, "--fail-on", help="Exit non-zero if the top result has vulns at/above severity"
     ),
-    output_format: OutputFormat = typer.Option(
-        OutputFormat.TABLE, "--format", "-f", help="Output format"
+    output_format: str = typer.Option(
+        OutputFormat.TABLE.value, "--format", "-f", help="Output format: table or json"
     ),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
     no_progress: bool = typer.Option(False, "--no-progress", help="Disable the progress display"),
@@ -96,11 +104,48 @@ def recommend(
     """Recommend the most secure Docker image tags."""
     if no_color:
         console.no_color = True
-    asyncio.run(
-        _recommend(
-            image, max_critical, max_high, max_medium, limit, workers, fail_on, output_format
+    if verbose:
+        enable_console_logging()
+    fmt = parse_output_format(output_format)
+
+    # Validated here, before any dependency is built: an out-of-range value
+    # must produce a readable CLI error rather than a traceback from deep
+    # inside the use case (or, for `--workers 0`, a semaphore nobody can
+    # acquire). `None` means "not given", so the configured default applies.
+    if max_critical is not None:
+        max_critical = check_threshold(max_critical, "max_critical")
+    if max_high is not None:
+        max_high = check_threshold(max_high, "max_high")
+    if max_medium is not None:
+        max_medium = check_threshold(max_medium, "max_medium")
+    if limit is not None:
+        limit = check_limit(limit)
+    if workers is not None:
+        workers = check_workers(workers)
+
+    try:
+        asyncio.run(
+            _recommend(
+                image,
+                max_critical,
+                max_high,
+                max_medium,
+                limit,
+                workers,
+                fail_on,
+                fmt,
+                show_progress=not no_progress and fmt != OutputFormat.JSON,
+                cross_validate=not no_cross_validate,
+                verify_hub_tags=not no_hub_check,
+                include_hardened=not no_hardened,
+                use_cache=not no_cache,
+            )
         )
-    )
+    except ValueError as e:
+        # Bad thresholds are user error, not a crash: show the message, not
+        # a stack trace (pretty_exceptions_enable is off app-wide).
+        console.print(f"[red]Invalid configuration:[/red] {e}")
+        raise typer.Exit(EXIT_ERROR_CODE) from e
 
 
 async def _recommend(
@@ -111,7 +156,12 @@ async def _recommend(
     limit: int | None,
     workers: int | None,
     fail_on: FailOn,
-    output_format: str,
+    output_format: OutputFormat,
+    show_progress: bool = True,
+    cross_validate: bool = True,
+    verify_hub_tags: bool = True,
+    include_hardened: bool = True,
+    use_cache: bool = True,
 ) -> None:
     # The observer builds its own stderr console; `console` (stdout) is left
     # exclusively for results so the two streams cannot interleave.

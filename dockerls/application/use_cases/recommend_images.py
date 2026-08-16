@@ -25,6 +25,7 @@ from dockerls.domain.value_objects.security_score import SecurityScore
 from dockerls.domain.value_objects.security_tier import SecurityTier
 from dockerls.integrations.registry.urls import source_url
 from dockerls.utils.ignore_file import active_ignored_cve_ids, load_ignore_rules
+from dockerls.utils.validation import validate_threshold, validate_workers
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -69,14 +70,20 @@ class RecommendImagesUseCase:
         log_file: Path | None = None,
         cache_ttl_seconds: int = 86400,
     ):
+        # Guarded at construction rather than only at the CLI boundary: the
+        # use case is the last place that can refuse a value which would
+        # otherwise deadlock the scan loop (`workers=0` blocks forever on a
+        # semaphore) or silently invert the baseline (a negative threshold
+        # can never be met). Any caller -- CLI, tests, a future API -- gets
+        # the same refusal.
         self._repository = repository
         self._scanner = scanner
         self._eol_checker = eol_checker
         self._cache = cache
-        self._max_critical = max_critical
-        self._max_high = max_high
-        self._max_medium = max_medium
-        self._workers = workers
+        self._max_critical = validate_threshold(max_critical, "max_critical")
+        self._max_high = validate_threshold(max_high, "max_high")
+        self._max_medium = validate_threshold(max_medium, "max_medium")
+        self._workers = validate_workers(workers)
         self._ignored_cves = active_ignored_cve_ids(load_ignore_rules(ignore_path))
         self._threat_intel = threat_intel
         self._observer: ScanObserver = observer or NullObserver()

@@ -8,6 +8,7 @@ from rich.table import Table
 
 from dockerls.cli.dependencies import build_search_use_case
 from dockerls.cli.validators import check_limit
+from dockerls.exit_codes import EXIT_ERROR
 
 console = Console()
 
@@ -18,7 +19,14 @@ def search(
 ) -> None:
     """Search Docker Hub for available tags of an image."""
     limit = check_limit(limit)
-    asyncio.run(_search(image, limit))
+    try:
+        asyncio.run(_search(image, limit))
+    except ValueError as e:
+        # `sanitize_image_name` rejects a malformed reference inside the
+        # client; surfacing it as a message keeps `search` in line with
+        # every other command instead of answering with a stack trace.
+        console.print(f"[red]Invalid image reference:[/red] {e}")
+        raise typer.Exit(EXIT_ERROR) from e
 
 
 async def _search(image: str, limit: int) -> None:
