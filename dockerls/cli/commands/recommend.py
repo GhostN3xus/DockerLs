@@ -195,6 +195,8 @@ async def _recommend(
         _print_table(result.alternatives)
         _print_details(result.alternatives)
         _print_divergences(result.alternatives)
+    elif _nothing_could_be_measured(result):
+        console.print(_measurement_failure_message(result))
     else:
         console.print("[red]No suitable images found.[/red]")
         console.print(f"[dim]{_baseline_line(result)}[/dim]")
@@ -425,6 +427,55 @@ def _print_unverified(result: AnalysisResult) -> None:
     console.print("  [dim]Run with --verbose for the full scanner output.[/dim]")
 
 
+def _nothing_could_be_measured(result: AnalysisResult) -> bool:
+    """True when tags were found but not one of them could be scanned.
+
+    This is the difference between "we looked and nothing was good enough"
+    and "we never managed to look". Both end with an empty table, and only
+    the second is a technical failure.
+    """
+    return result.total_tags_analyzed == 0 and bool(result.unverified)
+
+
+def _measurement_failure_message(result: AnalysisResult) -> str:
+    """Lead with the cause rather than with a verdict about the images.
+
+    `No suitable images found` on a machine with no scanner installed reads
+    as a statement about the tags -- that they were examined and rejected.
+    Nothing was examined. Naming the dominant cause up front turns the
+    output into something the reader can act on.
+    """
+    causes = Counter(item.kind for item in result.unverified)
+    dominant, count = causes.most_common(1)[0]
+    hint = _CAUSE_HINTS.get(
+        dominant, "Run with --verbose for the scanner output, or see the log file above."
+    )
+    return (
+        f"[bold red]No image could be scanned.[/bold red]\n"
+        f"[red]All {count} candidate(s) failed with: {dominant}[/red]\n\n"
+        f"[bold]Suggested action[/bold]\n  {hint}\n\n"
+        f"[dim]This is a technical failure, not a security verdict: "
+        f"nothing was measured, so nothing can be said about these images.[/dim]"
+    )
+
+
+#: What to do about each classified failure cause, in the reader's terms.
+_CAUSE_HINTS = {
+    "SCANNER_MISSING": "Install Trivy or Grype, then re-run. `dockerls doctor` checks for both.",
+    "DB_INIT_FAILED": (
+        "The vulnerability database could not be prepared. Check network access to "
+        "ghcr.io, then re-run."
+    ),
+    "TIMEOUT": (
+        "Scans exceeded the timeout. Raise DOCKERLS_SCANNER_TIMEOUT, or lower --workers "
+        "to reduce contention."
+    ),
+    "RATE_LIMITED": "Rate limited by the registry. Run `dockerls login`, or retry later.",
+    "AUTH_REQUIRED": "The registry requires credentials. Run `dockerls login`.",
+    "NOT_FOUND": "None of the discovered tags could be pulled. Check the image name.",
+}
+
+
 def _exit_code(result: AnalysisResult, fail_on: FailOn) -> int:
     items = result.recommendations or result.alternatives
     if items and fail_on != FailOn.NONE:
@@ -437,5 +488,13 @@ def _exit_code(result: AnalysisResult, fail_on: FailOn) -> int:
     if result.alternatives:
         return EXIT_ALTERNATIVES_FOUND
     if result.total_tags_scanned == 0:
+        return EXIT_ERROR_CODE
+    # Tags were discovered but not one could be scanned. Code 3 is published
+    # as "nothing usable was found" -- a statement about the *images*, which
+    # a CI gate is entitled to act on. With no scanner installed, or a
+    # vulnerability database that would not download, nothing was measured
+    # at all, and reporting that as a verdict is exactly the substitution
+    # this tool must never make. It is an operational failure: code 1.
+    if _nothing_could_be_measured(result):
         return EXIT_ERROR_CODE
     return EXIT_NONE_FOUND

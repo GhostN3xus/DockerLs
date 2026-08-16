@@ -89,6 +89,60 @@ class TestRecommendCodes:
             result = runner.invoke(app, ["recommend", "node", "--no-progress"])
         assert result.exit_code == EXIT_ERROR
 
+    def test_an_unscannable_run_is_an_error_not_a_verdict(self):
+        """Code 3 is published as "nothing usable was found" -- a statement
+        about the images, which a gate may act on. With no scanner
+        installed, nothing was measured at all. Reporting that as 3 is the
+        exact substitution this tool must never make."""
+        from dockerls.application.dto.analysis import UnverifiedImage
+
+        result = AnalysisResult(
+            query="node",
+            total_tags_scanned=4,
+            total_tags_analyzed=0,
+            baseline_met=False,
+            unverified=[
+                UnverifiedImage(
+                    image_reference=f"node:tag{i}",
+                    status="ERROR",
+                    reason="'trivy' was not found on PATH",
+                    kind="SCANNER_MISSING",
+                )
+                for i in range(4)
+            ],
+        )
+        with patch("dockerls.cli.commands.recommend.build_recommend_use_case", _use_case(result)):
+            run = runner.invoke(app, ["recommend", "node", "--no-progress"])
+
+        assert run.exit_code == EXIT_ERROR
+        assert "No image could be scanned" in run.stdout
+        assert "SCANNER_MISSING" in run.stdout
+        assert "Suggested action" in run.stdout
+        assert "Install Trivy or Grype" in run.stdout
+        assert "not a security verdict" in run.stdout
+
+    def test_scanned_but_nothing_good_enough_still_exits_three(self):
+        """The other side of the same coin: tags that *were* measured and
+        rejected are a verdict, and must keep code 3."""
+        from dockerls.application.dto.analysis import UnverifiedImage
+
+        result = AnalysisResult(
+            query="node",
+            total_tags_scanned=4,
+            total_tags_analyzed=3,
+            baseline_met=False,
+            unverified=[
+                UnverifiedImage(
+                    image_reference="node:bad", status="ERROR", reason="x", kind="TIMEOUT"
+                )
+            ],
+        )
+        with patch("dockerls.cli.commands.recommend.build_recommend_use_case", _use_case(result)):
+            run = runner.invoke(app, ["recommend", "node", "--no-progress"])
+
+        assert run.exit_code == 3
+        assert "No suitable images found" in run.stdout
+
     def test_a_configuration_error_exits_one(self, monkeypatch):
         monkeypatch.setenv("DOCKERLS_MAX_CRITICAL", "-5")
         from dockerls.cli import dependencies
