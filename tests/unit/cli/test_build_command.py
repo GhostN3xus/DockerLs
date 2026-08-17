@@ -196,7 +196,7 @@ class TestReportFile:
         )
 
         assert result.exit_code == EXIT_POLICY
-        report = json.loads(out.read_text())
+        report = json.loads(out.read_text(encoding="utf-8"))
         assert report["validation"]["errors"] > 0
         assert report["security_tier"] in {"A", "B", "C", "D", "F"}
 
@@ -204,7 +204,7 @@ class TestReportFile:
         out = tmp_path / "report.html"
         runner.invoke(app, ["build", "--validate-only", "--report", str(out), str(bad_context)])
 
-        html = out.read_text()
+        html = out.read_text(encoding="utf-8")
         assert html.startswith("<!DOCTYPE html>")
         assert "DockerLs Build Report" in html
 
@@ -215,7 +215,7 @@ class TestReportFile:
         )
 
         assert result.exit_code == EXIT_OK
-        assert json.loads(out.read_text())["status"] == "SUCCESS"
+        assert json.loads(out.read_text(encoding="utf-8"))["status"] == "SUCCESS"
         assert "Validation Checks" not in result.stdout
 
 
@@ -366,7 +366,7 @@ class TestFullBuildFlow:
         )
 
         assert result.exit_code == EXIT_OK
-        html = out.read_text()
+        html = out.read_text(encoding="utf-8")
         assert "Vulnerability Scan" in html
         assert "No scan was run." not in html
         assert '<td class="high">High</td><td>1</td>' in html
@@ -430,7 +430,7 @@ class TestHtmlReportIsEscaped:
 class TestBaseTemplateValidation:
     def test_unknown_base_is_rejected_before_anything_is_built(self, clean_context):
         result = runner.invoke(
-            app, ["build", "-t", "x:1", "--hardened", "--base", "java", str(clean_context)]
+            app, ["build", "-t", "x:1", "--hardened", "--base", "unknown_xyz", str(clean_context)]
         )
 
         assert result.exit_code == EXIT_ERROR

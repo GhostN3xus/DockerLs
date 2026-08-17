@@ -10,8 +10,9 @@ if TYPE_CHECKING:
 
 
 class ExporterInterface(ABC):
-    @abstractmethod
-    def export(self, result: AnalysisResult, output_path: Path) -> None: ...
+    def export(self, result: AnalysisResult, output_path: Path) -> None:
+        output_path.write_bytes(self.export_string(result).encode("utf-8"))
 
     @abstractmethod
-    def export_string(self, result: AnalysisResult) -> str: ...
+    def export_string(self, result: AnalysisResult) -> str:
+        ...

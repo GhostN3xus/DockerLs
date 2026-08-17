@@ -29,7 +29,7 @@ def build(
     path: str = typer.Argument(".", help="Diretório com Dockerfile"),
     tag: str | None = typer.Option(None, "--tag", "-t", help="Tag da imagem (obrigatório)"),
     base: str | None = typer.Option(
-        None, "--base", help="Imagem base recomendada (node, python, go)"
+        None, "--base", help="Imagem base recomendada (node, python, go, rust, java, php)"
     ),
     hardened: bool = typer.Option(False, "--hardened", help="Usa templates Dockerfile hardened"),
     list_templates: bool = typer.Option(
@@ -39,6 +39,18 @@ def build(
         False, "--interactive", "-i", help="Wizard de segurança passo a passo"
     ),
     scan: bool = typer.Option(True, "--scan/--no-scan", help="Executa Trivy/Grype após build"),
+    auto_remediate: bool = typer.Option(
+        False,
+        "--auto-fix",
+        "--auto-remediate",
+        help="Executa ciclo de auto-remediação até zero vulnerabilidades",
+    ),
+    zero_vulns: bool = typer.Option(
+        False, "--zero-vulns", help="Garante build e remediação até zero CVEs"
+    ),
+    max_iterations: int = typer.Option(
+        3, "--max-iterations", help="Número máximo de iterações de remediação"
+    ),
     fail_on: str | None = typer.Option(
         None, "--fail-on", help="Reprova build se tiver critical/high"
     ),
@@ -62,7 +74,7 @@ def build(
     output: str | None = typer.Option(None, "--output", "-o", help="Arquivo de saída do relatório"),
     force: bool = typer.Option(False, "--force", help="Força build mesmo com erros de validação"),
 ) -> None:
-    """Constrói imagens Docker seguras com validação e scanning."""
+    """Constrói imagens Docker seguras com validação, scanning e auto-remediação."""
     if verbose:
         enable_console_logging()
 
@@ -73,7 +85,7 @@ def build(
         raise typer.Exit(EXIT_OK)
 
     # Validar tag obrigatória (exceto em modos especiais)
-    if not tag and not validate_only and not suggest_hardening:
+    if not tag and not validate_only and not suggest_hardening and not interactive:
         console.print("[red]Error:[/red] --tag é obrigatório para build")
         raise typer.Exit(EXIT_ERROR)
 
@@ -120,6 +132,9 @@ def build(
         verbose=verbose,
         force=force,
         push=push,
+        auto_remediate=auto_remediate or zero_vulns,
+        max_remediation_rounds=max_iterations,
+        target_zero_vulns=zero_vulns,
     )
 
     # Executar
@@ -160,59 +175,160 @@ def _print_templates(template_provider: HardeningTemplates, ci_mode: bool = Fals
 
 
 def _run_interactive_wizard(use_case: BuildImageUseCase, path: str) -> BuildImageResponse:
-    """Executa wizard interativo."""
-    console.print(Panel("[bold cyan]DockerLs Interactive Build Wizard[/bold cyan]", expand=False))
+    """Executa wizard interativo completo com questionário aprofundado."""
+    console.print(
+        Panel(
+            "[bold cyan]🐳 DockerLs Interactive Build Wizard[/bold cyan]\n"
+            "[dim]Configuração passo a passo com foco em segurança e zero vulnerabilidades[/dim]",
+            expand=False,
+        )
+    )
     console.print()
 
-    # As opções de base vêm do provedor, não de uma lista escrita à mão que
-    # oferecia "java" -- para o qual não existe template.
-    available = HardeningTemplates().list_templates() or ["node"]
-    questions = [
-        ("base", "What's your application type?", [*available, "other"]),
-        ("hardened", "Use hardened template?", ["yes", "no"]),
-        ("scan", "Scan after build?", ["yes", "no"]),
-        ("report_format", "Export report?", ["json", "html", "both", "none"]),
-        ("push", "Push to registry?", ["dockerhub", "ghcr", "harbor", "no"]),
+    available = HardeningTemplates().list_templates() or [
+        "node",
+        "python",
+        "go",
+        "rust",
+        "java",
+        "php",
     ]
 
-    answers: dict[str, str] = {}
-    for key, question, options in questions:
-        console.print(f"\n[bold yellow]? {question}[/bold yellow]")
-        for i, opt in enumerate(options):
-            console.print(f"  {i + 1}. {opt}")
+    # 1. Ecossistema / Linguagem
+    console.print(
+        "[bold yellow]? 1. Qual é o ecossistema / linguagem da sua aplicação?[/bold yellow]"
+    )
+    stacks = ["node", "python", "go", "java", "rust", "php", "other"]
+    for i, s in enumerate(stacks, 1):
+        console.print(f"  {i}. {s}")
+    stack_choice = _prompt_choice(stacks, "1")
 
-        while True:
-            try:
-                choice = console.input("\nChoice [1]: ")
-                if not choice:
-                    choice = "1"
-                idx = int(choice) - 1
-                if 0 <= idx < len(options):
-                    answers[key] = options[idx]
-                    break
-            except ValueError:
-                continue
+    # 2. Versão recomendada e particularidades
+    version_options = {
+        "node": ["22.x LTS (Recommended)", "20.x LTS", "18.x", "custom"],
+        "python": ["3.12 (Recommended)", "3.13", "3.11", "custom"],
+        "go": ["1.23 (Recommended)", "1.24", "1.22", "custom"],
+        "java": ["21 LTS (Eclipse Temurin)", "17 LTS", "custom"],
+        "rust": ["1.82 (Alpine musl static)", "latest", "custom"],
+        "php": ["8.3 FPM/CLI", "8.2", "custom"],
+    }
+    opts = version_options.get(stack_choice, ["latest", "custom"])
+    console.print(
+        f"\n[bold yellow]? 2. Qual versão do {stack_choice} deseja utilizar?[/bold yellow]"
+    )
+    for i, opt in enumerate(opts, 1):
+        console.print(f"  {i}. {opt}")
+    _ = _prompt_choice(opts, "1")
 
-    # Construir request baseado nas respostas
-    base_template = answers.get("base", "node")
-    if base_template == "other":
-        base_template = "node"
+    # 3. Base distribution
+    console.print("\n[bold yellow]? 3. Qual distribuição base você prefere?[/bold yellow]")
+    distros = [
+        "alpine (Alpine Linux - Ultra-lightweight musl)",
+        "debian (Debian Bookworm Slim - glibc)",
+        "ubuntu (Ubuntu 24.04 LTS - Alta compatibilidade)",
+        "distroless (Google Distroless - Sem shell, zero CVEs de SO)",
+        "scratch (Scratch puro para binários estáticos)",
+    ]
+    for i, d in enumerate(distros, 1):
+        console.print(f"  {i}. {d}")
+    distro_raw = _prompt_choice(distros, "1")
+    distro_key = distro_raw.split()[0].lower()
 
-    hardened = answers.get("hardened", "yes") == "yes"
-    scan = answers.get("scan", "yes") == "yes"
+    # 4. Usar template hardened
+    console.print(
+        "\n[bold yellow]? 4. Utilizar template multi-stage com non-root user?[/bold yellow]"
+    )
+    console.print("  1. yes (Recomendado - reduz superfície de ataque)")
+    console.print("  2. no (Usa Dockerfile padrão do diretório)")
+    use_hardened = _prompt_choice(["yes", "no"], "1") == "yes"
 
-    # Tag
-    tag = console.input("\nImage tag [app:latest]: ") or "app:latest"
+    # 5. Dependências do SO / build nativo
+    console.print(
+        "\n[bold yellow]? 5. Sua aplicação precisa de dependências nativas do SO?[/bold yellow]"
+    )
+    deps_opts = [
+        "none (Apenas runtime padrão)",
+        "build-essential / gcc / make",
+        "libpq (PostgreSQL client)",
+        "openssl / ca-certificates",
+    ]
+    for i, dep in enumerate(deps_opts, 1):
+        console.print(f"  {i}. {dep}")
+    _ = _prompt_choice(deps_opts, "1")
+
+    # 6. Portas
+    default_port = (
+        "3000"
+        if stack_choice == "node"
+        else "8000"
+        if stack_choice in ("python", "php")
+        else "8080"
+    )
+    port_input = (
+        console.input(f"\n[bold yellow]? 6. Porta da aplicação [{default_port}]: [/bold yellow]")
+        or default_port
+    )
+
+    # 7. Scan pós-build
+    console.print("\n[bold yellow]? 7. Executar scan de vulnerabilidades pós-build?[/bold yellow]")
+    scan = _prompt_choice(["yes", "no"], "1") == "yes"
+
+    # 8. Ciclo de auto-remediação até zero vulnerabilidades
+    console.print(
+        "\n[bold yellow]? 8. Ativar ciclo iterativo até ZERO vulnerabilidades?[/bold yellow]"
+    )
+    console.print("  1. yes (Corrige patches até eliminar CVEs)")
+    console.print("  2. no (Apenas relata vulnerabilidades encontradas)")
+    zero_vulns = _prompt_choice(["yes", "no"], "1") == "yes"
+
+    # 9. Tag da imagem
+    tag_input = (
+        console.input("\n[bold yellow]? 9. Tag da imagem Docker [app:latest]: [/bold yellow]")
+        or "app:latest"
+    )
+
+    # 10. Push para registro
+    console.print("\n[bold yellow]? 10. Publicar (docker push) após aprovação?[/bold yellow]")
+    push_choice = _prompt_choice(["no", "dockerhub", "ghcr", "harbor"], "1")
+
+    # Determinar melhor template com base na combinação Stack + Distro
+    candidate_key = f"{stack_choice}-{distro_key}"
+    if candidate_key in available:
+        base_template = candidate_key
+    elif stack_choice in available:
+        base_template = stack_choice
+    elif distro_key in available:
+        base_template = distro_key
+    else:
+        base_template = "node-alpine"
 
     request = BuildImageRequest(
         context_path=path,
-        tag=tag,
-        hardened=hardened,
-        base_template=base_template if hardened else None,
+        tag=tag_input,
+        hardened=use_hardened,
+        base_template=base_template if use_hardened else None,
         scan=scan,
+        auto_remediate=zero_vulns,
+        target_zero_vulns=zero_vulns,
+        push=push_choice != "no",
+        labels={"app.port": port_input, "dockerls.managed": "true"},
     )
 
     return use_case.execute(request)
+
+
+def _prompt_choice(options: list[str], default: str = "1") -> str:
+    """Solicita a escolha do usuário."""
+    while True:
+        try:
+            choice = console.input(f"\nChoice [{default}]: ")
+            if not choice:
+                choice = default
+            idx = int(choice) - 1
+            if 0 <= idx < len(options):
+                return options[idx]
+        except ValueError:
+            continue
 
 
 def _print_table_output(response: BuildImageResponse, report_file: str | None = None) -> None:
@@ -322,6 +438,24 @@ def _print_report(report: BuildReport) -> None:
         console.print(f"  LOW: [dim]{scan_data.get('low', 0)}[/dim]")
         console.print()
 
+    if report.remediation_history:
+        console.print(Panel("[bold green]✨ Auto-Remediation Summary[/bold green]", expand=False))
+        for item in report.remediation_history:
+            round_num = item.get("round", 1)
+            actions = item.get("actions", [])
+            crit_b = item.get("critical_before", 0)
+            crit_a = item.get("critical_after", 0)
+            total_b = item.get("total_before", 0)
+            total_a = item.get("total_after", 0)
+            console.print(
+                f"  [bold cyan]Round {round_num}:[/bold cyan] "
+                f"Total Vulns: {total_b} -> [green]{total_a}[/green] | "
+                f"Critical: {crit_b} -> [green]{crit_a}[/green]"
+            )
+            for action in actions:
+                console.print(f"    • [dim]{action}[/dim]")
+        console.print()
+
     if report.recommendations:
         console.print(Panel("[bold yellow]💡 Recommendations[/bold yellow]", expand=False))
         priority_colors = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "dim"}
@@ -360,6 +494,8 @@ def _report_dict(report: BuildReport) -> dict[str, Any]:
         "scan_results": report.scan_results,
         "recommendations": report.recommendations,
         "build_metadata": report.build_metadata,
+        "remediation_history": report.remediation_history,
+        "auto_remediated": report.auto_remediated,
     }
 
 
@@ -470,6 +606,30 @@ def _render_html_report(report: BuildReport) -> str:
 """
     else:
         html += "    <p>No scan was run.</p>\n"
+
+    if report.remediation_history:
+        html += """
+    <h2>Auto-Remediation Summary</h2>
+    <table>
+        <tr>
+            <th>Round</th>
+            <th>Fixes Applied</th>
+            <th>Critical (Before &rarr; After)</th>
+            <th>Total (Before &rarr; After)</th>
+        </tr>
+"""
+        for item in report.remediation_history:
+            round_num = _int(item.get("round", 1))
+            actions_str = _esc("<br>".join(item.get("actions", [])))
+            cb = _int(item.get("critical_before", 0))
+            ca = _int(item.get("critical_after", 0))
+            tb = _int(item.get("total_before", 0))
+            ta = _int(item.get("total_after", 0))
+            html += (
+                f"        <tr><td>{round_num}</td><td>{actions_str}</td>"
+                f"<td>{cb} &rarr; {ca}</td><td>{tb} &rarr; {ta}</td></tr>\n"
+            )
+        html += "    </table>\n"
 
     return (
         html

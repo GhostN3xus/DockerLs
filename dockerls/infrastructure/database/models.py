@@ -61,6 +61,9 @@ def _apply_pragmas(dbapi_connection: Any, _record: Any) -> None:
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        cursor.execute("PRAGMA cache_size=-64000")
+        cursor.execute("PRAGMA temp_store=MEMORY")
+        cursor.execute("PRAGMA mmap_size=268435456")
     except Exception as e:  # pragma: no cover - pragmas are advisory
         logger.debug(f"Could not apply SQLite pragmas: {e}")
     finally:

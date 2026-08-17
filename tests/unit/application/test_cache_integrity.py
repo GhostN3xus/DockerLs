@@ -326,9 +326,9 @@ class TestCacheIsKeyedByDigestNotTag:
         before = DockerImage(name="node", tag="22-alpine", digest="sha256:aaa")
         after = DockerImage(name="node", tag="22-alpine", digest="sha256:bbb")
 
-        assert uc._cache_key(before) != uc._cache_key(after), (
-            "a rebuilt tag reused the previous image's cached verdict"
-        )
+        assert uc._cache_key(before) != uc._cache_key(
+            after
+        ), "a rebuilt tag reused the previous image's cached verdict"
 
     def test_same_digest_under_different_tags_shares_the_entry(self):
         """São os mesmos bytes -- escaneá-los duas vezes é desperdício."""

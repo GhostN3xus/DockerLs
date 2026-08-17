@@ -1,48 +1,43 @@
-# Dockerfile.hardened.node
-# Template hardened para Node.js - Production Ready
+# Dockerfile.hardened.node-debian
+# Template hardened para Node.js 22 (Debian Bookworm Slim - glibc)
 
-ARG NODE_VERSION=22-alpine
+ARG NODE_VERSION=22-bookworm-slim
 
 # Stage 1: Builder
 FROM node:${NODE_VERSION} AS builder
 
 WORKDIR /app
 
-# Instalar dependências de compilação se necessário (ficam apenas no builder)
-RUN apk add --no-cache \
-    python3 \
-    make \
-    g++ \
-    && rm -rf /var/cache/apk/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential python3 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy package manifests e instalar dependências limpas
 COPY package*.json ./
-RUN npm ci --only=production \
-    && npm cache clean --force
+RUN npm ci --only=production && npm cache clean --force
 
-# Copy source e build
 COPY . .
 RUN npm run build || true
 
 # Stage 2: Runtime
 FROM node:${NODE_VERSION}
 
-# Labels de segurança
 LABEL security.scanner="dockerls"
 LABEL security.hardened="true"
-LABEL maintainer="your-team@company.com"
+LABEL maintainer="security@company.com"
 LABEL security.cve-contact="security@company.com"
 
-# Variáveis de ambiente de produção
 ENV NODE_ENV=production
+
+# Atualizar pacotes de segurança do SO
+RUN apt-get update && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 WORKDIR /app
 
-# Copiar apenas os artefatos necessários com permissão para o usuário 'node'
+# Usuário 'node' (UID 1000) já existe na imagem oficial Debian do Node
 COPY --from=builder --chown=node:node /app/node_modules ./node_modules
 COPY --chown=node:node . .
 
-# Metadados de build
 ARG GIT_SHA=unknown
 ARG BUILD_TIME=unknown
 LABEL org.opencontainers.image.revision="${GIT_SHA}"
@@ -50,12 +45,10 @@ LABEL org.opencontainers.image.created="${BUILD_TIME}"
 
 USER node
 
-# Health check seguro nativo
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD node -e "require('http').get('http://localhost:3000/health', (r) => {if (r.statusCode !== 200) process.exit(1)}).on('error', () => process.exit(1))"
 
 EXPOSE 3000
 
-# No shell - exec form
 ENTRYPOINT ["node"]
 CMD ["--enable-source-maps", "dist/index.js"]

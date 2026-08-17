@@ -24,11 +24,13 @@ from dockerls.infrastructure.config.settings import Settings
 
 PACKAGE = pathlib.Path(__file__).resolve().parents[2] / "dockerls"
 SOURCES = sorted(PACKAGE.rglob("*.py"))
-ALL_SOURCE = "\n".join(p.read_text() for p in SOURCES)
+ALL_SOURCE = "\n".join(p.read_text(encoding="utf-8") for p in SOURCES)
 SETTINGS_MODULE = PACKAGE / "infrastructure" / "config" / "settings.py"
 # Everything except the declarations themselves, so a field that is only
 # declared reads as zero rather than as one.
-SOURCE_OUTSIDE_SETTINGS = "\n".join(p.read_text() for p in SOURCES if p != SETTINGS_MODULE)
+SOURCE_OUTSIDE_SETTINGS = "\n".join(
+    p.read_text(encoding="utf-8") for p in SOURCES if p != SETTINGS_MODULE
+)
 
 
 def _reads_of(name: str, haystack: str = ALL_SOURCE) -> int:
@@ -80,7 +82,7 @@ def _public_definitions() -> dict[str, list[str]]:
     """Public functions, methods and properties defined in the package."""
     found: dict[str, list[str]] = {}
     for path in SOURCES:
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(
                 node, ast.FunctionDef | ast.AsyncFunctionDef
@@ -138,9 +140,9 @@ class TestNoUnreachablePublicCode:
             if _reads_of(name) - len(locations) <= 0:
                 unreachable.append(f"{name} ({locations[0]})")
 
-        assert unreachable == [], (
-            f"public symbols defined but never reached from anywhere in the package: {unreachable}"
-        )
+        assert (
+            unreachable == []
+        ), f"public symbols defined but never reached from anywhere in the package: {unreachable}"
 
     def test_no_module_is_orphaned(self):
         """A whole module nobody imports is the NVD client all over again."""

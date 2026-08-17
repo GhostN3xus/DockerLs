@@ -8,6 +8,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from dockerls.application.services.ecosystems import get_ecosystem_insights
 from dockerls.application.use_cases.recommend_images import build_recommendation
 from dockerls.cli.dependencies import build_recommend_use_case
 from dockerls.cli.options import OutputFormat, parse_output_format
@@ -55,20 +56,33 @@ async def _advisor(image: str, workers: int | None, output_format: OutputFormat)
 
     best = items[0]
     rec = best.recommendation or build_recommendation(best)
+    insights = get_ecosystem_insights(best.image.full_reference or image)
 
     if output_format == OutputFormat.JSON:
         payload = best.model_dump()
         payload["remediation"] = rec.model_dump()
+        payload["ecosystem_insights"] = {
+            "ecosystem": insights.ecosystem,
+            "version": insights.version,
+            "runtime_features": insights.runtime_features,
+            "base_distro_advice": insights.base_distro_advice,
+            "security_guidelines": insights.security_guidelines,
+            "common_pitfalls": insights.common_pitfalls,
+            "snippets": insights.recommended_dockerfile_snippets,
+        }
         console.print(json.dumps(payload, indent=2, default=str), soft_wrap=True)
         return
 
-    console.print(Panel(f"[bold]Security Advisor: {image}[/bold]", expand=False))
+    console.print(
+        Panel(f"[bold cyan]🐳 DockerLs Security Advisor: {image}[/bold cyan]", expand=False)
+    )
     console.print()
 
     info = Table(show_header=False, box=None, padding=(0, 2))
     info.add_column("Key", style="bold")
     info.add_column("Value")
     info.add_row("Current Best Image", f"[cyan]{best.image.full_reference}[/cyan]")
+    info.add_row("Ecosystem / Runtime", f"{insights.ecosystem} ({insights.version})")
     info.add_row("Security Score", f"[green]{best.security_score}[/green]")
     info.add_row("Tier", best.tier)
     info.add_row("Critical", f"[red]{best.scan.critical_count}[/red]")
@@ -79,6 +93,27 @@ async def _advisor(image: str, workers: int | None, output_format: OutputFormat)
     info.add_row("EOL", "Yes" if best.is_eol else "No")
     info.add_row("LTS", "Yes" if best.is_lts else "No")
     console.print(info)
+
+    if insights.base_distro_advice or insights.security_guidelines:
+        console.print()
+        console.print(
+            Panel(
+                "[bold magenta]🔍 Ecosystem Particularities & Hardening[/bold magenta]",
+                expand=False,
+            )
+        )
+        if insights.base_distro_advice:
+            console.print("\n[bold]Base Image & Distribution Notes:[/bold]")
+            for advice in insights.base_distro_advice:
+                console.print(f"  • {advice}")
+        if insights.security_guidelines:
+            console.print("\n[bold]Production & Security Guidelines:[/bold]")
+            for item in insights.security_guidelines:
+                console.print(f"  • {item}")
+        if insights.common_pitfalls:
+            console.print("\n[bold red]Common Pitfalls to Avoid:[/bold red]")
+            for pit in insights.common_pitfalls:
+                console.print(f"  ⚠️ {pit}")
 
     if rec.steps:
         console.print()

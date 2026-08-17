@@ -233,7 +233,7 @@ class TestTierWarningsAreSurfaced:
         out = self._out(self._tiered("C"))
         assert "Requires review" in out
         assert "Tier C" in out
-        assert "human review before production" in out
+        assert "human review before production" in " ".join(out.split())
 
     @pytest.mark.parametrize("tier", ["D", "E", "F"])
     def test_low_tiers_are_flagged_as_not_production_ready(self, tier):

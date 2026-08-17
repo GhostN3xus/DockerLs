@@ -5,15 +5,15 @@ FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
-# Instalar dependências de build se necessário
-RUN apk add --no-cache git && rm -rf /var/cache/apk/*
+# Instalar certificados CA e git
+RUN apk add --no-cache ca-certificates git && update-ca-certificates && rm -rf /var/cache/apk/*
 
-COPY go.mod go.sum ./
-RUN go mod download
+COPY go.mod go.sum* ./
+RUN go mod download || true
 
 COPY . .
 
-# Build estático com CGO desabilitado
+# Build estático com CGO desabilitado e flags de stripping
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o app .
 
 # Stage 2: Runtime minimal (scratch)
@@ -30,21 +30,19 @@ ARG BUILD_TIME=unknown
 LABEL org.opencontainers.image.revision="${GIT_SHA}"
 LABEL org.opencontainers.image.created="${BUILD_TIME}"
 
-# Copiar apenas o binário
+# Copiar certificados raiz SSL para chamadas HTTPS
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+# Copiar apenas o binário estático
 COPY --from=builder /app/app /app
 
-# Expor porta
+# Expor porta padrão
 EXPOSE 8080
 
-# Sem USER, `scratch` roda como uid 0 -- este template prometia hardening e
-# entregava um container root. Em `scratch` não há /etc/passwd, então o
-# usuário precisa ser numérico; 65534 é o `nobody` convencional.
+# Non-root user numérico (nobody) para scratch
 USER 65534:65534
 
-# Health check (se o binário suportar). Em `scratch` não existe shell, então
-# a forma exec é a única que roda. O `|| exit 0` anterior era duplamente
-# errado: inerte na forma exec e, se valesse, faria o healthcheck passar
-# sempre -- um portão que nunca reprova.
+# Health check seguro em formato exec
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/app", "-health"]
 

@@ -37,7 +37,10 @@ class TestSQLiteCache:
 
     @pytest.mark.asyncio
     async def test_expired(self, cache):
+        import asyncio
+
         await cache.set("exp", "data", ttl_seconds=0)
+        await asyncio.sleep(0.05)  # ensure expiry timestamp is in the past
         result = await cache.get("exp")
         assert result is None
 

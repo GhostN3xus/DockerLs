@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 class HTMLExporter(ExporterInterface):
     def export(self, result: AnalysisResult, output_path: Path) -> None:
-        output_path.write_text(self.export_string(result), encoding="utf-8")
+        output_path.write_bytes(self.export_string(result).encode("utf-8"))
 
     def export_string(self, result: AnalysisResult) -> str:
         items = result.recommendations or result.alternatives

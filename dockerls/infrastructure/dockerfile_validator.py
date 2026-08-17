@@ -336,7 +336,7 @@ class DockerfileValidator(DockerfileValidatorInterface):
         if not path.exists():
             raise FileNotFoundError(f"Dockerfile not found at {path}")
 
-        content = path.read_text()
+        content = path.read_text(encoding="utf-8")
         info = self._parser.parse(content)
 
         result = DockerfileValidationResult(
@@ -372,7 +372,7 @@ class DockerfileValidator(DockerfileValidatorInterface):
         if not path.exists():
             raise FileNotFoundError(f"Dockerfile not found at {path}")
 
-        content = path.read_text()
+        content = path.read_text(encoding="utf-8")
         info = self._parser.parse(content)
         validation = self.validate(path)
 
@@ -945,29 +945,99 @@ class HardeningTemplates(HardeningTemplateProvider):
     #: fazia `--base java` cair calado no template básico, com uma base
     #: destoante da que o usuário pediu.
     TEMPLATE_FILES = {
+        # Standalone Operating Systems
+        "alpine": "alpine.dockerfile",
+        "debian": "debian.dockerfile",
+        "ubuntu": "ubuntu.dockerfile",
+        "distroless": "distroless.dockerfile",
+        # Node.js
         "node": "node.dockerfile",
+        "node-alpine": "node-alpine.dockerfile",
+        "node-debian": "node-debian.dockerfile",
+        "node-ubuntu": "node-ubuntu.dockerfile",
+        "node-distroless": "node-distroless.dockerfile",
+        # Python
         "python": "python.dockerfile",
+        "python-alpine": "python-alpine.dockerfile",
+        "python-debian": "python-debian.dockerfile",
+        "python-ubuntu": "python-ubuntu.dockerfile",
+        "python-distroless": "python-distroless.dockerfile",
+        # Go
         "go": "go.dockerfile",
+        "go-scratch": "go-scratch.dockerfile",
+        "go-alpine": "go-alpine.dockerfile",
+        "go-debian": "go-debian.dockerfile",
+        "go-distroless": "go-distroless.dockerfile",
+        # Java
+        "java": "java.dockerfile",
+        "java-alpine": "java-alpine.dockerfile",
+        "java-debian": "java-debian.dockerfile",
+        "java-ubuntu": "java-ubuntu.dockerfile",
+        "java-distroless": "java-distroless.dockerfile",
+        # Rust
+        "rust": "rust.dockerfile",
+        "rust-scratch": "rust-scratch.dockerfile",
+        "rust-alpine": "rust-alpine.dockerfile",
+        "rust-debian": "rust-debian.dockerfile",
+        # PHP
+        "php": "php.dockerfile",
+        "php-alpine": "php-alpine.dockerfile",
+        "php-debian": "php-debian.dockerfile",
+        "php-ubuntu": "php-ubuntu.dockerfile",
+        # Ruby
+        "ruby": "ruby-alpine.dockerfile",
+        "ruby-alpine": "ruby-alpine.dockerfile",
+        "ruby-debian": "ruby-debian.dockerfile",
     }
 
     def _template_path(self, name: str) -> Path:
         return self.TEMPLATES_DIR / "hardening" / name
 
     def get_template(self, base_image: str) -> str:
-        """Retorna o template hardened correspondente a `base_image`.
+        """Retorna o template hardened correspondente a `base_image` e distribuição do SO."""
+        base_lower = base_image.lower().strip()
 
-        Levanta `UnknownHardeningTemplateError` quando não há template para a
-        base pedida. Antes disso o método caía num template genérico que
-        abria com `FROM <base>:latest` -- ou seja, o gerador "hardened"
-        entregava uma base flutuante, reprovada pela própria regra DF001
-        desta ferramenta, e para `--base java` uma imagem que sequer existe.
-        Falhar alto é o único desfecho honesto: o usuário pediu hardening.
-        """
-        base_lower = base_image.lower()
-        template_file = next(
-            (filename for key, filename in self.TEMPLATE_FILES.items() if key in base_lower),
-            None,
-        )
+        # 1. Correspondência exata de chave
+        template_file = self.TEMPLATE_FILES.get(base_lower)
+
+        # 2. Resolução inteligente de Ecossistema + SO
+        if template_file is None:
+            # Identificar ecossistema
+            detected_eco = None
+            for eco in ("node", "python", "golang", "go", "java", "rust", "php", "ruby"):
+                if eco in base_lower:
+                    detected_eco = "go" if eco == "golang" else eco
+                    break
+
+            # Identificar SO
+            detected_os = None
+            if "alpine" in base_lower or "musl" in base_lower:
+                detected_os = "alpine"
+            elif any(d in base_lower for d in ("debian", "slim", "bookworm", "bullseye")):
+                detected_os = "debian"
+            elif any(u in base_lower for u in ("ubuntu", "noble", "jammy", "focal")):
+                detected_os = "ubuntu"
+            elif "distroless" in base_lower:
+                detected_os = "distroless"
+            elif "scratch" in base_lower:
+                detected_os = "scratch"
+
+            if detected_eco and detected_os:
+                compound_key = f"{detected_eco}-{detected_os}"
+                template_file = self.TEMPLATE_FILES.get(compound_key)
+
+            if template_file is None and detected_eco:
+                template_file = self.TEMPLATE_FILES.get(detected_eco)
+
+            if template_file is None and detected_os:
+                template_file = self.TEMPLATE_FILES.get(detected_os)
+
+        # 3. Fallback para correspondência parcial de chave
+        if template_file is None:
+            for key, filename in self.TEMPLATE_FILES.items():
+                if key in base_lower:
+                    template_file = filename
+                    break
 
         if template_file is not None:
             path = self._template_path(template_file)
@@ -1016,13 +1086,13 @@ class HardeningTemplates(HardeningTemplateProvider):
         if output_path:
             output = Path(output_path)
             output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(content)
+            output.write_text(content, encoding="utf-8")
 
         return content
 
     def _apply_suggestions(self, path: Path, suggestions: list[HardeningRule]) -> str:
         """Aplica sugestões ao Dockerfile existente."""
-        content = path.read_text()
+        content = path.read_text(encoding="utf-8")
 
         # Aplicar cada sugestão
         for suggestion in suggestions:

@@ -100,6 +100,8 @@ class BuildReport:
     recommendations: list[dict[str, Any]] = field(default_factory=list)
     sbom: dict[str, Any] | None = None
     build_metadata: dict[str, Any] | None = None
+    remediation_history: list[dict[str, Any]] = field(default_factory=list)
+    auto_remediated: bool = False
 
 
 @dataclass
@@ -122,6 +124,9 @@ class BuildImageRequest:
     verbose: bool = False
     force: bool = False
     push: bool = False
+    auto_remediate: bool = False
+    max_remediation_rounds: int = 3
+    target_zero_vulns: bool = False
 
 
 @dataclass
@@ -221,6 +226,73 @@ class BuildImageUseCase:
             if request.scan:
                 scan_result = self._scan_image(request.tag)
 
+            # 6b. Ciclo de Auto-Remediação Iterativo (Zero Vulnerabilidades)
+            remediation_history: list[dict[str, Any]] = []
+            if (
+                (request.auto_remediate or request.target_zero_vulns)
+                and request.scan
+                and scan_result
+                and scan_result.total_vulnerabilities > 0
+            ):
+                current_df_path = dockerfile_path
+                for round_num in range(1, request.max_remediation_rounds + 1):
+                    remediated_path, applied_actions = self._derive_and_write_remediated_dockerfile(
+                        context_path=request.context_path,
+                        original_dockerfile_path=current_df_path,
+                        scan_result=scan_result,
+                        round_num=round_num,
+                    )
+                    if not applied_actions:
+                        logger.info("No further automated remediation actions available.")
+                        break
+
+                    logger.info(
+                        f"[Auto-Remediation Round {round_num}] Rebuilding with {len(applied_actions)} fix(es)..."
+                    )
+                    new_build = self._build_image(
+                        context_path=request.context_path,
+                        dockerfile_path=remediated_path,
+                        tag=request.tag,
+                        options=BuildOptions(
+                            tag=request.tag,
+                            dockerfile_path=remediated_path,
+                            context_path=request.context_path,
+                            no_cache=request.no_cache,
+                            build_args=request.build_args,
+                            labels=request.labels,
+                            buildkit=True,
+                        ),
+                    )
+                    if not new_build.success:
+                        logger.warning(
+                            f"Remediated build round {round_num} failed: {new_build.error_message}"
+                        )
+                        break
+
+                    build_result = new_build
+                    current_df_path = remediated_path
+                    prev_scan = scan_result
+                    new_scan = self._scan_image(request.tag)
+                    if new_scan:
+                        scan_result = new_scan
+                        remediation_history.append(
+                            {
+                                "round": round_num,
+                                "actions": applied_actions,
+                                "critical_before": prev_scan.critical,
+                                "critical_after": new_scan.critical,
+                                "high_before": prev_scan.high,
+                                "high_after": new_scan.high,
+                                "total_before": prev_scan.total_vulnerabilities,
+                                "total_after": new_scan.total_vulnerabilities,
+                            }
+                        )
+                        if new_scan.total_vulnerabilities == 0:
+                            logger.info(
+                                f"✨ Success: Image achieved ZERO vulnerabilities in round {round_num}!"
+                            )
+                            break
+
             # 7. Verificar thresholds de falha
             if request.fail_on:
                 # Um portão que não pôde ser avaliado não é um portão
@@ -270,6 +342,7 @@ class BuildImageUseCase:
                 scan=scan_result,
                 image_tag=request.tag,
                 dockerfile_path=request.dockerfile_path,
+                remediation_history=remediation_history,
             )
 
             return BuildImageResponse(
@@ -454,6 +527,101 @@ class BuildImageUseCase:
         )
         logger.debug(f"Dockerfile hardened gerado: {output_path}")
         return str(output_path)
+
+    def _derive_and_write_remediated_dockerfile(
+        self,
+        context_path: str,
+        original_dockerfile_path: str,
+        scan_result: ScanResult,
+        round_num: int,
+    ) -> tuple[str, list[str]]:
+        """Gera um Dockerfile com patches automáticos de segurança aplicados."""
+        full_orig = Path(original_dockerfile_path)
+        if not full_orig.is_absolute():
+            full_orig = Path(context_path) / original_dockerfile_path
+
+        if not full_orig.exists():
+            return original_dockerfile_path, []
+
+        content = full_orig.read_text(encoding="utf-8")
+        applied: list[str] = []
+        lower_content = content.lower()
+
+        # Identificar distro e tipo de pacote
+        is_alpine = "alpine" in lower_content
+        is_debian_ubuntu = any(d in lower_content for d in ("debian", "ubuntu", "slim"))
+
+        # 1. Patch de SO
+        os_vulns = [
+            v
+            for v in scan_result.vulnerabilities
+            if v.get("fixed_version")
+            and not any(
+                lang in (v.get("package") or "").lower() for lang in ("npm", "pip", "node_modules")
+            )
+        ]
+        if os_vulns:
+            if is_alpine and "apk upgrade" not in lower_content:
+                upgrade_cmd = "RUN apk upgrade --no-cache && rm -rf /var/cache/apk/*"
+                content = self._insert_instruction(content, upgrade_cmd)
+                applied.append(f"Applied Alpine OS security upgrade ({len(os_vulns)} fixable CVEs)")
+            elif is_debian_ubuntu and "apt-get upgrade" not in lower_content:
+                upgrade_cmd = (
+                    "RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*"
+                )
+                content = self._insert_instruction(content, upgrade_cmd)
+                applied.append(
+                    f"Applied Debian/Ubuntu OS security upgrade ({len(os_vulns)} fixable CVEs)"
+                )
+
+        # 2. Patch de npm embutido
+        has_npm_vulns = any(
+            "npm" in (v.get("package") or "").lower() for v in scan_result.vulnerabilities
+        )
+        if has_npm_vulns and "npm install -g npm" not in lower_content:
+            npm_cmd = "RUN npm install -g npm@latest && npm cache clean --force"
+            content = self._insert_instruction(content, npm_cmd)
+            applied.append("Upgraded bundled npm CLI to latest patched release")
+
+        # 3. Patch de pip embutido
+        has_pip_vulns = any(
+            (v.get("package") or "").lower() in ("pip", "setuptools", "wheel")
+            for v in scan_result.vulnerabilities
+        )
+        if has_pip_vulns and "pip install --upgrade pip" not in lower_content:
+            pip_cmd = "RUN pip install --no-cache-dir --upgrade pip setuptools wheel"
+            content = self._insert_instruction(content, pip_cmd)
+            applied.append("Upgraded pip/setuptools to secure versions")
+
+        if not applied:
+            return original_dockerfile_path, []
+
+        remediated_filename = f"Dockerfile.remediated.{round_num}"
+        remediated_path = Path(context_path) / remediated_filename
+        remediated_path.write_text(content, encoding="utf-8")
+        return str(remediated_path), applied
+
+    @staticmethod
+    def _insert_instruction(dockerfile_content: str, instruction: str) -> str:
+        """Insere uma instrução RUN de forma segura antes do USER ou no final do primeiro stage."""
+        lines = dockerfile_content.splitlines()
+        insert_idx = -1
+        for i, line in enumerate(lines):
+            stripped = line.strip().upper()
+            if stripped.startswith("USER ") and insert_idx == -1:
+                insert_idx = i
+                break
+
+        if insert_idx != -1:
+            lines.insert(insert_idx, instruction)
+        else:
+            last_from_idx = 0
+            for i, line in enumerate(lines):
+                if line.strip().upper().startswith("FROM "):
+                    last_from_idx = i
+            lines.insert(last_from_idx + 1, instruction)
+
+        return "\n".join(lines) + "\n"
 
     def _build_image(
         self,
@@ -806,6 +974,7 @@ class BuildImageUseCase:
         scan: ScanResult | None,
         image_tag: str,
         dockerfile_path: str,
+        remediation_history: list[dict[str, Any]] | None = None,
     ) -> BuildReport:
         """Gera relatório completo do build."""
         now = datetime.now(tz=UTC)
@@ -845,6 +1014,7 @@ class BuildImageUseCase:
         # explodia porque `analysis` era sempre None nos testes.
         recommendations = self._recommendation_dicts(list(validation.suggestions or []))
 
+        history = remediation_history or []
         return BuildReport(
             build_id=build_id,
             timestamp=now.isoformat(),
@@ -856,6 +1026,8 @@ class BuildImageUseCase:
             security_tier=security_tier,
             recommendations=recommendations,
             build_metadata=metadata,
+            remediation_history=history,
+            auto_remediated=bool(history),
         )
 
     def _calculate_security_score(self, validation: Any, scan: ScanResult | None) -> int:

@@ -94,9 +94,9 @@ class TestSingleLiveDisplay:
 
         root = pathlib.Path(__file__).resolve().parents[3] / "dockerls"
         hits = [
-            str(p.relative_to(root))
+            p.relative_to(root).as_posix()
             for p in root.rglob("*.py")
-            for line in p.read_text().splitlines()
+            for line in p.read_text(encoding="utf-8").splitlines()
             if re.search(r"\bProgress\(|\bLive\(|console\.status\(", line)
         ]
         assert hits == ["cli/progress.py"], f"more than one live display: {hits}"
