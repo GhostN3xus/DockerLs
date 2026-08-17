@@ -53,7 +53,8 @@ _CURL_USER = re.compile(r"(?P<prefix>(?:-u|--user)\s+[^\s:]+:)(?P<value>\S+)")
 _KNOWN_SECRET_VALUE = re.compile(
     r"""
       \bdckr_pat_[A-Za-z0-9_-]{8,}                          # Docker Hub PAT
-    | \bgh[pousr]_[A-Za-z0-9]{20,}                           # GitHub token
+    | \bgh[pousr]_[A-Za-z0-9]{20,}                           # GitHub classic token
+    | \bgithub_pat_[A-Za-z0-9_]{20,}                         # GitHub fine-grained PAT
     | \beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]+  # JWT
     | \bAKIA[0-9A-Z]{16}\b                                   # AWS access key id
     | \bxox[baprs]-[A-Za-z0-9-]{10,}                          # Slack token

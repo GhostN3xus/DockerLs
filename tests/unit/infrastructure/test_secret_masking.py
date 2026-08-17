@@ -113,3 +113,28 @@ class TestMaskingIsAppliedThroughTheLogFilter:
         contents = path.read_text()
         assert SECRET not in contents
         assert MASK in contents
+
+
+class TestGitHubTokens:
+    """`DOCKERLS_GITHUB_TOKEN` raises the catalogue's API rate limit.
+
+    Nothing logs it, but a token that reaches a log through an exception
+    message or a request repr has no key in front of it to identify it --
+    which is what the self-identifying value patterns are for. The
+    fine-grained format (`github_pat_...`) does not match the classic one,
+    so it needs its own arm.
+    """
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "ghp_AbCdEf0123456789AbCdEf0123456789xy",
+            "github_pat_11ABCDEFG0abcdefghijkl_MNOPQRSTUVWXYZ0123456789",
+        ],
+    )
+    def test_a_bare_github_token_is_masked(self, token):
+        assert token not in _mask_secrets(f"request failed with credential {token}")
+
+    def test_a_github_token_in_a_bearer_header_is_masked(self):
+        token = "github_pat_11ABCDEFG0abcdefghijkl_MNOPQRSTUVWXYZ0123456789"
+        assert token not in _mask_secrets(f"Authorization: Bearer {token}")

@@ -73,7 +73,12 @@ class RateLimiter:
                 wait = deficit * (self._period / self._rate)
             # Slept outside the lock so waiting callers do not serialize on
             # each other's sleeps.
-            await asyncio.sleep(wait * (1.0 + random.random() * JITTER_FRACTION))  # noqa: S311
+            # Timing jitter, not a secret: this decides how long a waiting
+            # caller sleeps so N workers do not wake in lockstep. A CSPRNG
+            # here would buy nothing -- there is nothing to predict and
+            # nothing to forge.
+            jitter = random.random()  # nosec B311 # noqa: S311 - scheduling, not crypto
+            await asyncio.sleep(wait * (1.0 + jitter * JITTER_FRACTION))
 
 
 class CircuitOpenError(RuntimeError):

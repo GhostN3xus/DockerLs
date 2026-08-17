@@ -102,6 +102,16 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
 
 ### Corrigido
 
+- **`CACHE_SCHEMA_VERSION` foi para `v3`.** Uma entrada `v2` ainda *validaria*
+  contra o modelo novo — o pydantic preencheria os campos ausentes com os
+  padrões — e é justamente esse o problema: os padrões são "nada determinado" e
+  `UNVERIFIED`, então uma linha velha apresentaria a imagem como não
+  inspecionada em vez de não escaneada. Órfãs as linhas antigas custa uma
+  execução fria e elimina a ambiguidade.
+- **Tokens fine-grained do GitHub (`github_pat_...`) são mascarados nos logs.**
+  O formato clássico (`ghp_...`) já era; o novo não casava com o mesmo padrão.
+  Nada registra o token em log, mas o mascaramento existe para o caso em que
+  ele chega lá por uma mensagem de exceção, sem chave que o identifique.
 - **`--format json` podia sair inválido** em `alternatives` e `advisor`: quando a
   imagem atual não podia ser escaneada, o aviso legível era impresso no stdout,
   na frente do documento JSON. Diagnósticos agora vão para o stderr — um formato
