@@ -137,3 +137,122 @@ chamador — a wiring do `--dry-run` na CLI é o próximo passo, e é ela que
 fecha essa pendência. Enquanto isso, os dois testes do guard estão
 **vermelhos de propósito**, e é a primeira coisa a corrigir na próxima
 iteração. Nenhum stub silencioso foi criado para escondê-los.
+
+---
+
+## D-007 — A abstração multi-source estende `ImageRepositoryInterface`
+
+**Ambiguidade.** O enunciado pede um `Protocol` novo (`ImageSource`) com
+`search`, `resolve`, `get_metadata` e `verify`.
+
+**Decisão.** Não criar um segundo protocolo. `ImageRepositoryInterface` +
+`CompositeImageRepository` **já são** a abstração multi-source: interface no
+domínio, implementações em `integrations/`, fan-out concorrente com
+degradação por fonte. O que faltava não era a interface, era um **registro
+nomeado** — que fosse capaz de mapear `--source dhi` para um provedor sem
+espalhar `if source == ...`. Foi isso que se acrescentou
+(`application/services/source_registry.py`).
+
+**Motivo.** Um segundo protocolo obrigaria todo provedor existente a
+implementar as duas faces, ou obrigaria a um adaptador por provedor. Nenhum
+dos dois compra capacidade nova: `resolve`/`verify` do enunciado já existem,
+como `RegistryInspector` (digest + config) e como `tag_exists`, e ambos
+servem a *todas* as fontes em vez de serem reimplementados em cada uma.
+
+---
+
+## D-008 — Scores calculados sobre os fatos determinados, não sobre um denominador fixo
+
+**Ambiguidade.** O enunciado descreve o Hardening Score como uma soma de
+pesos fixos (`Non-root +20`, `No shell +15`, ...), o que implica um
+denominador constante.
+
+**Decisão.** O denominador é o peso dos fatores **efetivamente
+determinados**, e o valor vem acompanhado de `coverage` (quanto do modelo
+isso representa) e de `reportable` (falso abaixo de 25%, quando o número
+passa a ser exibido como `n/a`).
+
+**Motivo.** Com denominador fixo, uma imagem excelente que ninguém conseguiu
+inspecionar pontua trinta e poucos — e esse número é lido como veredito de
+hardening, quando na verdade mede a *nossa* falta de acesso. A maior parte
+dos fatos do modelo (SUID, shell, gerenciador de pacotes) não é determinável
+sem desempacotar o filesystem, coisa que este projeto não faz. Um score que
+diz "100 com 31% de cobertura" é verdadeiro e útil; um que diz "34" é falso
+e prejudicial. A regra que isso preserva é a mesma do resto do projeto:
+**não medido nunca vira medição ruim**, do mesmo jeito que scan falho nunca
+vira zero CVE.
+
+**Consequência registrada.** Cobertura passa a ser um insumo de
+`Confidence`, e o ranking só consulta hardening quando `reportable` é
+verdadeiro — senão um 100 tirado de um fato ganharia de um 85 medido de
+verdade.
+
+---
+
+## D-009 — Fatos de imagem são de três estados, e `unknown` não é `false`
+
+**Ambiguidade.** O enunciado pede campos como `has_shell`, `runs_as_non_root`
+e `is_distroless`, e diz que o valor deve ser `unknown` quando indeterminado.
+
+**Decisão.** `Tristate` (`TRUE`/`FALSE`/`UNKNOWN`) no domínio, usado em todo
+fato de hardening, com uma assimetria explícita na inferência: a presença de
+um pacote de shell **prova** shell; a ausência não prova nada e permanece
+`UNKNOWN`.
+
+**Motivo.** Um `bool` faz o caminho errado ser o caminho fácil: `not
+has_shell` transforma "ninguém olhou" em "não tem shell", e isso vira
+crédito num score. A assimetria existe porque uma base derivada de busybox
+traz `/bin/sh` sem nomear pacote nenhum — concluir `false` por ausência
+seria uma afirmação de hardening que nenhuma evidência sustenta.
+
+**Consequência registrada.** Nome de imagem **nunca** é evidência.
+`DockerImage.is_distroless`/`is_alpine`/`is_hardened_source` continuam
+existindo e continuam alimentando o bônus qualitativo (mínimo, e limitado
+abaixo de um único HIGH) do `SecurityScore` legado, mas não alimentam nem o
+Hardening Score nem o Attack Surface Score: lá só entra o que o registry, o
+scanner ou uma declaração auditável disseram.
+
+---
+
+## D-010 — DHI é fonte opt-in, e um candidato não escaneável é `UNVERIFIED`
+
+**Ambiguidade.** O enunciado trata DHI como mais um catálogo a fanar por
+padrão.
+
+**Decisão.** `dhi` fica **desligado** por padrão (`include_dhi_source =
+false`), ligável por execução com `--source dhi`/`--all-sources`.
+
+**Motivo.** `dhi.io` recusa pull anônimo — verificado durante a auditoria: o
+endpoint de token responde 401 sem credencial. Numa máquina sem
+entitlement, ligar DHI por padrão produziria uma coluna de `UNVERIFIED` em
+toda execução, que é *correto* mas ruidoso, e gastaria scans que falham em
+cima de candidatos que não podem entrar na tabela. Com credencial
+configurada, uma flag liga tudo.
+
+**O que não muda:** metadado de catálogo continua não sendo veredito. Uma
+definição DHI que declare `run-as: node` não torna a imagem não-root aos
+olhos do DockerLs; se o registry servir o config e ele disser `root`, vale o
+config, e a contradição é registrada como achado.
+
+---
+
+## D-011 — Bomba YAML: medir a expansão, não contar aliases
+
+**Ambiguidade.** Nenhuma: o enunciado só exige "parsing seguro" e proíbe
+`yaml.load`.
+
+**Decisão.** Além de `SafeLoader` e do teto de bytes, o documento é
+**composto** num grafo de nós (onde alias é aresta compartilhada), o tamanho
+expandido é calculado sobre esse grafo com memoização e clamp, e só então
+`construct_document` roda.
+
+**Motivo.** A primeira implementação contava aliases no texto cru, e o teste
+adversarial derrubou essa premissa: a bomba clássica (nove níveis de
+aliasing nônuplo) usa ~70 aliases — abaixo de qualquer limite razoável — e
+expande para 387 milhões de nós. O guard passava e o parser travava. O que
+precisa ser limitado é o **produto**, não a contagem. Fica registrado porque
+o erro é sedutor: um limite de aliases *parece* proteger e não protege.
+
+**Consequência registrada.** O teste afirma o tempo de recusa, não só a
+exceção. Um guard que recusa depois de expandir executou o ataque em vez de
+impedi-lo, e só o tempo distingue os dois casos.

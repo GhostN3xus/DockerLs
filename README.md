@@ -6,12 +6,27 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Typed](https://img.shields.io/badge/mypy-strict-blue)](pyproject.toml)
 
-Consultor de segurança de imagens Docker para uso corporativo. Descobre as imagens
-Docker mais seguras disponíveis no Docker Hub escaneando vulnerabilidades,
-verificando status de fim de vida (EOL) e produzindo planos de correção acionáveis.
+**Motor de decisão de segurança para imagens de container.** O DockerLs descobre,
+normaliza, verifica, escaneia, valida cruzado e ranqueia imagens de múltiplos
+ecossistemas confiáveis para identificar a escolha mais segura para produção --
+e explica por quê.
 
-O DockerLs não é apenas um scanner -- é um consultor de segurança que recomenda a
-melhor imagem para produção e diz exatamente como corrigir o que encontra.
+A pergunta que ele responde não é *"quantas CVEs esta imagem tem?"*, e sim:
+
+> Dado um runtime desejado, qual é a melhor alternativa para produção
+> considerando vulnerabilidades, exploração real, EOL, hardening, superfície de
+> ataque, manutenção, proveniência, compatibilidade e **confiança dos dados**?
+
+```
+DESCOBRIR -> NORMALIZAR -> VERIFICAR -> ESCANEAR -> VALIDAR CRUZADO
+   -> HARDENING -> SUPERFÍCIE DE ATAQUE -> CICLO DE VIDA -> PROVENIÊNCIA
+   -> RISCO -> RANQUEAR -> RECOMENDAR -> EXPLICAR
+```
+
+**Nenhum fornecedor é autoridade.** Docker Hub, Chainguard, Distroless, Docker
+Hardened Images, Trivy e Grype são *fontes de dados*. Uma imagem publicada como
+"hardened" não é uma imagem segura até que o DockerLs a resolva por digest, a
+escaneie e concorde. O veredito é sempre do DockerLs.
 
 ---
 
@@ -25,7 +40,12 @@ que o DockerLs foi construído.
 | | Scanner comum | DockerLs |
 |---|---|---|
 | Escopo | uma imagem que você já escolheu | **todas as tags candidatas**, ranqueadas |
-| Fontes | um registry | Docker Hub + Chainguard + Distroless, no mesmo pipeline |
+| Fontes | um registry | Docker Hub + Chainguard + Distroless + **Docker Hardened Images**, no mesmo pipeline |
+| Identidade | a tag que você digitou | **digest do manifesto**, resolvido antes do scan -- uma tag se move, um digest não |
+| Configuração | fora do escopo | **Hardening Score** medido no config OCI da imagem publicada (não root, portas, entrypoint) |
+| Superfície | confundida com tamanho | **Attack Surface Score** próprio: shell, gerenciador de pacotes, ferramentas de debug, privilégio |
+| Metadados do fornecedor | aceitos como fato | tratados como *declaração*; contradições com o que foi medido viram achado |
+| Qualidade da evidência | invisível | **Confidence** (`HIGH`/`MEDIUM`/`LOW`/`UNVERIFIED`) em cada linha |
 | Confiança | a palavra de um scanner | **validação cruzada** com um segundo scanner; divergência material é sinalizada, não escondida |
 | EOL | fora do escopo | penaliza no score, e uma base EOL nunca é `production ready` |
 | Exploração real | só severidade | CISA KEV + EPSS pesam no score |
@@ -47,8 +67,13 @@ recebe nível e não entra na recomendação.
 - [Início rápido](#início-rápido)
 - [Comandos](#comandos)
 - [Exit codes](#exit-codes)
+- [Fontes de imagens (multi-source)](#fontes-de-imagens-multi-source)
 - [Como a recomendação funciona](#como-a-recomendação-funciona)
 - [Algoritmo de pontuação](#algoritmo-de-pontuação)
+- [Hardening Score](#hardening-score)
+- [Attack Surface Score](#attack-surface-score)
+- [Confiança (Confidence)](#confiança-confidence)
+- [Recomendações por digest](#recomendações-por-digest)
 - [Níveis de segurança](#níveis-de-segurança)
 - [Modo alternativo](#modo-alternativo)
 - [Performance](#performance)
@@ -71,7 +96,8 @@ recebe nível e não entra na recomendação.
 |---|---|---|
 | [`search`](#search) | Lista as tags disponíveis de uma imagem | `0` / `1` |
 | [`recommend`](#recommend) | Ranqueia as tags mais seguras e recomenda uma | `0` `1` `2` `3` |
-| [`advisor`](#advisor) | Plano de correção completo para a melhor imagem | `0` / `1` |
+| [`advisor`](#advisor) | Plano de correção completo para a melhor imagem (e migração, se você passar uma tag) | `0` / `1` |
+| [`alternatives`](#alternatives) | Alternativas mais seguras para a imagem que você já roda, com trade-offs | `0` `1` `2` |
 | [`analyze`](#analyze) | Análise profunda de uma tag: CVEs, CVSS, origem, correção | `0` `1` `2` |
 | [`compare`](#compare) | Compara duas ou mais imagens lado a lado | `0` / `1` |
 | [`sbom`](#sbom) | Gera SBOM (CycloneDX ou SPDX) via Trivy | `0` / `1` |
@@ -315,6 +341,11 @@ informa de onde veio cada linha.
 | Docker Hub | `docker.io` | Listagem completa de tags, com tamanhos e datas |
 | Chainguard | `cgr.dev/chainguard/<imagem>` | O nível gratuito acompanha tags móveis (`latest`, `latest-dev`); versões fixadas são recurso pago |
 | Distroless | `gcr.io/distroless/<imagem>` | O GCR informa datas de publicação e tamanhos, então essas tags são ordenadas da mais recente para a mais antiga |
+| Docker Hardened Images | `dhi.io` | Catálogo público, registry privado: sem credencial os candidatos ficam `UNVERIFIED`. Opt-in via `--source dhi` |
+
+Selecione as fontes com `--source <nome>` (repetível) ou `--all-sources`; veja
+[Fontes de imagens](#fontes-de-imagens-multi-source) para a lista completa e o
+detalhamento do DHI.
 
 Assinaturas cosign, atestados, SBOMs, apelidos de arquitetura única e duplicatas
 fixadas por commit são filtrados das listagens -- não são imagens que alguém
@@ -372,6 +403,8 @@ terminal e grava resultados limpos no arquivo.
 | `--no-progress` | Desativa o indicador de progresso |
 | `--no-cross-validate` | Pula a validação com o segundo scanner (mais rápido) |
 | `--no-hub-check` | Pula a verificação de tag no registry (uso offline) |
+| `--source <nome>` | Consulta só as fontes indicadas (repetível) |
+| `--all-sources` | Consulta todas as fontes, inclusive as opt-in (DHI) |
 | `--no-hardened` | Consulta apenas o Docker Hub |
 
 #### Concorrência de scans
@@ -400,10 +433,99 @@ Consultor de segurança completo, com passos de correção.
 ```bash
 dockerls advisor node
 dockerls advisor node --format json
+
+# Passando uma TAG, o advisor também explica a migração a partir dela
+dockerls advisor node:22-alpine
 ```
 
 A saída inclui: melhor imagem atual, pontuação de segurança, detalhamento de
 vulnerabilidades, pontuação de correção e um plano de correção passo a passo.
+
+Quando o argumento traz uma tag (`node:22-alpine` em vez de `node`), essa tag é
+tratada como a imagem que você roda **hoje**: ela é escaneada pelo mesmo
+pipeline e o advisor acrescenta a seção `Migration`, com ganho de pontuação,
+trade-offs e checklist. Um nome sem tag mantém o comportamento de sempre.
+
+```
+Migration
+  CURRENT      node:22-alpine
+  RECOMMENDED  node:22-bookworm-slim
+  PIN TO       node@sha256:...
+
+  SECURITY IMPROVEMENT  +18.7 points
+
+WHY
+  OK CRITICAL: 2 -> 0
+  OK HIGH: 5 -> 0
+  OK target runs as a non-root account by default
+  OK attack surface: 70 -> 25 (lower is better)
+
+TRADE-OFFS
+  ! C library changes (musl -> glibc): prebuilt native modules, wheels and cgo
+    binaries linked against the old one will not load and must be rebuilt
+  ! package manager changes (apk -> apt): every install step in your Dockerfile
+    needs rewriting, and package names differ between them
+
+MIGRATION CHECKLIST
+  1. rebuild your image against node@sha256:...
+  2. rebuild every native dependency for glibc (clear prebuilt binaries first)
+  3. run the unit test suite against the rebuilt image
+  4. run the integration test suite against the rebuilt image
+  5. re-scan the resulting image (`dockerls analyze <your-image>`)
+  6. verify runtime behaviour under production-like load
+  7. deploy to a canary before rolling out
+```
+
+Nada aqui afirma que a migração é compatível — e nada poderia. Nenhum scan
+consegue dizer se a sua aplicação continua rodando; é para isso que o checklist
+existe.
+
+### alternatives
+
+Alternativas mais seguras para a imagem que você **já roda**, com o custo de
+trocar.
+
+```bash
+dockerls alternatives node:22
+dockerls alternatives node:22 --all-sources
+dockerls alternatives python:3.12 --format json
+```
+
+A diferença para o `recommend` é a linha de base: aqui existe uma imagem
+concreta da qual você depende, e ela é **escaneada pelo mesmo pipeline** dos
+candidatos — a comparação é entre duas medições, nunca entre uma medição e uma
+reputação.
+
+```
+CURRENT
+  node:22  Docker Hub
+  score 55.0  tier D  C/H/M 2/5/12
+
+RECOMMENDED ALTERNATIVES
+┌───┬────────────────────────────┬──────────┬───────┬───────┬────────┬──────┐
+│ # │ Image                      │ Source   │ Score │ Delta │ C/H/M  │ Conf │
+├───┼────────────────────────────┼──────────┼───────┼───────┼────────┼──────┤
+│ 1 │ node:22-bookworm-slim      │ Docker…  │  88.0 │ +33.0 │ 0/0/3  │ HIGH │
+│ 2 │ cgr.dev/chainguard/node    │ Chaing…  │  86.5 │ +31.5 │ 0/0/0  │ MEDI │
+└───┴────────────────────────────┴──────────┴───────┴───────┴────────┴──────┘
+```
+
+Os números acima são **ilustrativos**: nada é fixado no código, tudo sai do scan
+da sua execução.
+
+Três recusas deliberadas:
+
+* se a imagem atual **não pôde ser escaneada**, o comando termina em `1` e diz
+  isso — sem linha de base, não há melhoria a afirmar;
+* candidatos `UNVERIFIED` nunca são oferecidos como alternativa;
+* quando nada pontua melhor que o que você já roda, o comando **diz isso**.
+  Ficar onde está é um resultado, não uma falha.
+
+| Exit code | Significado |
+|---|---|
+| `0` | alternativas encontradas (ou a imagem atual já é a melhor) |
+| `1` | falha técnica: a imagem atual não pôde ser medida |
+| `2` | há alternativas, mas nenhuma atinge o baseline |
 
 ### sbom
 
@@ -854,42 +976,125 @@ achei alternativas" é um desfecho que `0`/`1`/`2` não sabem expressar, então
 
 ---
 
+## Fontes de imagens (multi-source)
+
+O DockerLs procura candidatos em vários catálogos ao mesmo tempo e os coloca
+todos no **mesmo pipeline**. Uma imagem de catálogo hardened não ganha por
+reputação: ela ganha por vulnerabilidade medida, hardening medido e evidência
+verificável -- ou não ganha.
+
+| `--source` | Catálogo | Padrão | Observação |
+|---|---|---|---|
+| `dockerhub` | Docker Hub | sempre | fonte primária, recebe o `--limit` inteiro |
+| `chainguard` | Chainguard free tier (`cgr.dev`) | ligado | o tier gratuito publica só as tags móveis |
+| `distroless` | Google Distroless (`gcr.io/distroless`) | ligado | único que data as tags via manifesto GCR |
+| `dhi` | Docker Hardened Images (`dhi.io`) | **desligado** | catálogo público, registry **exige credenciais** |
+| `all` | todos acima | — | equivalente a `--all-sources` |
+
+```bash
+# Só o catálogo DHI
+dockerls search node --source dhi
+
+# Todos os catálogos configurados, incluindo os opt-in
+dockerls recommend node --all-sources
+
+# Dois catálogos específicos
+dockerls recommend node --source dockerhub --source chainguard
+
+# Quais fontes este build conhece
+dockerls doctor
+```
+
+Adicionar um provedor novo é **um `register()`** na camada de wiring
+(`SourceRegistry`): nenhum comando conhece nomes de fornecedor, e nenhum `if
+source == ...` cresce um braço novo.
+
+### Docker Hardened Images
+
+O DHI é diferente de todo o resto, e a diferença molda a integração inteira:
+
+* o **catálogo** é público — um repositório GitHub com definições declarativas
+  de build (pacotes instalados, conta de execução, datas de EOL);
+* o **registry** não é — `dhi.io` recusa pull anônimo.
+
+Ou seja: qualquer um descobre; só quem tem credencial escaneia. Isso não é um
+problema a contornar, é exatamente o caso que o resto deste projeto foi feito
+para tratar com honestidade:
+
+```
+Catálogo DHI (declaração)  ->  Registry (digest)  ->  Scanner  ->  Veredito
+        │                            │
+        └── metadados                └── sem credencial: 401
+            declarados                   -> UNVERIFIED, nunca ranqueado
+```
+
+> **DHI metadata != veredito de segurança do DockerLs.**
+> Uma definição que declara `run-as: node` é uma *declaração*. Se o config OCI
+> da imagem publicada disser `root`, o DockerLs mantém o que mediu e registra a
+> contradição como achado — é justamente para isso que a comparação existe.
+
+**Custo.** O catálogo tem ~11 mil arquivos, e clonar ou percorrê-lo por
+requisição seria inaceitável. O DockerLs faz **uma** chamada à API do GitHub por
+TTL (a árvore recursiva), reduz a um índice compacto, guarda em cache, e depois
+busca apenas as definições da imagem consultada — via CDN, que não consome a
+cota da API. Medido: 1 requisição a frio sobre 11k blobs (14 ms), **0** a quente.
+
+Sem token, a API do GitHub permite 60 requisições/hora para um cliente anônimo.
+`DOCKERLS_GITHUB_TOKEN` (somente leitura, sem escopo) eleva esse teto.
+
+---
+
 ## Como a recomendação funciona
 
 O pipeline, na ordem em que roda. Cada etapa existe para reduzir trabalho da
 seguinte ou para impedir que um resultado não comprovado chegue à tabela.
 
 ```
-1. Descobrir       Docker Hub + Chainguard + Distroless, em paralelo.
-   │               Assinaturas cosign, atestados, SBOMs, apelidos de arquitetura
-   │               e duplicatas fixadas por commit são filtrados aqui.
+1. Descobrir       Docker Hub + Chainguard + Distroless + DHI, em paralelo,
+   │               conforme --source/--all-sources. Assinaturas cosign,
+   │               atestados, SBOMs, apelidos de arquitetura e duplicatas
+   │               fixadas por commit são filtrados aqui.
    ▼
-2. Deduplicar      Tags que compartilham um digest de manifesto viram uma só
-   │               unidade de trabalho.
+2. Fixar digest    Toda tag sem digest é resolvida no registry (um HEAD).
+   │               É isso que faz a deduplicação funcionar ENTRE catálogos.
    ▼
-3. Consultar       Análise em cache, chaveada por digest + regras de ignore
-   │  o cache      ativas. Um hit pula direto para a etapa 6.
+3. Deduplicar      Tags que compartilham um digest de manifesto viram uma só
+   │               unidade de trabalho -- inclusive vindas de fontes distintas.
    ▼
-4. Escanear        Só o que sobrou. Trivy como principal, Grype como fallback
+4. Consultar       Análise em cache, chaveada por digest + regras de ignore
+   │  o cache      ativas. Um hit pula direto para a etapa 7.
+   ▼
+5. Escanear        Só o que sobrou. Trivy como principal, Grype como fallback
    │               por scan. Um scan que falha NÃO vira zero: vira Unverified.
    ▼
-5. Enriquecer      EOL (endoflife.date), CISA KEV e EPSS.
+6. Enriquecer      EOL (endoflife.date), CISA KEV e EPSS.
    │
    ▼
-6. Pontuar         SecurityScore -> SecurityTier -> RemediationScore.
+7. Pontuar         SecurityScore -> SecurityTier -> RemediationScore.
    │
    ▼
-7. Verificar       A tag existe mesmo no registry de origem? Isso vem ANTES da
+8. Verificar       A tag existe mesmo no registry de origem? Isso vem ANTES da
    │  a tag        validação cruzada, para não gastar um scan secundário em quem
    │               vai cair -- e para que um candidato promovido no lugar de um
    │               descartado não entre na tabela sem ter sido checado.
    ▼
-8. Validar         Os melhores candidatos são reescaneados com o segundo
+9. Validar         Os melhores candidatos são reescaneados com o segundo
    │  cruzado      scanner. Divergência material vira `!disputed`.
    ▼
-9. Ranquear        Baseline atingido -> Recommended Images.
-                   Baseline não atingido -> as melhores candidatas mesmo assim,
-                   marcadas como abaixo do alvo.
+10. Inspecionar    Só os finalistas: o config OCI de cada um é buscado no
+   │               registry (com o blob conferido contra o próprio digest) e
+   │               vira Hardening Score + Attack Surface Score. Uma declaração
+   │               de catálogo preenche apenas o que a medição não determinou,
+   │               e nunca a sobrescreve.
+   ▼
+11. Confiar        Confidence a partir de: scan concluído, concordância entre
+   │               scanners, digest resolvido, tag confirmada, cobertura de
+   │               hardening. Falha técnica = UNVERIFIED, e ponto.
+   ▼
+12. Ranquear       Confiança -> vulnerabilidade medida -> hardening ->
+   │               superfície -> remediabilidade. Nessa ordem, sempre.
+   ▼
+13. Explicar       "Why this image?" e "Trade-offs" acompanham a recomendação.
 ```
 
 **O portão final.** Antes de qualquer coisa sair do use case, a lista selecionada
@@ -998,6 +1203,161 @@ despercebido.
 > imagem com pontuação 0,0, 6 CRITICAL e 170 achados recebia exatamente o mesmo
 > nível de uma imagem 36 pontos melhor. O nível **S deixou de existir**; quem
 > consome o campo `tier` em JSON/CSV/SARIF precisa ajustar.
+
+---
+
+## Hardening Score
+
+Duas imagens com a mesma contagem de CVEs não são igualmente seguras. Uma pode
+rodar como root, com shell, gerenciador de pacotes e compilador dentro; a outra
+pode rodar como conta sem privilégio e sem nada disso. Nenhum número de CVE
+expressa essa diferença — por isso hardening é uma **dimensão separada**, e não
+um termo somado ao score de segurança.
+
+### Os fatores e seus pesos
+
+| Fator | Peso | Ganha crédito quando |
+|---|---:|---|
+| `non-root` | 25 | a conta padrão de execução não é root |
+| `no-shell` | 15 | não há shell na imagem |
+| `no-package-manager` | 12 | não há gerenciador de pacotes |
+| `minimal-packages` | 12 | poucos pacotes instalados (crédito decai de 50 até 200) |
+| `no-setuid` | 10 | não há binários SUID/SGID |
+| `no-debug-tools` | 8 | não há compiladores nem utilitários de rede |
+| `no-privileged-ports` | 8 | nenhuma porta abaixo de 1024 declarada |
+| `explicit-entrypoint` | 5 | há entrypoint fixo, e ele não é um shell |
+| `healthcheck` | 5 | a imagem declara um healthcheck |
+
+### A regra que sustenta o número: `unknown` nunca pontua
+
+Um fato de segurança tem **três** estados: verdadeiro, falso e *não
+determinado*. Colapsar o terceiro em "falso" é a simplificação mais perigosa
+disponível aqui: transformaria "ninguém olhou dentro da imagem" em "esta imagem
+não tem shell", que é uma afirmação de hardening que ninguém fez.
+
+Por isso o denominador do score é o peso dos fatores **efetivamente
+determinados**, e `coverage` diz quanto do modelo isso representa:
+
+```
+Hardening: 100  (coverage 31%)   -> tudo o que deu para checar estava bom,
+                                     e deu para checar menos de um terço
+Hardening: n/a  (coverage 8%)    -> pouco demais para o número significar algo
+```
+
+Abaixo de 25% de cobertura o número não é exibido: aparece `n/a`. Um número
+com cara de medição, calculado a partir de dois fatos, é pior que nenhum número.
+
+### De onde vem cada fato
+
+| Origem | O que estabelece | Vale como |
+|---|---|---|
+| `registry` | config OCI do digest resolvido: usuário, portas, entrypoint, healthcheck, camadas | **medição** |
+| `scanner` | pacotes observados dentro da imagem | **medição** |
+| `catalog` | definição de build publicada pelo fornecedor (DHI) | *declaração* |
+
+A precedência é absoluta: uma medição nunca é sobrescrita por uma declaração.
+Quando as duas discordam, a contradição vira achado em `conflicts` — não é
+resolvida em silêncio.
+
+E a assimetria que impede o erro clássico: um pacote de shell declarado **prova**
+que há shell; a *ausência* dele não prova nada (uma base derivada de busybox
+traz `/bin/sh` sem nunca nomeá-lo como pacote). Presença → `true`; ausência →
+`unknown`, nunca `false`.
+
+### Hardening nunca mascara vulnerabilidade
+
+O Hardening Score **não** entra no `SecurityScore` e **não** é somado a ele. No
+ranqueamento ele só é consultado depois da posição de vulnerabilidade medida, o
+que é a razão estrutural de nunca poder compensá-la:
+
+```
+Hardening: 98
+Vulnerability Risk: CRITICAL
+
+Veredito final:  NOT PRODUCTION READY
+```
+
+Uma imagem perfeitamente configurada e cheia de CVEs exploráveis é uma imagem
+perfeitamente configurada e vulnerável.
+
+---
+
+## Attack Surface Score
+
+Distinto de hardening, e distinto de novo de vulnerabilidade. Hardening pergunta
+*"isto está configurado defensivamente?"*; superfície de ataque pergunta *"se
+houver execução de código aqui dentro, o que já está disponível para usar?"*.
+
+| Item | Peso | Por quê |
+|---|---:|---|
+| `package-manager` | 25 | permite **instalar** o que faltar |
+| `shell` | 20 | permite usar o que já está instalado |
+| `debug-tools` | 15 | compiladores e utilitários de rede |
+| `setuid` | 15 | caminho direto de escalonamento |
+| `root-default` | 15 | multiplica o valor de todos os outros |
+| `package-volume` | 10 | código instalado que ninguém auditou |
+
+**A escala é invertida: maior é pior.** É a única métrica deste projeto nessa
+direção, e isso é dito em toda renderização — `Surf` na tabela vem rotulado como
+*lower is better*.
+
+**Tamanho não é superfície.** Uma imagem de 900 MB feita de um único binário
+estaticamente ligado tem superfície menor que uma de 40 MB com busybox, apk e
+curl. Bytes não pontuam aqui; *pacotes* pontuam, porque cada pacote é uma
+funcionalidade instalada.
+
+Como no hardening, o score é calculado só sobre fatos determinados e reporta
+`coverage`.
+
+---
+
+## Confiança (Confidence)
+
+Todo número que esta ferramenta imprime é a saída de uma cadeia: descobrir,
+resolver digest, escanear, conferir com um segundo scanner, ler a configuração.
+Elos quebram o tempo todo. Sem um sinal de confiança, um score tirado de um
+scanner sobre uma tag não resolvida é renderizado igual a um score de dois
+scanners concordando sobre um digest fixado — e o leitor não tem como distinguir.
+
+| Nível | Significa |
+|---|---|
+| `HIGH` | escaneado, fixado por digest, confirmado no registry, corroborado por um segundo scanner que concordou |
+| `MEDIUM` | escaneado e consistente, com evidência faltando (só um scanner, sem digest, ou pouca inspeção) |
+| `LOW` | escaneado, mas com problema material: scanners divergiram, tag não confirmada, ou referência não fixável |
+| `UNVERIFIED` | **não houve scan concluído.** Nada pode ser concluído, em direção nenhuma |
+
+`UNVERIFIED` é um **piso**: nenhum outro sinal tira um candidato dele, e o
+ranqueamento nunca o coloca acima de algo que foi medido. Um scanner ausente, um
+banco de vulnerabilidades que não baixou, um registry que recusou — todos
+produzem `UNVERIFIED`, nunca "0 vulnerabilidades".
+
+---
+
+## Recomendações por digest
+
+Uma tag é um ponteiro móvel: `node:22` de hoje não são os mesmos bytes de
+`node:22` da semana que vem. Uma recomendação que nomeia só a tag não pode ser
+conferida contra o scan que a produziu.
+
+Por isso toda tag sem digest é resolvida no registry **antes** do scan, e a
+recomendação registra:
+
+```
+repositório · tag · digest · arquitetura · scanner · timestamp do scan
+```
+
+Isso paga por si duas vezes:
+
+* **fixação** — a saída diz `Pin to: node@sha256:...`, que é o que deveria ir no
+  seu Dockerfile;
+* **deduplicação entre fontes** — tags que compartilham manifesto viram um único
+  scan, mesmo vindas de catálogos diferentes. Medido no benchmark: 40 tags / 12
+  manifestos = 28 scans evitados ao custo de 40 requisições `HEAD`.
+
+O digest é conferido de verdade: ao ler o config OCI, os bytes recebidos são
+hasheados e comparados com o digest que os endereçava. Um registry, proxy ou
+cache que devolva conteúdo diferente falha nessa comparação e o config é
+descartado.
 
 ---
 
@@ -1187,12 +1547,16 @@ O DockerLs segue Clean Architecture, com separação clara de camadas:
 dockerls/
   cli/              # Comandos Typer e formatação de saída
   domain/
-    entities/        # DockerImage, Vulnerability, ScanResult, Recommendation
-    value_objects/   # SecurityScore, SecurityTier, RemediationScore
+    entities/        # DockerImage, Vulnerability, ScanResult, Recommendation,
+                     #   HardeningFacts (evidência), DeclaredImageMetadata (declaração)
+    value_objects/   # SecurityScore, SecurityTier, RemediationScore,
+                     #   HardeningScore, AttackSurfaceScore, Confidence, Tristate
     interfaces/      # Interfaces abstratas (portas)
   application/
     use_cases/       # SearchImages, RecommendImages, AnalyzeImage, CompareImages
-    services/        # ScannerFactory, CrossValidator, CompositeImageRepository
+    services/        # ScannerFactory, CrossValidator, CompositeImageRepository,
+                     #   SourceRegistry (catálogos), HardeningAnalyzer (evidência),
+                     #   verdict (ranking + explicação), migration (trade-offs)
     dto/             # AnalysisResult, ComparisonResult
   infrastructure/
     config/          # Settings (Pydantic)
@@ -1205,17 +1569,26 @@ dockerls/
     dockerhub/       # Cliente da API do Docker Hub
     trivy/           # Integração com o scanner Trivy
     grype/           # Integração com o scanner Grype (alternativa)
-    registry/        # Catálogos hardened via OCI (Chainguard, Distroless)
+    registry/        # Catálogos hardened via OCI (Chainguard, Distroless) e
+                     #   RegistryInspector (digest + config OCI verificado)
+    dhi/             # Catálogo Docker Hardened Images (índice, definições, provider)
     endoflife/       # Verificador endoflife.date
     threat_intel/    # CISA KEV e EPSS
   cache/             # Implementação de cache em SQLite
   exporters/         # Exportadores JSON, CSV, HTML, Markdown, SARIF
-  utils/             # Validação de entrada, auxiliares de autenticação e retry
+  utils/             # Validação de entrada, autenticação, retry, rate limit,
+                     #   circuit breaker e parsing YAML com limites explícitos
 ```
 
 Os dados fluem para dentro: CLI -> Casos de uso -> Domínio. As integrações
 externas implementam interfaces do domínio e são injetadas pelo construtor de
 dependências.
+
+**Adicionar uma fonte de imagens** não toca em nenhum comando: implemente
+`ImageRepositoryInterface` em `integrations/`, e registre um `SourceSpec` em
+`build_source_registry()`. O nome vira automaticamente um valor válido de
+`--source`, aparece no `doctor` e entra no `--all-sources`. O domínio não importa
+`httpx`, nem SDK de registry, nem scanner.
 
 ---
 
@@ -1235,6 +1608,7 @@ depois `~/.config/dockerls/config.toml` (ou
 | XDG_CONFIG_HOME                 | Sobrescreve o diretório do arquivo de config |
 | DOCKERLS_ENABLE_THREAT_INTEL    | `false` desativa as consultas a CISA KEV / EPSS |
 | DOCKERLS_DISABLE_THREAT_INTEL   | Idem, forma legada (mantida por compatibilidade) |
+| DOCKERLS_GITHUB_TOKEN           | Token só-leitura para elevar o limite de 60 req/h da API do GitHub (catálogo DHI) |
 | DOCKERLS_<NOME_DA_CONFIG>       | Sobrescreve qualquer outra configuração abaixo (ex.: `DOCKERLS_MAX_TAGS=200`) |
 
 ### Arquivo de configuração
@@ -1264,6 +1638,19 @@ flag explícita sempre vence a configuração.
 | workers       | 10      |
 | limit (tags)  | 100     |
 | TTL do cache  | 24h     |
+
+### Motor multi-source
+
+| Configuração              | Padrão | O que faz |
+|---------------------------|--------|-----------|
+| `include_hardened_sources` | `true`  | Consulta Chainguard e Distroless junto do Docker Hub |
+| `include_dhi_source`       | `false` | Consulta o catálogo Docker Hardened Images (opt-in: `dhi.io` exige credencial para escanear) |
+| `dhi_catalog_ttl_seconds`  | `21600` | Validade do índice do catálogo DHI (6h = 1 requisição de API por janela) |
+| `dhi_definition_limit`     | `12`    | Definições lidas por consulta DHI (cada uma é uma requisição de CDN) |
+| `github_token`             | `""`    | Eleva o teto anônimo da API do GitHub |
+| `resolve_digests`          | `true`  | Fixa toda tag no digest antes do scan (é o que faz a deduplicação funcionar entre fontes) |
+| `inspect_image_config`     | `true`  | Busca o config OCI dos finalistas para medir hardening em vez de confiar em declaração |
+| `hardened_tag_limit`       | `10`    | Tags trazidas por fonte não primária |
 
 ---
 
