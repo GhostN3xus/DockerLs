@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import sys
+from typing import cast
 
 import pytest
 from rich.console import Console
@@ -122,6 +123,7 @@ class TestSingleLiveDisplay:
                 obs.finished(ref, True)
             obs.phase("Cross-validating top 3 candidates")
             obs.phase("Verifying tags on Docker Hub")
+            assert obs.progress is not None
             assert len(obs.progress.tasks) == 1
 
     def test_progress_defaults_to_stderr(self):
@@ -136,7 +138,7 @@ class TestSingleLiveDisplay:
             obs.scanning("node:22-alpine")
             results.print("Recommended Images")
             obs.finished("node:22-alpine", True)
-        out = results.file.getvalue()
+        out = cast(io.StringIO, results.file).getvalue()
         assert "Recommended Images" in out
         assert "Scanning" not in out
         assert "\x1b[2K" not in out

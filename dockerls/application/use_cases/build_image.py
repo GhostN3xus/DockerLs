@@ -247,7 +247,8 @@ class BuildImageUseCase:
                         break
 
                     logger.info(
-                        f"[Auto-Remediation Round {round_num}] Rebuilding with {len(applied_actions)} fix(es)..."
+                        f"[Auto-Remediation Round {round_num}] "
+                        f"Rebuilding with {len(applied_actions)} fix(es)..."
                     )
                     new_build = self._build_image(
                         context_path=request.context_path,
@@ -289,7 +290,8 @@ class BuildImageUseCase:
                         )
                         if new_scan.total_vulnerabilities == 0:
                             logger.info(
-                                f"✨ Success: Image achieved ZERO vulnerabilities in round {round_num}!"
+                                "✨ Success: Image achieved ZERO "
+                                f"vulnerabilities in round {round_num}!"
                             )
                             break
 

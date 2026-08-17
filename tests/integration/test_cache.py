@@ -82,7 +82,7 @@ class TestSQLiteCache:
             ticked = True
 
         await asyncio.gather(cache.set("k", "v" * 1000), ticker())
-        assert ticked is True
+        assert ticked
 
 
 class TestCacheValidationMiss:
