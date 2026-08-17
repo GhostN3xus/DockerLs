@@ -138,7 +138,7 @@ class TestSingleLiveDisplay:
             obs.scanning("node:22-alpine")
             results.print("Recommended Images")
             obs.finished("node:22-alpine", True)
-        out = cast(io.StringIO, results.file).getvalue()
+        out = cast("io.StringIO", results.file).getvalue()
         assert "Recommended Images" in out
         assert "Scanning" not in out
         assert "\x1b[2K" not in out

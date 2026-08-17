@@ -107,7 +107,7 @@ def get_ecosystem_insights(image_reference: str) -> EcosystemInsight:
         ]
         pitfalls = [
             "Evite rodar 'npm start' como PID 1 (o npm não repassa sinais SIGTERM); "
-            "use 'CMD [\"node\", \"dist/index.js\"]'.",
+            'use \'CMD ["node", "dist/index.js"]\'.',
             "Não inclua 'node_modules' na raiz do build context sem .dockerignore.",
         ]
         snippets = [
@@ -194,7 +194,7 @@ def get_ecosystem_insights(image_reference: str) -> EcosystemInsight:
                 "💡 Copie '/etc/ssl/certs/ca-certificates.crt' do builder para chamadas HTTPS.",
             ],
             security_guidelines=[
-                'Compile com \'CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o app .\'.',
+                "Compile com 'CGO_ENABLED=0 GOOS=linux go build -ldflags=\"-s -w\" -o app .'.",
                 "Em 'scratch', use 'USER 65534:65534' (nobody) pois não existe /etc/passwd.",
             ],
             common_pitfalls=[
@@ -204,7 +204,7 @@ def get_ecosystem_insights(image_reference: str) -> EcosystemInsight:
             recommended_dockerfile_snippets=[
                 "FROM scratch\n"
                 "COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/\n"
-                "COPY --from=builder /app/app /app\nUSER 65534:65534\nENTRYPOINT [\"/app\"]",
+                'COPY --from=builder /app/app /app\nUSER 65534:65534\nENTRYPOINT ["/app"]',
             ],
         )
 
@@ -221,7 +221,7 @@ def get_ecosystem_insights(image_reference: str) -> EcosystemInsight:
             ],
             security_guidelines=[
                 "Configure 'JAVA_OPTS=\"-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0 "
-                '-Djava.security.egd=file:/dev/./urandom"\'.',
+                "-Djava.security.egd=file:/dev/./urandom\"'.",
                 "Execute como usuário non-root 'appuser' (UID 10001).",
             ],
             common_pitfalls=[

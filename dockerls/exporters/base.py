@@ -14,5 +14,4 @@ class ExporterInterface(ABC):
         output_path.write_bytes(self.export_string(result).encode("utf-8"))
 
     @abstractmethod
-    def export_string(self, result: AnalysisResult) -> str:
-        ...
+    def export_string(self, result: AnalysisResult) -> str: ...
