@@ -83,6 +83,12 @@ class SARIFExporter(ExporterInterface):
                                 }
                             }
                         ],
+                        # Per-result rather than per-run: a SARIF file can
+                        # carry findings from several images, and a consumer
+                        # gating on confidence needs to know which image an
+                        # UNVERIFIED verdict belongs to. `properties` is the
+                        # spec's extension point, so nothing existing moves.
+                        "properties": _image_properties(analysis),
                     }
                 )
 
@@ -104,6 +110,30 @@ class SARIFExporter(ExporterInterface):
             ],
         }
         return json.dumps(sarif, indent=2, default=str)
+
+
+def _image_properties(analysis: ImageAnalysis) -> dict[str, Any]:
+    """Image-level context attached to every finding from that image.
+
+    The digest is included whenever one was resolved: a SARIF file that
+    names only a tag cannot be matched back to the bytes that were scanned.
+    """
+    properties: dict[str, Any] = {
+        "image": analysis.image.full_reference,
+        "source": analysis.image.source,
+        "securityScore": analysis.security_score,
+        "tier": analysis.tier,
+        "confidence": analysis.confidence.value,
+    }
+    if analysis.image.digest_known:
+        properties["digest"] = analysis.image.digest
+        properties["pinnedReference"] = analysis.pinned_reference
+    if analysis.hardening.reportable:
+        properties["hardeningScore"] = analysis.hardening.score
+        properties["hardeningCoverage"] = analysis.hardening.coverage
+    if analysis.attack_surface.reportable:
+        properties["attackSurfaceScore"] = analysis.attack_surface.score
+    return properties
 
 
 def _rule_id(vuln: Any) -> str:

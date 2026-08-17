@@ -42,6 +42,11 @@ if TYPE_CHECKING:
     from dockerls.application.dto.analysis import ImageAnalysis
 
 console = Console()
+# Diagnostics go to stderr, results to stdout. Printing a warning to stdout
+# put a human sentence in front of the JSON document and made `--format json`
+# unparseable -- a machine-readable format is only machine-readable if
+# nothing else can land in the stream.
+diagnostics = Console(stderr=True)
 
 #: Exit codes, consistent with `recommend`:
 #:   0 = a safer alternative was found (or the current image is already best)
@@ -166,7 +171,7 @@ async def _analyze_current(reference: str) -> ImageAnalysis | None:
     try:
         return await use_case.execute(reference)
     except (ValueError, RuntimeError) as e:
-        console.print(f"[yellow]Could not analyze {reference}: {e}[/yellow]")
+        diagnostics.print(f"[yellow]Could not analyze {reference}: {e}[/yellow]")
         return None
 
 

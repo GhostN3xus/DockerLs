@@ -13,9 +13,14 @@ So parsing here is guarded on three axes before the loader ever runs:
 
 * **size** -- the document is refused above a byte budget, so a hostile or
   misconfigured endpoint cannot stream an unbounded body into memory;
-* **alias density** -- anchors are legitimate in these definitions but a
-  document with a suspicious number of back-references is refused rather
-  than expanded;
+* **expansion size** -- anchors are legitimate in these definitions, so
+  they are not banned; instead the document is *composed* into a node graph
+  (where an alias is a shared reference, and therefore costs nothing) and
+  the size it would expand to is computed over that graph before anything
+  is constructed. A counting heuristic is not enough here and this is worth
+  stating plainly: nine levels of nine-fold aliasing is only ~72 aliases --
+  comfortably under any sane per-document count -- and expands to 387
+  million nodes. What has to be bounded is the product, not the tally;
 * **nesting depth** -- measured on the parsed result, and refused above a
   bound no legitimate image definition comes close to.
 
@@ -34,10 +39,11 @@ import yaml
 #: memory a single hostile response can cost.
 MAX_DOCUMENT_BYTES = 4 * 1024 * 1024
 
-#: Aliases (`*ref`) are how a YAML bomb multiplies. The catalogue's own
-#: definitions use very few, so a cap this generous only ever fires on a
-#: document built to expand.
-MAX_ALIASES = 256
+#: Nodes the document may expand to. Measured on the composed graph before
+#: construction, so a bomb is refused in linear time instead of being
+#: discovered when memory runs out. Real definitions compose a few thousand
+#: nodes; this leaves two orders of magnitude of headroom.
+MAX_EXPANDED_NODES = 1_000_000
 
 #: Composition depth of the parsed structure. Image definitions nest about
 #: six levels; anything past this is a stack-exhaustion attempt.
@@ -64,21 +70,39 @@ def safe_load_yaml(raw: str | bytes, *, origin: str = "<yaml>") -> Any:
             f"{origin}: document is {encoded_size} bytes, over the {MAX_DOCUMENT_BYTES} limit"
         )
 
-    alias_count = _count_aliases(text)
-    if alias_count > MAX_ALIASES:
-        raise UnsafeYAMLError(
-            f"{origin}: {alias_count} YAML aliases exceeds the {MAX_ALIASES} limit "
-            "(possible alias-expansion bomb)"
-        )
-
+    # Compose, measure, then construct -- in that order. Composition builds
+    # a graph in which an alias is one edge rather than a copy, so it is
+    # bounded by the document's own length; construction is what multiplies,
+    # and it does not happen until the expansion has been shown to be safe.
+    # SafeLoader is used throughout: it constructs only plain scalars, lists
+    # and dicts, never arbitrary objects from `!!python/object` tags.
+    loader = yaml.SafeLoader(text)
     try:
-        # SafeLoader constructs only plain Python scalars, lists and dicts:
-        # no arbitrary object instantiation, no `!!python/object` tags.
-        data = yaml.load(text, Loader=yaml.SafeLoader)  # noqa: S506 - SafeLoader, not unsafe load
-    except yaml.YAMLError as e:
-        raise UnsafeYAMLError(f"{origin}: malformed YAML ({e})") from e
-    except RecursionError as e:
-        raise UnsafeYAMLError(f"{origin}: document nesting exhausted the parser") from e
+        try:
+            node = loader.get_single_node()
+        except yaml.YAMLError as e:
+            raise UnsafeYAMLError(f"{origin}: malformed YAML ({e})") from e
+        except RecursionError as e:
+            raise UnsafeYAMLError(f"{origin}: document nesting exhausted the parser") from e
+
+        if node is None:
+            return None
+
+        expanded = _expanded_size(node, {})
+        if expanded > MAX_EXPANDED_NODES:
+            raise UnsafeYAMLError(
+                f"{origin}: document expands to at least {expanded} nodes, over the "
+                f"{MAX_EXPANDED_NODES} limit (alias-expansion bomb)"
+            )
+
+        try:
+            data = loader.construct_document(node)
+        except yaml.YAMLError as e:
+            raise UnsafeYAMLError(f"{origin}: malformed YAML ({e})") from e
+        except RecursionError as e:
+            raise UnsafeYAMLError(f"{origin}: document nesting exhausted the parser") from e
+    finally:
+        loader.dispose()
 
     depth = _depth(data)
     if depth > MAX_DEPTH:
@@ -86,21 +110,42 @@ def safe_load_yaml(raw: str | bytes, *, origin: str = "<yaml>") -> Any:
     return data
 
 
-def _count_aliases(text: str) -> int:
-    """Count `*alias` references without parsing.
+def _expanded_size(node: yaml.Node, memo: dict[int, int]) -> int:
+    """How many nodes `node` would become once every alias is expanded.
 
-    Deliberately done on the raw text: by the time the loader has resolved
-    them the expansion has already happened, which is the cost being
-    guarded against. Overcounting (a `*` inside a quoted string) only makes
-    the guard stricter, and the bound is far above legitimate usage.
+    The composed graph shares anchored nodes, so each one is measured once
+    and memoised by identity; a node referenced nine times contributes its
+    size nine times to its parent's total. That is exactly the quantity a
+    YAML bomb maximises, and computing it costs one walk of the graph.
+
+    Totals are clamped to the limit as they accumulate. Without the clamp
+    the arithmetic itself becomes the denial of service: the classic bomb's
+    true size is a 400-million-digit intermediate nobody needs to compute in
+    order to know it is too big.
     """
-    count = 0
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        count += stripped.count(" *") + (1 if stripped.startswith("*") else 0)
-    return count
+    cached = memo.get(id(node))
+    if cached is not None:
+        return cached
+
+    if isinstance(node, yaml.ScalarNode):
+        memo[id(node)] = 1
+        return 1
+
+    total = 1
+    children: list[yaml.Node] = []
+    if isinstance(node, yaml.SequenceNode):
+        children = list(node.value)
+    elif isinstance(node, yaml.MappingNode):
+        children = [child for pair in node.value for child in pair]
+
+    for child in children:
+        total += _expanded_size(child, memo)
+        if total > MAX_EXPANDED_NODES:
+            total = MAX_EXPANDED_NODES + 1
+            break
+
+    memo[id(node)] = total
+    return total
 
 
 def _depth(value: Any, level: int = 0) -> int:

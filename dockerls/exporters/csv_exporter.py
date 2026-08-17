@@ -33,6 +33,16 @@ class CSVExporter(ExporterInterface):
                 "Remediation Score",
                 "EOL",
                 "LTS",
+                # Appended, never inserted: a consumer indexing by column
+                # position keeps working, and one reading the header gets
+                # the new dimensions.
+                "Source",
+                "Digest",
+                "Pinned Reference",
+                "Hardening",
+                "Hardening Coverage",
+                "Attack Surface",
+                "Confidence",
             ]
         )
         for a in result.recommendations or result.alternatives:
@@ -50,6 +60,16 @@ class CSVExporter(ExporterInterface):
                     a.remediation_score,
                     a.is_eol,
                     a.is_lts,
+                    a.image.source,
+                    a.image.digest,
+                    a.pinned_reference,
+                    # "" rather than 0 when coverage was too thin: a zero
+                    # here would be read as "no hardening", which is the
+                    # opposite of "not determined".
+                    a.hardening.score if a.hardening.reportable else "",
+                    a.hardening.coverage,
+                    a.attack_surface.score if a.attack_surface.reportable else "",
+                    a.confidence.value,
                 ]
             )
         return output.getvalue()

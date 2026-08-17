@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
@@ -9,13 +10,22 @@ from rich.panel import Panel
 from rich.table import Table
 
 from dockerls.application.services.ecosystems import get_ecosystem_insights
+from dockerls.application.services.migration import MigrationPlan, plan_migration
 from dockerls.application.use_cases.recommend_images import build_recommendation
-from dockerls.cli.dependencies import build_recommend_use_case
+from dockerls.cli.dependencies import build_analyze_use_case, build_recommend_use_case
 from dockerls.cli.options import OutputFormat, parse_output_format
 from dockerls.cli.validators import check_workers
 from dockerls.exit_codes import EXIT_ERROR
 
+if TYPE_CHECKING:
+    from dockerls.application.dto.analysis import ImageAnalysis
+
 console = Console()
+# Diagnostics go to stderr, results to stdout. Printing a warning to stdout
+# put a human sentence in front of the JSON document and made `--format json`
+# unparseable -- a machine-readable format is only machine-readable if
+# nothing else can land in the stream.
+diagnostics = Console(stderr=True)
 
 
 def advisor(
@@ -42,8 +52,15 @@ def advisor(
 
 
 async def _advisor(image: str, workers: int | None, output_format: OutputFormat) -> None:
+    # A tagged argument names an image the user runs *today*, so the advice
+    # can be a migration rather than a standalone suggestion. A bare name
+    # ("node") has no current image to move away from, and the command
+    # behaves exactly as it always has.
+    repository, current_tag = _split_reference(image)
+    current = await _analyze_current(image) if current_tag else None
+
     use_case = await build_recommend_use_case(workers=workers)
-    result = await use_case.execute(image)
+    result = await use_case.execute(repository)
 
     items = result.recommendations or result.alternatives
     if not items:
@@ -57,6 +74,14 @@ async def _advisor(image: str, workers: int | None, output_format: OutputFormat)
     best = items[0]
     rec = best.recommendation or build_recommendation(best)
     insights = get_ecosystem_insights(best.image.full_reference or image)
+    # Only when the target is genuinely a different image: a "migration"
+    # from an image to itself is noise, and printing a checklist for it
+    # would suggest work that does not exist.
+    plan = (
+        plan_migration(current, best)
+        if current is not None and current.image.full_reference != best.image.full_reference
+        else None
+    )
 
     if output_format == OutputFormat.JSON:
         payload = best.model_dump()
@@ -70,6 +95,10 @@ async def _advisor(image: str, workers: int | None, output_format: OutputFormat)
             "common_pitfalls": insights.common_pitfalls,
             "snippets": insights.recommended_dockerfile_snippets,
         }
+        if plan is not None:
+            payload["migration"] = plan.model_dump()
+        if current is not None:
+            payload["current"] = current.model_dump()
         console.print(json.dumps(payload, indent=2, default=str), soft_wrap=True)
         return
 
@@ -115,6 +144,9 @@ async def _advisor(image: str, workers: int | None, output_format: OutputFormat)
             for pit in insights.common_pitfalls:
                 console.print(f"  ⚠️ {pit}")
 
+    if plan is not None:
+        _print_migration(plan)
+
     if rec.steps:
         console.print()
         console.print("[bold]Remediation Plan[/bold]")
@@ -130,3 +162,62 @@ async def _advisor(image: str, workers: int | None, output_format: OutputFormat)
     if rec.summary:
         console.print()
         console.print(f"[bold]Summary:[/bold] {rec.summary}")
+
+
+def _split_reference(reference: str) -> tuple[str, str]:
+    """Split `node:22-alpine` into ("node", "22-alpine").
+
+    A reference with no tag yields an empty tag, which is what switches the
+    command back to its original "advise on this image family" behaviour.
+    """
+    head = reference.split("@", 1)[0]
+    if ":" in head:
+        repository, tag = head.rsplit(":", 1)
+        return repository, tag
+    return head, ""
+
+
+async def _analyze_current(reference: str) -> ImageAnalysis | None:
+    """Scan the image named on the command line, or give up quietly.
+
+    Failing to measure the current image costs the migration section, not
+    the command: the advice about the best available image is still valid,
+    and claiming an improvement over something never measured would not be.
+    """
+    use_case = await build_analyze_use_case()
+    try:
+        return await use_case.execute(reference)
+    except (ValueError, RuntimeError) as e:
+        diagnostics.print(f"[yellow]Could not analyze {reference} for comparison: {e}[/yellow]")
+        return None
+
+
+def _print_migration(plan: MigrationPlan) -> None:
+    """The move from what the user runs to what was measured as better."""
+    console.print()
+    console.print(Panel("[bold green]Migration[/bold green]", expand=False))
+    console.print(f"  CURRENT      [cyan]{plan.from_reference}[/cyan]")
+    console.print(f"  RECOMMENDED  [green]{plan.to_reference}[/green]")
+    if plan.to_pinned_reference != plan.to_reference:
+        console.print(f"  PIN TO       [dim]{plan.to_pinned_reference}[/dim]")
+
+    delta = plan.score_delta
+    colour = "green" if delta > 0 else "red"
+    console.print(f"\n  SECURITY IMPROVEMENT  [{colour}]{delta:+.1f} points[/{colour}]")
+
+    if plan.improvements:
+        console.print("\n[bold]WHY[/bold]")
+        for reason in plan.improvements:
+            console.print(f"  [green]OK[/green] {reason}")
+    if plan.trade_offs:
+        console.print("\n[bold]TRADE-OFFS[/bold]")
+        for cost in plan.trade_offs:
+            console.print(f"  [yellow]![/yellow] {cost}")
+    if plan.checklist:
+        console.print("\n[bold]MIGRATION CHECKLIST[/bold]")
+        for i, step in enumerate(plan.checklist, 1):
+            console.print(f"  {i}. {step}")
+    console.print(
+        "\n[dim]Compatibility is never assumed: nothing here can tell you your "
+        "application still runs. That is what the checklist is for.[/dim]"
+    )
