@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from dockerls.application.dto.analysis import ImageAnalysis
 from dockerls.application.services.teardown import close_quietly, sources_of
+from dockerls.application.services.verdict import apply_facts, finalize_verdict
 from dockerls.application.use_cases.recommend_images import _enrich_with_threat_intel
 from dockerls.domain.entities.image import DockerImage
 from dockerls.domain.value_objects.remediation_score import RemediationScore
@@ -15,6 +16,7 @@ from dockerls.utils.ignore_file import active_ignored_cve_ids, load_ignore_rules
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from dockerls.application.services.hardening_analysis import HardeningAnalyzer
     from dockerls.domain.interfaces.eol_checker import EOLCheckerInterface
     from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
     from dockerls.domain.interfaces.scanner import ScannerInterface
@@ -29,12 +31,14 @@ class AnalyzeImageUseCase:
         eol_checker: EOLCheckerInterface,
         ignore_path: Path | None = None,
         threat_intel: ThreatIntelClient | None = None,
+        hardening: HardeningAnalyzer | None = None,
     ):
         self._repository = repository
         self._scanner = scanner
         self._eol_checker = eol_checker
         self._ignored_cves = active_ignored_cve_ids(load_ignore_rules(ignore_path))
         self._threat_intel = threat_intel
+        self._hardening = hardening
 
     async def execute(self, image_reference: str) -> ImageAnalysis:
         name, tag = self._parse_reference(image_reference)
@@ -63,15 +67,30 @@ class AnalyzeImageUseCase:
         tier = SecurityTier(scan, score.value, is_eol=is_eol)
         rem_score = RemediationScore(scan)
 
-        return ImageAnalysis(
+        analysis = ImageAnalysis(
             image=image,
             scan=scan,
             security_score=score.value,
             tier=tier.tier.value,
+            production_ready=tier.production_ready,
             remediation_score=rem_score.value,
             is_eol=is_eol,
             is_lts=is_lts,
+            evidence_paths={scan.scanner: scan.evidence_path} if scan.evidence_path else {},
         )
+
+        # The same evidence gathering `recommend` does for its finalists.
+        # Without it, `analyze` and `alternatives` would report the image
+        # they were asked about with every hardening fact unknown, while
+        # the candidates they are compared against carry measurements --
+        # and a comparison between a measurement and a blank is not one.
+        if self._hardening is not None:
+            digest, facts = await self._hardening.analyze(image, scan)
+            if digest and not image.digest:
+                image.digest = digest
+            apply_facts(analysis, facts)
+        finalize_verdict(analysis, cross_validated=False)
+        return analysis
 
     async def close(self) -> None:
         """Release the scanner and the repository's connection pool.
@@ -80,7 +99,7 @@ class AnalyzeImageUseCase:
         once per image: closing there would leave the second comparison
         talking to a client that had already been shut down.
         """
-        await close_quietly(self._scanner, *sources_of(self._repository))
+        await close_quietly(self._scanner, self._hardening, *sources_of(self._repository))
 
     def _parse_reference(self, reference: str) -> tuple[str, str]:
         if ":" in reference:

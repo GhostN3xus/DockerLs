@@ -17,6 +17,12 @@ from dockerls.application.dto.analysis import (
 )
 from dockerls.application.services.progress import NullObserver
 from dockerls.application.services.teardown import close_quietly, sources_of
+from dockerls.application.services.verdict import (
+    apply_facts,
+    cross_validation_agreed,
+    finalize_verdict,
+    rank,
+)
 from dockerls.domain.entities.recommendation import (
     ActionType,
     Recommendation,
@@ -33,6 +39,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from dockerls.application.services.cross_validation import CrossValidator
+    from dockerls.application.services.hardening_analysis import HardeningAnalyzer
     from dockerls.application.services.progress import ScanObserver
     from dockerls.domain.entities.image import DockerImage
     from dockerls.domain.interfaces.cache_store import CacheStoreInterface
@@ -71,6 +78,8 @@ class RecommendImagesUseCase:
         verify_hub_tags: bool = True,
         log_file: Path | None = None,
         cache_ttl_seconds: int = 86400,
+        hardening: HardeningAnalyzer | None = None,
+        resolve_digests: bool = True,
     ):
         # Guarded at construction rather than only at the CLI boundary: the
         # use case is the last place that can refuse a value which would
@@ -94,6 +103,8 @@ class RecommendImagesUseCase:
         self._verify_hub_tags = verify_hub_tags
         self._log_file = log_file
         self._cache_ttl_seconds = cache_ttl_seconds
+        self._hardening = hardening
+        self._resolve_digests = resolve_digests
         self._analysis_fingerprint = self._compute_analysis_fingerprint()
         self._metrics = RunMetrics()
 
@@ -210,6 +221,8 @@ class RecommendImagesUseCase:
             ],
         )
 
+        await self._pin_digests(tags)
+
         analyses, unverified, errors = await self._scan_all(tags)
         errors = [*setup_errors, *errors]
         analyses.sort(key=lambda a: a.security_score, reverse=True)
@@ -224,6 +237,7 @@ class RecommendImagesUseCase:
                 ("duplicates collapsed", str(self._metrics.duplicates_collapsed)),
                 ("cache hits", str(self._metrics.cache_hits)),
                 ("scans performed", str(self._metrics.scans_performed)),
+                ("digests pinned", str(self._metrics.digests_resolved)),
                 ("unverified", str(len(unverified))),
             ],
         )
@@ -262,6 +276,44 @@ class RecommendImagesUseCase:
         )
         result.evidence_manifest = await self._write_manifest(image_name, selected)
         return result
+
+    async def _pin_digests(self, tags: list[DockerImage]) -> None:
+        """Resolve every candidate that arrived without a digest.
+
+        Deduplication keys on the digest, and a candidate with none is
+        keyed by its reference instead -- so the same manifest published
+        under `22`, `22-bookworm` and a hardened catalogue's alias is
+        scanned three times. One HEAD per unresolved tag replaces those
+        extra scans, and each scan costs orders of magnitude more than the
+        request that avoids it.
+
+        Failure is free: a registry that will not answer leaves the
+        candidate exactly as it arrived.
+        """
+        if self._hardening is None or not self._resolve_digests:
+            return
+        unresolved = [tag for tag in tags if not tag.digest_known]
+        if not unresolved:
+            return
+
+        self._observer.phase(f"Resolving digests for {len(unresolved)} tag(s)")
+        semaphore = asyncio.Semaphore(self._workers)
+
+        async def pin(image: DockerImage) -> None:
+            async with semaphore:
+                digest = await self._hardening.resolve_digest(image) if self._hardening else ""
+            if digest:
+                # Mutated in place because `tags` is the list the rest of
+                # the pipeline holds; replacing entries would leave the
+                # scan loop keyed on the unpinned copies.
+                image.digest = digest
+                self._metrics.digests_resolved += 1
+
+        await asyncio.gather(*[pin(image) for image in unresolved])
+        logger.info(
+            f"Resolved {self._metrics.digests_resolved}/{len(unresolved)} previously "
+            "unpinned tags to manifest digests"
+        )
 
     async def _scan_all(
         self, tags: list[DockerImage]
@@ -391,10 +443,45 @@ class RecommendImagesUseCase:
             self._observer.phase(f"Cross-validating top {len(selected)} candidates")
             self._metrics.cross_validations = len(selected)
             await self._cross_validator.validate(selected)
+
+        # Hardening evidence is gathered for the finalists only. Inspecting
+        # every discovered tag would cost two registry round-trips each --
+        # hundreds of requests to inform a decision between five images --
+        # and the candidates that reach this point are exactly the ones the
+        # decision is actually between.
+        await self._inspect(selected)
+
+        for analysis in selected:
+            finalize_verdict(analysis, cross_validated=cross_validation_agreed(analysis))
+
+        # The final ordering is the multi-source one: confidence first, then
+        # the measured vulnerability position, then hardening and surface.
+        # Up to here the pool was ordered by security score alone, which
+        # could not see the evidence that has just been gathered.
+        selected = rank(selected)
+
         _assert_verified(selected)
         for analysis in selected:
             analysis.recommendation = build_recommendation(analysis)
         return selected
+
+    async def _inspect(self, selected: list[ImageAnalysis]) -> None:
+        """Attach registry/catalogue/scanner evidence to each finalist."""
+        if self._hardening is None or not selected:
+            return
+        self._observer.phase(f"Inspecting {len(selected)} candidate image(s)")
+
+        async def inspect(analysis: ImageAnalysis) -> None:
+            if self._hardening is None:
+                return
+            digest, facts = await self._hardening.analyze(analysis.image, analysis.scan)
+            if digest and not analysis.image.digest_known:
+                analysis.image.digest = digest
+            apply_facts(analysis, facts)
+            if facts.config_verified:
+                self._metrics.images_inspected += 1
+
+        await asyncio.gather(*[inspect(a) for a in selected])
 
     async def _verify_tags(
         self, candidates: list[ImageAnalysis], unverified: list[UnverifiedImage]
@@ -452,7 +539,7 @@ class RecommendImagesUseCase:
 
     async def _close_scanners(self) -> None:
         secondary = self._cross_validator.scanner if self._cross_validator else None
-        await close_quietly(self._scanner, secondary)
+        await close_quietly(self._scanner, secondary, self._hardening)
 
     async def _close_repositories(self) -> None:
         """Release the HTTP connection pools the image sources hold.

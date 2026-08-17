@@ -182,12 +182,28 @@ class GrypeScanner(ScannerInterface):
                 )
             )
 
+        family, version = self._parse_distro(data)
         return ScanResult(
             image_reference=image_ref,
             scanner="grype",
             vulnerabilities=vulns,
             scan_timestamp=datetime.now(tz=UTC).isoformat(),
+            os_family=family,
+            os_version=version,
         )
+
+    @staticmethod
+    def _parse_distro(data: dict[str, Any]) -> tuple[str, str]:
+        """The base distribution Grype identified, from its `distro` block.
+
+        Same fact Trivy reports under `Metadata.OS`, spelled differently.
+        Normalising it here means the migration analysis reads one field
+        regardless of which scanner produced the result.
+        """
+        distro = data.get("distro")
+        if not isinstance(distro, dict):
+            return "", ""
+        return str(distro.get("name") or ""), str(distro.get("version") or "")
 
     @staticmethod
     def _extract_cvss(entries: list[dict[str, Any]]) -> tuple[float, str]:

@@ -30,6 +30,12 @@ _ARCH_SUFFIX = re.compile(r"-(amd64|arm64|arm|armv[567]|386|ppc64le|s390x|riscv6
 _COMMIT_TAG = re.compile(r"(-[0-9a-f]{32,}$|^[0-9a-f]{32,}$)")
 
 
+#: Manifests and config blobs are kilobytes. A registry (or something
+#: pretending to be one) answering with more than this is not serving
+#: metadata, and the body is discarded rather than parsed.
+MAX_BLOB_BYTES = 8 * 1024 * 1024
+
+
 def is_runnable_tag(tag: str) -> bool:
     """True for tags that name a distinct image a user would actually pull."""
     if not tag or _ARTIFACT_TAG.search(tag):
@@ -131,6 +137,52 @@ class OCIRegistryClient:
             payload = await self._fetch_tags(repository)
             self._listings[repository] = payload
             return payload
+
+    async def get(
+        self,
+        path: str,
+        *,
+        accept: str = "",
+        head: bool = False,
+        max_bytes: int = MAX_BLOB_BYTES,
+    ) -> httpx.Response | None:
+        """One authenticated request against `/v2/<path>` on this registry.
+
+        Performs the same anonymous token dance `_fetch_tags` uses, and
+        bounds the response body: a manifest or config blob is a few
+        kilobytes, and a registry answering with megabytes is either broken
+        or hostile. Returns None on any failure, including an oversized
+        body -- callers treat that as "could not determine", never as an
+        empty result.
+        """
+        url = f"https://{self._host}/v2/{path}"
+        headers = {"Accept": accept} if accept else {}
+        try:
+            client = await self._get_client()
+            resp = await client.request("HEAD" if head else "GET", url, headers=headers)
+            if resp.status_code == 401:
+                token = await self._token(client, resp.headers.get("WWW-Authenticate", ""))
+                if not token:
+                    logger.info(f"No anonymous token available for {self._host}/{path}")
+                    return None
+                resp = await client.request(
+                    "HEAD" if head else "GET",
+                    url,
+                    headers={**headers, "Authorization": f"Bearer {token}"},
+                )
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning(f"Registry request failed for {self._host}/{path}: {e}")
+            return None
+
+        if not resp.is_success:
+            logger.info(f"Registry answered {resp.status_code} for {self._host}/{path}")
+            return None
+        if not head and len(resp.content) > max_bytes:
+            logger.warning(
+                f"Registry response for {self._host}/{path} exceeded {max_bytes} bytes; discarded"
+            )
+            return None
+        return resp
 
     async def _fetch_tags(self, repository: str) -> dict[str, Any] | None:
         url = f"https://{self._host}/v2/{repository}/tags/list"

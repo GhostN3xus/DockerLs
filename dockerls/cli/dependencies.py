@@ -5,29 +5,39 @@ from typing import TYPE_CHECKING
 
 from dockerls.application.services.composite_repository import CompositeImageRepository
 from dockerls.application.services.cross_validation import CrossValidator
+from dockerls.application.services.hardening_analysis import HardeningAnalyzer
 from dockerls.application.services.scanner_factory import ScannerFactory
+from dockerls.application.services.source_registry import SourceRegistry, SourceSpec
 from dockerls.application.use_cases.analyze_image import AnalyzeImageUseCase
 from dockerls.application.use_cases.compare_images import CompareImagesUseCase
 from dockerls.application.use_cases.recommend_images import RecommendImagesUseCase
 from dockerls.application.use_cases.search_images import SearchImagesUseCase
 from dockerls.cache.sqlite_cache import SQLiteCache
+from dockerls.domain.entities.image import DOCKER_HUB
 from dockerls.infrastructure.config.settings import Settings
 from dockerls.infrastructure.evidence import EvidenceStore
 from dockerls.infrastructure.logging.setup import setup_logging
+from dockerls.integrations.dhi.catalog import DHICatalogClient
+from dockerls.integrations.dhi.repository import DHI, DHIRepository
 from dockerls.integrations.dockerhub.client import DockerHubClient
 from dockerls.integrations.endoflife.checker import EndOfLifeChecker
 from dockerls.integrations.registry.hardened import (
+    CHAINGUARD,
+    DISTROLESS,
     ChainguardRepository,
     DistrolessRepository,
 )
+from dockerls.integrations.registry.inspector import RegistryInspector
 from dockerls.integrations.threat_intel.client import ThreatIntelClient
 from dockerls.utils.auth import load_credentials
 from dockerls.utils.validation import validate_threshold
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from dockerls.application.services.progress import ScanObserver
+    from dockerls.application.services.source_registry import SourceBuilder
     from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
 
 # Populated by _settings() on first use; exposed so commands can tell the
@@ -117,15 +127,119 @@ def _threat_intel() -> ThreatIntelClient | None:
     return ThreatIntelClient(timeout=s.http_timeout)
 
 
-def build_hardened_repositories() -> list[ImageRepositoryInterface]:
-    """Free, security-hardened catalogues searched alongside Docker Hub."""
+def build_source_registry(cache: SQLiteCache | None = None) -> SourceRegistry:
+    """Every catalogue this build can search, keyed by its `--source` token.
+
+    This is the one place that knows the full set. Commands ask the registry
+    to resolve a selection; none of them names a provider, so adding one is
+    a `register()` call here and nothing else.
+    """
     s = _settings()
-    if not s.include_hardened_sources:
-        return []
-    return [
-        ChainguardRepository(timeout=s.http_timeout),
-        DistrolessRepository(timeout=s.http_timeout),
-    ]
+    registry = SourceRegistry()
+    registry.register(
+        SourceSpec(
+            name="dockerhub",
+            label=DOCKER_HUB,
+            build=lambda: build_repository(cache=cache),
+            primary=True,
+            description="Docker Hub (official and community images)",
+        )
+    )
+    registry.register(
+        SourceSpec(
+            name="chainguard",
+            label=CHAINGUARD,
+            build=_source_builder(lambda: ChainguardRepository(timeout=s.http_timeout)),
+            default_enabled=s.include_hardened_sources,
+            description="Chainguard free tier (cgr.dev)",
+        )
+    )
+    registry.register(
+        SourceSpec(
+            name="distroless",
+            label=DISTROLESS,
+            build=_source_builder(lambda: DistrolessRepository(timeout=s.http_timeout)),
+            default_enabled=s.include_hardened_sources,
+            description="Google Distroless (gcr.io/distroless)",
+        )
+    )
+    registry.register(
+        SourceSpec(
+            name="dhi",
+            label=DHI,
+            build=_source_builder(
+                lambda: DHIRepository(
+                    catalog=DHICatalogClient(
+                        timeout=s.http_timeout,
+                        cache=cache,
+                        ttl_seconds=s.dhi_catalog_ttl_seconds,
+                        token=s.github_token,
+                    ),
+                    definition_limit=s.dhi_definition_limit,
+                )
+            ),
+            # Off unless asked for: dhi.io refuses anonymous pulls, so its
+            # candidates cannot be scanned on a machine without Docker
+            # Hardened Images credentials, and an unscannable candidate is
+            # reported as UNVERIFIED rather than ranked.
+            default_enabled=s.include_dhi_source,
+            requires_auth=True,
+            description="Docker Hardened Images catalog (dhi.io, needs credentials to scan)",
+        )
+    )
+    return registry
+
+
+def _source_builder(factory: Callable[[], ImageRepositoryInterface]) -> SourceBuilder:
+    """Adapt a synchronous constructor to the registry's async builder."""
+
+    async def build() -> ImageRepositoryInterface:
+        return factory()
+
+    return build
+
+
+async def build_composite_repository(specs: list[SourceSpec]) -> CompositeImageRepository:
+    """Instantiate the resolved sources and fan a query across them.
+
+    The first spec is the primary and gets the full `--limit`; the rest are
+    capped at `hardened_tag_limit`, because a curated catalogue publishes a
+    handful of tags where Docker Hub publishes hundreds.
+    """
+    if not specs:
+        raise ValueError("at least one image source must be selected")
+    built = [await spec.build() for spec in specs]
+    return CompositeImageRepository(built[0], built[1:], extra_limit=_settings().hardened_tag_limit)
+
+
+async def build_sources(
+    selection: Sequence[str] | None = None,
+    *,
+    all_sources: bool = False,
+    include_hardened: bool | None = None,
+    cache: SQLiteCache | None = None,
+) -> CompositeImageRepository:
+    """Resolve a `--source`/`--all-sources` selection into a live repository.
+
+    One entry point for every command, so `search`, `recommend`,
+    `alternatives` and `advisor` cannot drift into searching different sets
+    of catalogues for the same flags.
+    """
+    s = _settings()
+    registry = build_source_registry(cache=cache)
+    specs = registry.resolve(
+        selection,
+        all_sources=all_sources,
+        include_optional=(
+            s.include_hardened_sources if include_hardened is None else include_hardened
+        ),
+    )
+    return await build_composite_repository(specs)
+
+
+def available_source_names() -> list[str]:
+    """`--source` choices, for help text and error messages."""
+    return build_source_registry().names
 
 
 async def build_recommend_use_case(
@@ -138,6 +252,8 @@ async def build_recommend_use_case(
     verify_hub_tags: bool | None = None,
     include_hardened: bool | None = None,
     use_cache: bool = True,
+    sources: Sequence[str] | None = None,
+    all_sources: bool = False,
 ) -> RecommendImagesUseCase:
     s = _settings()
     # None means "not given on the command line", so the configured value
@@ -158,13 +274,12 @@ async def build_recommend_use_case(
     # `--no-cache` força uma medição nova: o cache é uma otimização, e às
     # vezes o que se quer é justamente contorná-lo.
     cache = build_cache() if use_cache else None
-    hub = await build_repository(cache=cache)
-    hardened = (
-        build_hardened_repositories()
-        if (s.include_hardened_sources if include_hardened is None else include_hardened)
-        else []
+    repo = await build_sources(
+        sources,
+        all_sources=all_sources,
+        include_hardened=include_hardened,
+        cache=cache,
     )
-    repo = CompositeImageRepository(hub, hardened, extra_limit=s.hardened_tag_limit)
     evidence = build_evidence_store()
     scanner = await ScannerFactory.create(
         timeout=s.scanner_timeout,
@@ -186,6 +301,8 @@ async def build_recommend_use_case(
 
     return RecommendImagesUseCase(
         repository=repo,
+        hardening=build_hardening_analyzer(),
+        resolve_digests=s.resolve_digests,
         scanner=scanner,
         eol_checker=eol,
         cache=cache,
@@ -203,6 +320,19 @@ async def build_recommend_use_case(
     )
 
 
+def build_hardening_analyzer() -> HardeningAnalyzer:
+    """The registry-backed evidence gatherer, or a disabled one.
+
+    With `inspect_image_config` off the analyzer still exists but has no
+    inspector, so every hardening fact stays UNKNOWN and every dimension
+    reports as not determined -- which is the honest result of choosing not
+    to look, and is very different from reporting an image as clean.
+    """
+    s = _settings()
+    inspector = RegistryInspector(timeout=s.http_timeout) if s.inspect_image_config else None
+    return HardeningAnalyzer(inspector=inspector)
+
+
 async def build_analyze_use_case() -> AnalyzeImageUseCase:
     s = _settings()
     repo = await build_repository()
@@ -217,6 +347,7 @@ async def build_analyze_use_case() -> AnalyzeImageUseCase:
         scanner=scanner,
         eol_checker=eol,
         threat_intel=_threat_intel(),
+        hardening=build_hardening_analyzer(),
     )
 
 
@@ -225,7 +356,18 @@ async def build_compare_use_case() -> CompareImagesUseCase:
     return CompareImagesUseCase(analyze_use_case=analyze)
 
 
-async def build_search_use_case() -> SearchImagesUseCase:
+async def build_search_use_case(
+    sources: Sequence[str] | None = None,
+    *,
+    all_sources: bool = False,
+) -> SearchImagesUseCase:
     """`search` goes through its use case like every other command, so the
-    CLI never reaches past the application layer into a repository."""
-    return SearchImagesUseCase(repository=await build_repository())
+    CLI never reaches past the application layer into a repository.
+
+    With no selection this is Docker Hub alone, which is what `search` has
+    always been: a listing of one repository's tags. `--source`/
+    `--all-sources` widen it to the same catalogues `recommend` searches.
+    """
+    if sources is None and not all_sources:
+        return SearchImagesUseCase(repository=await build_repository())
+    return SearchImagesUseCase(repository=await build_sources(sources, all_sources=all_sources))

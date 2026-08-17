@@ -68,6 +68,14 @@ class ScanResult(BaseModel):
     # Path to the raw scanner JSON this result was parsed from, so a score
     # shown to the user can always be traced back to its source evidence.
     evidence_path: str = ""
+    # Base distribution the scanner identified ("debian", "alpine", "wolfi")
+    # and its version. This is the only *measured* source of the image's
+    # libc family, which is what decides whether a migration between two
+    # images can work at all -- an Alpine-to-Debian move swaps musl for
+    # glibc, and native modules compiled against one do not load under the
+    # other. Empty when the scanner did not report it.
+    os_family: str = ""
+    os_version: str = ""
 
     @property
     def is_verified(self) -> bool:

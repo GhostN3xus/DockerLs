@@ -7,6 +7,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from dockerls.cli.dependencies import available_source_names, build_source_registry
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK
 
 console = Console()
@@ -24,6 +25,28 @@ def doctor() -> None:
     # scan, where the cause is far less obvious. `health` already gates the
     # same way for network dependencies.
     raise typer.Exit(asyncio.run(_doctor()))
+
+
+def _print_sources() -> None:
+    """List the catalogues this build can search, and their caveats.
+
+    `--source` accepts these names, and a source whose registry needs
+    credentials is called out here rather than discovered as a wall of
+    failed scans: an unauthenticated DHI run produces UNVERIFIED
+    candidates, which is correct behaviour but a confusing surprise.
+    """
+    console.print("\n[bold]Image sources[/bold] [dim](--source ...)[/dim]")
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("Name", style="bold cyan")
+    table.add_column("Detail")
+    for spec in build_source_registry().specs:
+        notes = [spec.description]
+        notes.append("searched by default" if spec.default_enabled else "opt-in")
+        if spec.requires_auth:
+            notes.append("[yellow]registry requires credentials to scan[/yellow]")
+        table.add_row(spec.name, " -- ".join(n for n in notes if n))
+    console.print(table)
+    console.print(f"  [dim]accepted: {', '.join(available_source_names())}, all[/dim]")
 
 
 async def _doctor() -> int:
@@ -60,6 +83,7 @@ async def _doctor() -> int:
         checks.add_row("keyring", "[yellow]Not installed (optional)[/yellow]")
 
     console.print(checks)
+    _print_sources()
 
     # The requirement is *a* scanner, not Trivy specifically: `ScannerFactory`
     # runs on Grype alone. Flagging a Grype-only machine as broken would have

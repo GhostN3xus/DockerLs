@@ -88,6 +88,28 @@ class Settings(BaseSettings):
     # Tags pulled per hardened source; these catalogues are small and their
     # listings are unordered, so a wide fetch buys nothing.
     hardened_tag_limit: int = 10
+    # Docker Hardened Images. Off by default because dhi.io refuses
+    # anonymous pulls: without credentials its candidates cannot be scanned,
+    # and an unscannable candidate is reported UNVERIFIED rather than
+    # ranked. `--source dhi` turns it on for a single run regardless.
+    include_dhi_source: bool = False
+    # How long the DHI catalogue index stays usable before it is refetched.
+    # The catalogue moves a few times a day; six hours keeps discovery
+    # current while costing one GitHub API request per window.
+    dhi_catalog_ttl_seconds: int = 6 * 3600
+    # Definition files read per DHI query. Each is one CDN request, and a
+    # popular image has dozens across OS variants and build flavours.
+    dhi_definition_limit: int = 12
+    # Raises GitHub's anonymous 60-requests/hour ceiling for catalogue
+    # refreshes. Read-only public data: no scope is required.
+    github_token: str = Field(default="", validation_alias="DOCKERLS_GITHUB_TOKEN")
+    # Resolve every unpinned tag to a manifest digest before scanning. This
+    # is what makes deduplication work across sources: without it, tags that
+    # share a manifest are scanned once each.
+    resolve_digests: bool = True
+    # Fetch the OCI config of each finalist to measure how it is configured
+    # (non-root, ports, entrypoint) instead of relying on vendor claims.
+    inspect_image_config: bool = True
     scanner_timeout: int = 300
     http_timeout: int = 30
     retry_max_attempts: int = 3
