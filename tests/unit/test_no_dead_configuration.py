@@ -140,9 +140,9 @@ class TestNoUnreachablePublicCode:
             if _reads_of(name) - len(locations) <= 0:
                 unreachable.append(f"{name} ({locations[0]})")
 
-        assert (
-            unreachable == []
-        ), f"public symbols defined but never reached from anywhere in the package: {unreachable}"
+        assert unreachable == [], (
+            f"public symbols defined but never reached from anywhere in the package: {unreachable}"
+        )
 
     def test_no_module_is_orphaned(self):
         """A whole module nobody imports is the NVD client all over again."""

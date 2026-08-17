@@ -138,9 +138,9 @@ async def test_run_completes_within_the_time_budget(pipeline):
     elapsed = time.perf_counter() - start
 
     assert result.recommendations, "expected a recommendation"
-    assert (
-        elapsed < TIME_BUDGET_SECONDS
-    ), f"run took {elapsed:.1f}s, over the {TIME_BUDGET_SECONDS}s budget"
+    assert elapsed < TIME_BUDGET_SECONDS, (
+        f"run took {elapsed:.1f}s, over the {TIME_BUDGET_SECONDS}s budget"
+    )
 
 
 @pytest.mark.asyncio
@@ -279,9 +279,9 @@ async def test_progress_renders_one_bar_and_leaves_results_clean(pipeline):
     # Exactly one row per image: every row carries its source label, so
     # summing those counts detects a duplicated table or a repeated row.
     rows = sum(table_out.count(s) for s in ("Docker Hub", "Chainguard", "Distroless"))
-    assert rows == len(
-        result.recommendations
-    ), f"expected {len(result.recommendations)} table rows, counted {rows}"
+    assert rows == len(result.recommendations), (
+        f"expected {len(result.recommendations)} table rows, counted {rows}"
+    )
 
 
 @pytest.mark.asyncio
