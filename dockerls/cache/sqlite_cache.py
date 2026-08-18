@@ -20,7 +20,15 @@ if TYPE_CHECKING:
 # an older schema are treated as misses instead of crashing on load.
 # v2: ImageAnalysis gained verification metadata (scan evidence paths, Hub
 # tag state, scanner divergence) and ScanResult gained `evidence_path`.
-CACHE_SCHEMA_VERSION = "v2"
+# v3: ImageAnalysis gained the assessment fields (hardening facts, hardening
+# and attack-surface reports, confidence, why/trade-offs) and ScanResult
+# gained the scanner-reported base distribution. A v2 row would still
+# *validate* against the new model -- pydantic would fill the missing fields
+# with their defaults -- and that is exactly the problem: the defaults are
+# "nothing determined" and `UNVERIFIED`, so a stale row would present an
+# image as uninspected rather than as unscanned. Orphaning the old rows
+# costs one cold run and removes the ambiguity entirely.
+CACHE_SCHEMA_VERSION = "v3"
 
 
 class CacheStats(NamedTuple):

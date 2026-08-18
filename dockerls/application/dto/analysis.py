@@ -3,9 +3,35 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from dockerls.domain.entities.image import DockerImage
+from dockerls.domain.entities.image_facts import HardeningFacts
 from dockerls.domain.entities.recommendation import Recommendation
 from dockerls.domain.entities.scan_result import ScanResult
 from dockerls.domain.entities.vulnerability import Vulnerability
+from dockerls.domain.value_objects.confidence import Confidence
+
+
+class DimensionReport(BaseModel):
+    """A derived score plus everything needed to defend it.
+
+    Both the hardening and attack-surface models are computed over the
+    facts that could be determined, so the number alone is not enough: a
+    reader needs the coverage it was computed at, and the named findings on
+    either side. Carrying them together means the terminal, the JSON output
+    and every exporter show the same defence of the same number.
+    """
+
+    score: float = 0.0
+    #: Share of the model that could be determined, 0.0-1.0.
+    coverage: float = 0.0
+    #: False when coverage was too thin for the score to mean anything. The
+    #: renderers show "n/a" rather than a confident-looking number.
+    reportable: bool = False
+    #: Determined properties that counted in the image's favour.
+    positives: list[str] = Field(default_factory=list)
+    #: Determined properties that counted against it.
+    negatives: list[str] = Field(default_factory=list)
+    #: Properties nothing could establish, named rather than omitted.
+    undetermined: list[str] = Field(default_factory=list)
 
 
 class ImageAnalysis(BaseModel):
@@ -30,6 +56,31 @@ class ImageAnalysis(BaseModel):
     hub_tag_verified: bool | None = None
     # scanner name -> raw scan JSON path, backing the score shown above.
     evidence_paths: dict[str, str] = Field(default_factory=dict)
+
+    # --- Multi-dimensional assessment ------------------------------------
+    # The evidence record every derived dimension below is computed from,
+    # carried so a consumer can recompute them or apply its own policy.
+    facts: HardeningFacts = Field(default_factory=HardeningFacts)
+    # How well the image is configured, independently of its CVE counts.
+    hardening: DimensionReport = Field(default_factory=DimensionReport)
+    # How much an attacker inherits inside the container. Higher is *worse*.
+    attack_surface: DimensionReport = Field(default_factory=DimensionReport)
+    # How much the evidence behind all of the above is worth. Defaults to
+    # UNVERIFIED so an analysis that skipped assessment can never read as
+    # trustworthy by omission.
+    confidence: Confidence = Confidence.UNVERIFIED
+    confidence_reasons: list[str] = Field(default_factory=list)
+    # Plain-language reasons this image ranked where it did, so a
+    # recommendation never reduces to an unexplained number.
+    why: list[str] = Field(default_factory=list)
+    # Costs and caveats of moving to this image, stated alongside the
+    # reasons. A recommendation that lists only upsides is advertising.
+    trade_offs: list[str] = Field(default_factory=list)
+
+    @property
+    def pinned_reference(self) -> str:
+        """What to actually deploy: digest-pinned when one was resolved."""
+        return self.image.pinned_reference
 
 
 class BaselineCriteria(BaseModel):
@@ -88,6 +139,12 @@ class RunMetrics(BaseModel):
     scans_performed: int = 0
     cross_validations: int = 0
     workers: int = 0
+    # Tags that arrived without a digest and were pinned to one. Each is a
+    # registry HEAD that buys deduplication across every source.
+    digests_resolved: int = 0
+    # Candidates whose OCI config was fetched and verified, which is what
+    # makes their hardening facts measurements rather than claims.
+    images_inspected: int = 0
 
     @property
     def duplicates_collapsed(self) -> int:

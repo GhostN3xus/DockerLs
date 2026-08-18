@@ -102,6 +102,7 @@ FRAMEWORK_INVOKED = {
     "recommend",
     "analyze",
     "advisor",
+    "alternatives",
     "compare",
     "search",
     "export",

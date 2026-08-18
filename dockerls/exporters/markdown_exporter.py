@@ -26,19 +26,41 @@ class MarkdownExporter(ExporterInterface):
             "",
             "## Results",
             "",
-            "| Image | Score | Tier | Critical | High | Medium | Low | Fixable "
-            "| Remediation | EOL |",
-            "|-------|-------|------|----------|------|--------|-----|---------"
-            "|-------------|-----|",
+            "| Image | Source | Score | Tier | Critical | High | Medium | Low | Fixable "
+            "| Remediation | EOL | Hardening | Attack Surface | Confidence |",
+            "|-------|--------|-------|------|----------|------|--------|-----|---------"
+            "|-------------|-----|-----------|----------------|------------|",
         ]
         for a in items:
             eol = "Yes" if a.is_eol else "No"
+            hardening = f"{a.hardening.score:.0f}" if a.hardening.reportable else "n/a"
+            surface = f"{a.attack_surface.score:.0f}" if a.attack_surface.reportable else "n/a"
             lines.append(
-                f"| {a.image.full_reference} | {a.security_score} | {a.tier} "
+                f"| {a.image.full_reference} | {a.image.source} | {a.security_score} | {a.tier} "
                 f"| {a.scan.critical_count} | {a.scan.high_count} "
                 f"| {a.scan.medium_count} | {a.scan.low_count} "
-                f"| {a.scan.fixable_count} | {a.remediation_score}/100 | {eol} |"
+                f"| {a.scan.fixable_count} | {a.remediation_score}/100 | {eol} "
+                f"| {hardening} | {surface} | {a.confidence.value} |"
             )
+
+        if items:
+            best = items[0]
+            lines += ["", "## Why this image", ""]
+            lines += [f"- {reason}" for reason in best.why] or ["- (no reasons recorded)"]
+            if best.trade_offs:
+                lines += ["", "### Trade-offs", ""]
+                lines += [f"- {cost}" for cost in best.trade_offs]
+            if best.image.digest_known:
+                lines += ["", f"**Pin to:** `{best.pinned_reference}`"]
+            lines += [
+                "",
+                f"**Confidence:** {best.confidence.value} ({'; '.join(best.confidence_reasons)})",
+                "",
+                "> Hardening is scored over the facts that could be determined, and its "
+                "coverage is reported with it. It is never summed into the security score: "
+                "a well-configured image with CRITICAL findings is a well-configured "
+                "vulnerable image.",
+            ]
 
         if items and items[0].recommendation:
             rec = items[0].recommendation

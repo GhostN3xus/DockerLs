@@ -12,6 +12,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from dockerls.application.services.source_registry import UnknownSourceError
 from dockerls.cli.dependencies import (
     build_recommend_use_case,
     enable_console_logging,
@@ -20,6 +21,7 @@ from dockerls.cli.dependencies import (
 from dockerls.cli.options import OutputFormat, parse_output_format
 from dockerls.cli.progress import RichScanObserver
 from dockerls.cli.validators import check_limit, check_threshold, check_workers
+from dockerls.domain.value_objects.confidence import Confidence
 from dockerls.domain.value_objects.security_tier import SecurityTier, Tier
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK
 from dockerls.infrastructure.evidence import slugify_reference
@@ -27,7 +29,11 @@ from dockerls.infrastructure.evidence import slugify_reference
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from dockerls.application.dto.analysis import AnalysisResult, ImageAnalysis
+    from dockerls.application.dto.analysis import (
+        AnalysisResult,
+        DimensionReport,
+        ImageAnalysis,
+    )
 
 console = Console()
 
@@ -94,6 +100,18 @@ def recommend(
     no_hardened: bool = typer.Option(
         False, "--no-hardened", help="Search Docker Hub only (skip Chainguard/Distroless)"
     ),
+    source: list[str] = typer.Option(
+        [],
+        "--source",
+        "-s",
+        help=(
+            "Image source to search; repeatable. "
+            "One of: dockerhub, chainguard, distroless, dhi, all"
+        ),
+    ),
+    all_sources: bool = typer.Option(
+        False, "--all-sources", help="Search every configured source, including opt-in ones"
+    ),
     no_cache: bool = typer.Option(
         False, "--no-cache", help="Ignore cached analyses and re-scan every candidate"
     ),
@@ -139,8 +157,15 @@ def recommend(
                 verify_hub_tags=not no_hub_check,
                 include_hardened=not no_hardened,
                 use_cache=not no_cache,
+                sources=list(source) or None,
+                all_sources=all_sources,
             )
         )
+    except UnknownSourceError as e:
+        # Its own arm: a mistyped source names a fixable mistake, and the
+        # exception already carries the valid choices.
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(EXIT_ERROR_CODE) from e
     except ValueError as e:
         # Bad thresholds are user error, not a crash: show the message, not
         # a stack trace (pretty_exceptions_enable is off app-wide).
@@ -162,6 +187,8 @@ async def _recommend(
     verify_hub_tags: bool = True,
     include_hardened: bool = True,
     use_cache: bool = True,
+    sources: list[str] | None = None,
+    all_sources: bool = False,
 ) -> None:
     # The observer builds its own stderr console; `console` (stdout) is left
     # exclusively for results so the two streams cannot interleave.
@@ -176,6 +203,8 @@ async def _recommend(
             verify_hub_tags=verify_hub_tags,
             include_hardened=include_hardened,
             use_cache=use_cache,
+            sources=sources,
+            all_sources=all_sources,
         )
         result = await use_case.execute(image, limit=resolve_tag_limit(limit))
 
@@ -188,11 +217,13 @@ async def _recommend(
     if result.baseline_met and result.recommendations:
         console.print(Panel("[bold green]Recommended Images[/bold green]", expand=False))
         _print_table(result.recommendations)
+        _print_why(result.recommendations)
         _print_details(result.recommendations)
         _print_divergences(result.recommendations)
     elif result.alternatives:
         console.print(Panel(_baseline_miss_message(result), expand=False))
         _print_table(result.alternatives)
+        _print_why(result.alternatives)
         _print_details(result.alternatives)
         _print_divergences(result.alternatives)
     elif _nothing_could_be_measured(result):
@@ -305,6 +336,9 @@ def _print_table(analyses: list[ImageAnalysis]) -> None:
     table.add_column("Score", justify="right", style="green", no_wrap=True)
     table.add_column("Tier", justify="center")
     table.add_column("C/H/M", justify="center", no_wrap=True)
+    table.add_column("Hard", justify="right", no_wrap=True)
+    table.add_column("Surf", justify="right", no_wrap=True)
+    table.add_column("Conf", justify="center", no_wrap=True)
     table.add_column("Fix", justify="right", style="green")
     table.add_column("Rem", justify="right")
     table.add_column("Tag", justify="center")
@@ -334,15 +368,79 @@ def _print_table(analyses: list[ImageAnalysis]) -> None:
             score,
             f"[{ts}]{a.tier}[/{ts}]" if ts else a.tier,
             counts,
+            _dimension(a.hardening),
+            _dimension(a.attack_surface),
+            _confidence_label(a.confidence),
             str(a.scan.fixable_count),
             f"{a.remediation_score}/100",
             _hub_status(a),
         )
     console.print(table)
     console.print(
-        "[dim]C/H/M = Critical/High/Medium | Fix = fixable | Rem = remediation | "
-        "Tag = confirmed in source registry[/dim]"
+        "[dim]C/H/M = Critical/High/Medium | Hard = hardening (higher is better) | "
+        "Surf = attack surface (LOWER is better) | Conf = evidence confidence | "
+        "Fix = fixable | Rem = remediation | Tag = confirmed in source registry[/dim]"
     )
+
+
+def _dimension(report: DimensionReport) -> str:
+    """Render a dimension, or say plainly that too little was determined.
+
+    A score computed from two facts out of nine is not a measurement, and
+    printing it as a number would let the reader treat it as one. Below the
+    reportable threshold the cell says `n/a` and the coverage is shown in
+    the details section instead.
+    """
+    if not report.reportable:
+        return "[dim]n/a[/dim]"
+    return f"{report.score:.0f}"
+
+
+#: Colours track trust, not quality: UNVERIFIED is red because nothing was
+#: measured, which is a stronger warning than a low score.
+_CONFIDENCE_STYLES = {
+    Confidence.HIGH: "green",
+    Confidence.MEDIUM: "yellow",
+    Confidence.LOW: "red",
+    Confidence.UNVERIFIED: "bold white on red",
+}
+
+
+def _confidence_label(level: Confidence) -> str:
+    style = _CONFIDENCE_STYLES.get(level, "")
+    text = level.value[:4]
+    return f"[{style}]{text}[/{style}]" if style else text
+
+
+def _print_why(analyses: list[ImageAnalysis]) -> None:
+    """State the case for the top pick, and what it costs.
+
+    A ranked table answers "which one"; it never answers "why that one".
+    Without this section the reader is asked to trust a number whose
+    derivation is invisible -- which is exactly the failure mode this tool
+    exists to avoid in other people's scanners.
+    """
+    if not analyses:
+        return
+    best = analyses[0]
+    console.print(f"\n[bold]Why {best.image.full_reference}?[/bold]")
+    for reason in best.why[:10]:
+        console.print(f"  [green]+[/green] {reason}")
+    if best.trade_offs:
+        console.print("\n[bold]Trade-offs[/bold]")
+        for cost in best.trade_offs[:10]:
+            console.print(f"  [yellow]![/yellow] {cost}")
+
+    facts = best.facts
+    console.print(
+        f"\n[dim]Evidence: {facts.determined_count} fact(s) determined | "
+        f"hardening coverage {best.hardening.coverage:.0%} | "
+        f"confidence {best.confidence.value} ({'; '.join(best.confidence_reasons)})[/dim]"
+    )
+    if best.image.digest_known:
+        console.print(
+            f"[dim]Deploy this exact image: {best.pinned_reference}[/dim]", soft_wrap=True
+        )
 
 
 def _print_details(analyses: list[ImageAnalysis]) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import typer
 
 from dockerls.cli.commands.advisor import advisor
+from dockerls.cli.commands.alternatives import alternatives
 from dockerls.cli.commands.analyze import analyze as analyze_image
 from dockerls.cli.commands.analyze_dockerfile import analyze as analyze_dockerfile_cmd
 from dockerls.cli.commands.build import build
@@ -37,6 +38,7 @@ def _bootstrap() -> None:
 app.command()(search)
 app.command()(recommend)
 app.command()(advisor)
+app.command()(alternatives)
 app.command(name="analyze")(analyze_image)
 app.command(name="analyze-dockerfile")(analyze_dockerfile_cmd)
 app.command()(build)

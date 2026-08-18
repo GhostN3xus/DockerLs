@@ -280,12 +280,29 @@ class TrivyScanner(ScannerInterface):
                     )
                 )
 
+        family, version = self._parse_os(data)
         return ScanResult(
             image_reference=image_ref,
             scanner="trivy",
             vulnerabilities=vulns,
             scan_timestamp=datetime.now(tz=UTC).isoformat(),
+            os_family=family,
+            os_version=version,
         )
+
+    @staticmethod
+    def _parse_os(data: dict[str, Any]) -> tuple[str, str]:
+        """The base distribution Trivy identified, from `Metadata.OS`.
+
+        Reported by the scanner rather than guessed from the tag: a tag
+        called `-alpine` is a naming convention, while this is what the
+        package database inside the image actually is.
+        """
+        metadata = data.get("Metadata")
+        os_block = metadata.get("OS") if isinstance(metadata, dict) else None
+        if not isinstance(os_block, dict):
+            return "", ""
+        return str(os_block.get("Family") or ""), str(os_block.get("Name") or "")
 
     # Ordem de desempate quando a base que definiu a severidade não publica
     # CVSS (Debian, Alpine e Ubuntu classificam sem pontuar). NVD primeiro por

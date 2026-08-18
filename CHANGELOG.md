@@ -7,6 +7,130 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
 
 ## [Não lançado]
 
+### Adicionado — motor de decisão multi-source
+
+- **Abstração de fontes de imagem** (`application/services/source_registry.py`).
+  Catálogos se registram com nome, rótulo e construtor; os comandos resolvem uma
+  *seleção* em vez de ramificar em nomes de fornecedor. Adicionar um provedor é
+  um `register()` na camada de wiring — nenhum comando muda, e nenhum
+  `if source == ...` cresce um braço novo. Expõe `--source` (repetível) e
+  `--all-sources` em `search`, `recommend`, `advisor` e `alternatives`;
+  `--no-hardened` mantém o significado que sempre teve.
+- **Docker Hardened Images como fonte** (`integrations/dhi/`). O catálogo é
+  público, o registry (`dhi.io`) não é: sem credencial os candidatos DHI ficam
+  `UNVERIFIED` e **nunca** são ranqueados. Por isso a fonte é opt-in
+  (`--source dhi` / `include_dhi_source`). O catálogo é lido com **uma**
+  requisição à API do GitHub por TTL (árvore recursiva reduzida a um índice
+  compacto e cacheado) e depois só as definições da imagem consultada, via CDN —
+  nunca um clone, nunca uma varredura de diretórios. Medido: 1 requisição a frio
+  sobre 11 mil blobs, **0** a quente.
+- **Metadados declarados, separados do que foi medido**
+  (`domain/entities/declared_metadata.py`). Uma definição de build é uma
+  *declaração* do fornecedor: útil, auditável, e não uma medição. Quando uma
+  declaração contradiz o config OCI da imagem publicada, a contradição vira
+  achado em vez de ser resolvida em silêncio.
+- **Digest-first** (`integrations/registry/inspector.py`). Toda tag sem digest é
+  resolvida no registry antes do scan. Isso fixa a recomendação em bytes
+  imutáveis (`Pin to: node@sha256:...`) e faz a deduplicação valer **entre**
+  catálogos: 40 tags apontando para 12 manifestos custam 12 scans e 40 `HEAD`,
+  não 40 scans. O blob de config é hasheado e conferido contra o digest que o
+  endereçava; divergência descarta o config em vez de confiar na rede.
+- **Hardening Score** (`domain/value_objects/hardening.py`), pontuado sobre os
+  fatos **determinados** e reportando `coverage`. Fatos são de três estados:
+  `unknown` nunca ganha crédito em direção nenhuma, e abaixo de 25% de cobertura
+  o número aparece como `n/a` em vez de fingir ser uma medição. O score não entra
+  no `SecurityScore` e no ranking só é consultado *depois* da posição de
+  vulnerabilidade — é a razão estrutural de nunca poder mascarar um CRITICAL.
+- **Attack Surface Score** (`domain/value_objects/attack_surface.py`), escala
+  invertida (maior é pior), rotulada como tal em toda renderização. Tamanho não
+  pontua: pacotes, shell, gerenciador de pacotes, ferramentas de debug, SUID e
+  privilégio pontuam.
+- **Confidence** (`domain/value_objects/confidence.py`):
+  `HIGH`/`MEDIUM`/`LOW`/`UNVERIFIED`. `UNVERIFIED` é um piso — nenhum outro sinal
+  tira um candidato dele, e o ranking nunca o coloca acima de algo medido.
+- **`dockerls alternatives <image:tag>`**: alternativas mais seguras para a
+  imagem que você já roda. A imagem atual é escaneada pelo mesmo pipeline dos
+  candidatos, então a comparação é entre duas medições. Se ela não puder ser
+  escaneada, o comando termina em `1` — sem linha de base não há melhoria a
+  afirmar.
+- **Inteligência de migração** (`application/services/migration.py`), usada por
+  `alternatives` e pelo `advisor`: troca de libc (musl/glibc), troca de
+  gerenciador de pacotes, ausência de shell, arquiteturas perdidas, mudança de
+  publicador — cada uma levantada sempre que a evidência **permite** o problema.
+  Compatibilidade nunca é afirmada; o checklist existe porque essa pergunta só
+  se responde executando.
+- **`dockerls advisor node:22-alpine`**: com uma tag no argumento, o advisor
+  passa a explicar a migração a partir dela. Sem tag, comportamento inalterado.
+- **Distribuição base reportada pelo scanner** (`ScanResult.os_family`), lida do
+  `Metadata.OS` do Trivy e do bloco `distro` do Grype. É o que torna a análise de
+  libc uma medição em vez de um palpite a partir do nome da tag.
+- **Rate limiting e circuit breaker** reutilizáveis (`utils/rate_limit.py`) para
+  provedores externos, e **`doctor`** agora lista as fontes disponíveis, quais
+  são opt-in e quais exigem credencial.
+- **Observabilidade**: `digests_resolved` e `images_inspected` em `RunMetrics`,
+  ao lado dos contadores que já existiam.
+- **`benchmarks/bench_multi_source.py`**: mede deduplicação por digest, custo do
+  índice do catálogo (frio/quente) e ranqueamento de até 10 mil candidatos.
+
+### Segurança
+
+- **Parsing YAML com limites explícitos** (`utils/safe_yaml.py`) para todo
+  documento vindo da rede: teto de bytes, teto de profundidade e — o ponto que
+  importa — **medição da expansão antes da construção**. A primeira versão deste
+  guard contava aliases, e o teste adversarial mostrou que isso não basta: nove
+  níveis de aliasing nônuplo são ~70 aliases (abaixo de qualquer limite
+  razoável) e expandem para 387 milhões de nós. Agora o documento é *composto*
+  num grafo (onde um alias é uma aresta compartilhada e custa nada), o tamanho
+  expandido é calculado sobre esse grafo com memoização e clamp, e só então o
+  documento é construído. A bomba clássica é recusada em 2 ms, e o teste afirma
+  o tempo — um guard que recusa só depois de expandir executou o ataque em vez
+  de impedi-lo.
+- **Conteúdo de catálogo nunca vira URL sem validação**: caminhos de definição
+  são casados contra um padrão ancorado (nada de `..`, nada fora de `image/`), o
+  cliente não segue redirects, e uma definição que publique para um registry que
+  não seja `dhi.io` não produz candidato — conteúdo remoto não redireciona um
+  scan para um host arbitrário.
+- **Índice de catálogo em cache é revalidado na leitura**: o cache é um arquivo
+  que outro processo pode escrever, e uma entrada com caminhos fora do formato é
+  rejeitada por inteiro, nunca filtrada.
+- **Casamento de pacote é exato, não por substring**: `libcurl4` não é `curl`, e
+  tratá-lo como tal inventaria uma capacidade que a imagem não tem.
+- Suíte adversarial nova (`tests/adversarial/`): bombas YAML, documentos
+  gigantes, aninhamento profundo, tags e repositórios maliciosos, referências que
+  parecem flags de scanner, respostas de registry inválidas, blob de config com
+  digest divergente, cache adulterado, rate limit e circuit breaker.
+
+### Corrigido
+
+- **`CACHE_SCHEMA_VERSION` foi para `v3`.** Uma entrada `v2` ainda *validaria*
+  contra o modelo novo — o pydantic preencheria os campos ausentes com os
+  padrões — e é justamente esse o problema: os padrões são "nada determinado" e
+  `UNVERIFIED`, então uma linha velha apresentaria a imagem como não
+  inspecionada em vez de não escaneada. Órfãs as linhas antigas custa uma
+  execução fria e elimina a ambiguidade.
+- **Tokens fine-grained do GitHub (`github_pat_...`) são mascarados nos logs.**
+  O formato clássico (`ghp_...`) já era; o novo não casava com o mesmo padrão.
+  Nada registra o token em log, mas o mascaramento existe para o caso em que
+  ele chega lá por uma mensagem de exceção, sem chave que o identifique.
+- **`--format json` podia sair inválido** em `alternatives` e `advisor`: quando a
+  imagem atual não podia ser escaneada, o aviso legível era impresso no stdout,
+  na frente do documento JSON. Diagnósticos agora vão para o stderr — um formato
+  legível por máquina só é legível por máquina se nada mais cair no fluxo.
+
+### Alterado
+
+- `recommend` ganhou as colunas `Hard`, `Surf` e `Conf` e uma seção
+  **"Why this image?"** com trade-offs; nenhuma coluna existente saiu ou mudou de
+  posição.
+- Exportadores: JSON, CSV, HTML, Markdown e SARIF carregam as dimensões novas.
+  Em CSV as colunas foram **acrescentadas ao fim** (um consumidor que indexa por
+  posição continua funcionando); em SARIF elas vão em `properties` por resultado,
+  que é o ponto de extensão da especificação.
+- O ranqueamento final passou a ser multi-source e explícito: confiança →
+  vulnerabilidade medida → hardening (só com cobertura suficiente) → superfície →
+  remediabilidade. A ordem *é* a política, e está documentada num único lugar
+  (`application/services/verdict.ranking_key`).
+
 ### Adicionado
 
 - **Um contrato de exit code documentado** (`dockerls/exit_codes.py`, seção
