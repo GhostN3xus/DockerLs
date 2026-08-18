@@ -5,6 +5,57 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.2] -- 2026-08-18
+
+### Alterado — a imagem publicada não embute mais um scanner
+
+O binário do Trivy era copiado para o stage final (127,92 MB) e as dependências
+Go dele (`golang.org/x/crypto`, `stdlib`, `go-git`) respondiam por ~330 das 339
+vulnerabilidades que o Docker Scout reportava contra a imagem. Nenhuma delas era
+do código Python deste projeto: eram do scanner que viajava dentro dela, pinado
+em `aquasec/trivy:0.55.2`, de setembro de 2024.
+
+**Isto é uma perda real de capacidade, e está declarada no próprio Dockerfile.**
+Dentro do container, `recommend`, `analyze`, `compare`, `advisor`,
+`alternatives`, `sbom` e o passo de scan do `build` não conseguem medir nada: o
+`ScannerFactory` não encontra `trivy` nem `grype` no PATH e devolve
+`SCANNER_MISSING`, que pela política deste projeto vira "não verificado" e nunca
+"limpo". Os comandos que não dependem de scanner (`analyze-dockerfile`,
+`controls`, `search`, `version`, `cache`, `login`) seguem funcionando. Para
+escanear, rode o `dockerls` num host com trivy ou grype instalado. O CI não é
+afetado: `security.yml` escaneia com a `aquasecurity/trivy-action`, que nunca
+dependeu do binário embutido.
+
+### Corrigido
+
+- **`libexpat1` desatualizado na base** *(2 CVEs CRITICAL)*. `CVE-2024-45491` e
+  `CVE-2024-45492`, versão instalada `2.5.0-1`, corrigidas em
+  `2.5.0-1+deb12u1` — era isto que derrubava `dockerls build --fail-on
+  critical`. O stage final passa a rodar `apt-get update && apt-get upgrade -y`
+  antes de qualquer outra coisa, com a lista de índices removida na mesma
+  camada. `upgrade` em vez de fixar a versão na mão de propósito: fixar corrige
+  o pacote que o scan de hoje viu e trava a atualização dos que ele ainda não
+  viu.
+- **Digest da base subido.** O pin apontava para `python:3.12.4-slim-bookworm`
+  de meados de 2024, que é a causa de a base chegar velha a cada build. Agora
+  aponta para o digest de manifest-list de `python:3.12-slim-bookworm`
+  resolvido em 2026-08-18 (`sha256:a116514e…`), verificado como OCI index
+  cobrindo amd64, arm64, arm, 386 e ppc64le.
+- **Os LABELs estavam no stage errado.** `maintainer` e `security.scanner`
+  ficavam no stage `builder`, que não vira imagem nenhuma — a imagem publicada
+  saía sem nenhum dos dois, que são exatamente os rótulos que a regra DF007
+  deste projeto cobra. Foram para o stage final, junto das anotações
+  `org.opencontainers.image.*`.
+- **Falso positivo em DF007** *(defeito no validador, encontrado rodando o
+  próprio `analyze-dockerfile` contra este Dockerfile)*. O padrão de LABEL era
+  `^LABEL\s+([^=]+)=(.*)$`: casava até o primeiro `=` e engolia o resto da
+  linha como *valor*. Numa instrução idiomática com vários pares, só a primeira
+  chave existia — então um Dockerfile que declara `security.scanner` era
+  reprovado por não declarar `security.scanner`. O parser passa a ler todos os
+  pares (com `shlex`, porque valores entre aspas contêm espaços) e a forma
+  legada `LABEL chave valor` continua funcionando. Um falso positivo é pior que
+  nenhuma checagem: ele ensina o leitor a ignorar o aviso.
+
 ## [1.3.1] -- 2026-08-18
 
 ### Corrigido — segurança

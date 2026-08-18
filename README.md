@@ -1863,19 +1863,42 @@ docker run --rm \
   --read-only \
   --cap-drop=ALL \
   --security-opt=no-new-privileges \
-  dockerls:latest recommend node
+  dockerls:latest analyze-dockerfile /work
 ```
+
+### A imagem não embute um scanner
+
+Isto é uma limitação declarada, não um detalhe. O binário do Trivy era copiado
+para o stage final e as dependências Go dele respondiam por ~330 das 339
+vulnerabilidades que o Docker Scout reportava contra a imagem — nenhuma delas do
+código Python deste projeto. Ele saiu.
+
+**O que funciona dentro do container:** `analyze-dockerfile`, `controls`,
+`search`, `version`, `cache`, `login`.
+
+**O que não funciona:** `recommend`, `analyze`, `compare`, `advisor`,
+`alternatives`, `sbom` e o passo de scan do `build`. Sem `trivy` ou `grype` no
+PATH, o `ScannerFactory` devolve `SCANNER_MISSING` — que, pela política deste
+projeto, é reportado como **não verificado** e nunca como "limpo". A ausência de
+medição não é um resultado de segurança.
+
+Para escanear, rode o `dockerls` num host que tenha trivy ou grype instalado
+(o modo de uso normal fora de container), ou monte um scanner no PATH do
+container. O CI não é afetado: ele escaneia com a `aquasecurity/trivy-action`,
+que nunca dependeu do binário embutido.
 
 ### Docker Compose
 
 ```bash
-docker compose run dockerls recommend node
+docker compose run dockerls analyze-dockerfile /work
 ```
 
-A imagem Docker segue as boas práticas de segurança Docker da OWASP: build
-multi-estágio, imagens base fixadas por digest (Python e Trivy), Trivy copiado da
-imagem oficial em vez de instalado via `curl | sh`, usuário não-root, suporte a
-sistema de arquivos somente leitura e todas as capabilities removidas.
+A imagem segue as boas práticas de segurança Docker da OWASP: build
+multi-estágio, base fixada por digest de manifest-list, pacotes do sistema
+atualizados no stage final (é o que corrige CVEs como as do `libexpat1`, que a
+base congelada pelo digest carregava), usuário não-root, rótulos
+`org.opencontainers.image.*` no manifesto final, suporte a sistema de arquivos
+somente leitura e todas as capabilities removidas.
 
 ---
 
