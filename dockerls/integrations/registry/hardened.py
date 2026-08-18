@@ -25,23 +25,48 @@ class HardenedRepository(ImageRepositoryInterface):
     source: str = ""
     host: str = ""
     namespace: str = ""
-    # Query name -> repository name, where the upstream project names an
-    # image differently from the Docker Hub convention users type.
-    aliases: dict[str, str] = {}
+    # Query name -> repository names, most current first.
+    #
+    # This was a 1:1 alias map, and 1:1 was the bug. Distroless keeps its
+    # legacy repositories published: `distroless/nodejs` still lists tags
+    # `10`, `12` and `14`, and `distroless/java` still lists `11`. Mapping
+    # `node` onto that single repository meant this tool answered a request
+    # for a hardened alternative with a Node runtime that reached end of life
+    # years ago -- an insecure image carrying the tool's own recommendation.
+    # The current runtimes live in separate, version-named repositories
+    # (`nodejs22-debian12`), which no 1:1 alias could reach.
+    #
+    # A tuple also fixes the second half: an ecosystem legitimately has more
+    # than one hardened image (`jdk` and `jre`), and picking one for the
+    # reader is a decision that belongs to whoever knows whether the
+    # application compiles at runtime.
+    repositories: dict[str, tuple[str, ...]] = {}
 
     def __init__(self, timeout: int = 30):
         self._client = OCIRegistryClient(self.host, timeout=timeout)
 
-    def repository_for(self, image_name: str) -> str | None:
-        """Map a user's query ("node") onto this source's repository path.
+    def repositories_for(self, image_name: str) -> list[str]:
+        """Every repository of this source that could answer the query.
 
-        Returns None for references that already name a different registry,
-        so `dockerls recommend ghcr.io/org/app` never fans out to Chainguard.
+        Returns an empty list for references that already name a different
+        registry, so `dockerls recommend ghcr.io/org/app` never fans out to
+        Chainguard.
         """
-        name = image_name.strip().strip("/")
+        name = image_name.strip().strip("/").lower()
         if not name or "/" in name or ":" in name:
-            return None
-        return f"{self.namespace}/{self.aliases.get(name, name)}"
+            return []
+        candidates = self.repositories.get(name, (name,))
+        return [f"{self.namespace}/{candidate}" for candidate in candidates]
+
+    def repository_for(self, image_name: str) -> str | None:
+        """The single most current repository for the query, or None.
+
+        Kept for the callers that identify a source by one path; discovery
+        uses `repositories_for`, which is what reaches the version-named
+        repositories the legacy alias could not.
+        """
+        candidates = self.repositories_for(image_name)
+        return candidates[0] if candidates else None
 
     def _full_name(self, repository: str) -> str:
         return f"{self.host}/{repository}"
@@ -58,23 +83,35 @@ class HardenedRepository(ImageRepositoryInterface):
         return [t for t in (payload.get("tags") or []) if is_runnable_tag(t)]
 
     async def search_tags(self, image_name: str, limit: int = 100) -> list[DockerImage]:
-        repository = self.repository_for(image_name)
-        if repository is None:
-            return []
+        """Every runnable tag this source offers for the query.
 
-        payload = await self._client.list_tags(repository)
-        if payload is None:
-            return []
+        Each candidate repository is listed in order and the results are
+        concatenated, so the current runtime (`nodejs22-debian12`) is offered
+        ahead of the legacy one and a source that publishes both a JDK and a
+        JRE offers both instead of silently choosing.
 
-        # Build first, then rank: a source that dates its tags (GCR) must be
-        # ordered newest-first, or a lexical sort surfaces nodejs:10 ahead of
-        # nodejs:22 and the tool recommends a years-old runtime.
-        images = [
-            self._build_image(repository, tag, payload) for tag in self._runnable_tags(payload)
-        ]
-        images.sort(key=_image_rank)
+        A repository that does not exist is not an error: the candidate lists
+        below are per-source guesses about a catalogue that changes on its
+        own schedule, and a 404 on one of them must not lose the others.
+        """
+        images: list[DockerImage] = []
+        for repository in self.repositories_for(image_name):
+            payload = await self._client.list_tags(repository)
+            if payload is None:
+                continue
+            # Build first, then rank: a source that dates its tags (GCR) must
+            # be ordered newest-first, or a lexical sort surfaces nodejs:10
+            # ahead of nodejs:22 and the tool recommends a years-old runtime.
+            found = [
+                self._build_image(repository, tag, payload) for tag in self._runnable_tags(payload)
+            ]
+            found.sort(key=_image_rank)
+            images.extend(found)
+            if len(images) >= limit:
+                break
+
         selected = images[:limit]
-        logger.info(f"{self.source}: {len(selected)} usable tags for {self._full_name(repository)}")
+        logger.info(f"{self.source}: {len(selected)} usable tags for {image_name}")
         return selected
 
     async def get_image_metadata(self, image_name: str, tag: str) -> DockerImage | None:
@@ -130,11 +167,26 @@ class ChainguardRepository(HardenedRepository):
     source = CHAINGUARD
     host = "cgr.dev"
     namespace = "chainguard"
-    aliases = {
-        "nodejs": "node",
-        "python3": "python",
-        "golang": "go",
-        "openjdk": "jdk",
+    #: Verificado contra o registry em 2026-08-18: `chainguard/java` não
+    #: existe (responde 403 no token endpoint), então quem digitava `java`
+    #: recebia zero alternativas. As imagens reais são `jdk` e `jre`, e as
+    #: duas são oferecidas porque a escolha depende de a aplicação compilar
+    #: em runtime -- não é decisão de quem escaneia.
+    repositories = {
+        "node": ("node",),
+        "nodejs": ("node",),
+        "python": ("python",),
+        "python3": ("python",),
+        "go": ("go",),
+        "golang": ("go",),
+        "java": ("jdk", "jre"),
+        "openjdk": ("jdk", "jre"),
+        "temurin": ("jdk", "jre"),
+        "corretto": ("jdk", "jre"),
+        "jdk": ("jdk",),
+        "jre": ("jre",),
+        "maven": ("maven",),
+        "gradle": ("gradle",),
     }
 
 
@@ -144,11 +196,31 @@ class DistrolessRepository(HardenedRepository):
     source = DISTROLESS
     host = "gcr.io"
     namespace = "distroless"
-    aliases = {
-        "node": "nodejs",
-        "python": "python3",
-        "golang": "static",
-        "go": "static",
+    #: Verificado contra o registry em 2026-08-18. Os repositórios sem sufixo
+    #: de versão continuam publicados e **são legado**: `distroless/nodejs`
+    #: lista `10`, `12` e `14`, e `distroless/java` lista `11`. Eles ficam de
+    #: fora: recomendar um runtime que morreu anos atrás, com o carimbo desta
+    #: ferramenta, é pior do que não recomendar nada. Os nomes versionados
+    #: também respondem à outra metade do problema -- `nodejs22-debian12` diz
+    #: o que é; `nodejs` não dizia.
+    repositories = {
+        "node": ("nodejs22-debian12", "nodejs20-debian12"),
+        "nodejs": ("nodejs22-debian12", "nodejs20-debian12"),
+        "python": ("python3-debian12",),
+        "python3": ("python3-debian12",),
+        # Go compila estático: a imagem de execução não carrega runtime algum.
+        "go": ("static-debian12", "base-debian12"),
+        "golang": ("static-debian12", "base-debian12"),
+        "java": ("java21-debian12", "java17-debian12"),
+        "openjdk": ("java21-debian12", "java17-debian12"),
+        "temurin": ("java21-debian12", "java17-debian12"),
+        "corretto": ("java21-debian12", "java17-debian12"),
+        "jdk": ("java21-debian12", "java17-debian12"),
+        # O Distroless não publica ferramenta de build: maven e gradle rodam
+        # no stage de build, não no de execução. Declarado como ausência em
+        # vez de mapeado para algo parecido.
+        "maven": (),
+        "gradle": (),
     }
 
     def _build_image(self, repository: str, tag: str, payload: dict[str, Any]) -> DockerImage:

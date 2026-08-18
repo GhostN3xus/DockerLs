@@ -24,6 +24,7 @@ from dockerls.application.services.composite_repository import CompositeImageRep
 from dockerls.application.services.cross_validation import CrossValidator
 from dockerls.application.use_cases.recommend_images import RecommendImagesUseCase
 from dockerls.cli.commands import recommend as recommend_cmd
+from dockerls.cli.image_names import display_name
 from dockerls.cli.progress import RichScanObserver
 from dockerls.domain.entities.image import DockerImage
 from dockerls.domain.entities.scan_result import ScanResult, ScanStatus
@@ -239,7 +240,10 @@ async def test_a_cleaner_hardened_image_wins_and_is_labelled(pipeline, monkeypat
         recommend_cmd._print_table(result.recommendations)
     rendered = buf.getvalue()
     assert top.image.source in rendered
-    assert top.image.full_reference.split(":")[0] in rendered
+    # A tabela mostra o nome do runtime sem o registry que a coluna `Source`
+    # ao lado já nomeia: com treze colunas, `gcr.io/distroless/nodejs22-debian12`
+    # era quebrado no meio da palavra e saía ilegível.
+    assert display_name(top.image.name) in rendered
 
 
 @pytest.mark.asyncio

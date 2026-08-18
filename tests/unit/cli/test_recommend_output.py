@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 
 from dockerls.application.dto.analysis import AnalysisResult, ImageAnalysis, UnverifiedImage
 from dockerls.cli.app import app
+from dockerls.cli.image_names import display_name, display_reference
 from dockerls.domain.entities.image import DockerImage
 from dockerls.domain.entities.scan_result import ScanResult
 
@@ -258,3 +259,32 @@ class TestTierWarningsAreSurfaced:
         block = out.split("Requires review")[1]
         assert "node:18-bookworm" in block
         assert "node:22-alpine" not in block
+
+
+class TestImageNamesStayReadable:
+    """Nome quebrado no meio da palavra não identifica runtime nenhum.
+
+    Com treze colunas e `overflow="fold"`, `gcr.io/distroless/nodejs22-debian12`
+    saía repartido em duas ou três linhas -- enquanto a coluna `Source`,
+    encostada, já dizia "Distroless". O prefixo redundante sai; o nome que
+    identifica o runtime fica.
+    """
+
+    def test_hardened_catalog_prefixes_are_dropped(self):
+        assert display_name("gcr.io/distroless/nodejs22-debian12") == "nodejs22-debian12"
+        assert display_name("cgr.dev/chainguard/maven") == "maven"
+        assert display_name("dhi.io/python") == "python"
+
+    def test_docker_hub_official_names_are_untouched(self):
+        assert display_name("node") == "node"
+        assert display_name("docker.io/library/node") == "node"
+
+    def test_an_unidentified_registry_keeps_its_host(self):
+        # Ali o host é a identidade: escondê-lo confundiria duas imagens
+        # diferentes com o mesmo nome final.
+        assert display_name("ghcr.io/org/app") == "ghcr.io/org/app"
+
+    def test_the_tag_survives(self):
+        assert display_reference("gcr.io/distroless/python3-debian12", "nonroot") == (
+            "python3-debian12:nonroot"
+        )
