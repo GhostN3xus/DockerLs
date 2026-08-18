@@ -912,8 +912,35 @@ class BuildImageUseCase:
             total_vulnerabilities=sum(counts.values()),
             fixable=fixable,
             scan_tool=tool,
-            vulnerabilities=vulnerabilities[:100],  # Limitar a 100
+            vulnerabilities=BuildImageUseCase._worst_first(vulnerabilities),
         )
+
+    #: Achados mantidos na amostra do relatório. As contagens acima são
+    #: completas; esta lista existe para o relatório não carregar milhares de
+    #: entradas.
+    MAX_RETAINED_VULNERABILITIES = 100
+
+    @staticmethod
+    def _worst_first(vulnerabilities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Ordena por severidade antes de cortar a amostra.
+
+        O corte era `vulnerabilities[:100]` na ordem em que o scanner
+        devolveu, que é ordem de pacote e não de gravidade. Numa imagem com
+        mais de cem achados, as CRITICAL podiam cair inteiramente fora da
+        amostra -- e foi o que aconteceu: o portão reprovava (as *contagens*
+        estavam certas) enquanto o resumo, que lê a amostra, anunciava
+        "0 finding(s) at or above CRITICAL". O leitor recebia uma reprovação
+        que se contradizia e nenhum CVE para investigar.
+
+        Ordenar antes de cortar garante que o que decide o portão é o que
+        sobrevive na amostra.
+        """
+        order = {level: index for index, level in enumerate(("CRITICAL", "HIGH", "MEDIUM", "LOW"))}
+        ranked = sorted(
+            vulnerabilities,
+            key=lambda v: order.get(str(v.get("severity", "")).upper(), len(order)),
+        )
+        return ranked[: BuildImageUseCase.MAX_RETAINED_VULNERABILITIES]
 
     #: Limiares aceitos por `--fail-on`, do mais severo para o mais brando.
     #: Cada um reprova também tudo que for pior que ele.
@@ -927,16 +954,35 @@ class BuildImageUseCase:
         dizer qual achado o disparou, com pacote e versão de correção.
         """
         cutoff = self.FAIL_ON_THRESHOLDS.index(threshold.strip().lower())
-        tripping = {level.upper() for level in self.FAIL_ON_THRESHOLDS[: cutoff + 1]}
+        levels = self.FAIL_ON_THRESHOLDS[: cutoff + 1]
+        # A contagem vem do scan completo, nunca da amostra: foi a amostra
+        # dizendo "0 finding(s)" numa reprovação que tornou o portão
+        # incompreensível. O número que reprova e o número que se lê têm de
+        # ser o mesmo número.
+        counts = {
+            "critical": scan_result.critical,
+            "high": scan_result.high,
+            "medium": scan_result.medium,
+            "low": scan_result.low,
+        }
+        total = sum(counts[level] for level in levels)
+        tripping = {level.upper() for level in levels}
         offenders = [
             v for v in scan_result.vulnerabilities if str(v.get("severity", "")).upper() in tripping
         ]
         header = (
             f"Vulnerabilities exceed threshold ({threshold}): "
-            f"{len(offenders)} finding(s) at or above {threshold.upper()}"
+            f"{total} finding(s) at or above {threshold.upper()}"
         )
         if not offenders:
-            return header
+            # Não deveria acontecer agora que a amostra é ordenada por
+            # severidade, mas se acontecer o leitor precisa saber que o
+            # silêncio é falta de amostra, não falta de achado.
+            return (
+                header
+                if total == 0
+                else f"{header} (não retidos na amostra do relatório; rode o scanner para a lista)"
+            )
         listed = "; ".join(
             f"{v.get('cve_id') or '?'} ({v.get('severity')}) in "
             f"{v.get('package') or '?'} {v.get('installed_version') or ''}".strip()

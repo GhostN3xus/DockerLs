@@ -5,6 +5,23 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.3] -- 2026-08-18
+
+### Corrigido
+
+- **O portão `--fail-on` reprovava anunciando "0 finding(s)"** *(alta —
+  correção)*. O portão em si estava certo: `_should_fail` lê as contagens do
+  scan completo. Quem mentia era o resumo, que procurava os culpados na
+  amostra do relatório — `vulnerabilities[:100]`, cortada na ordem em que o
+  scanner devolveu, que é ordem de pacote e não de gravidade. Numa imagem com
+  mais de cem achados, as CRITICAL caíam inteiramente fora da amostra e o
+  build reprovava com a frase autocontraditória *"Vulnerabilities exceed
+  threshold (critical): 0 finding(s) at or above CRITICAL"* — sem nenhum CVE
+  para investigar. A amostra passa a ser ordenada por severidade antes do
+  corte, então o que decide o portão é o que sobrevive nela; e o número
+  exibido passa a vir das contagens do scan, nunca da amostra. O número que
+  reprova e o número que se lê têm de ser o mesmo número.
+
 ## [1.3.2] -- 2026-08-18
 
 ### Alterado — a imagem publicada não embute mais um scanner

@@ -842,3 +842,64 @@ class TestFailOnGateNamesTheOffenders:
 
         assert "25 finding(s)" in summary
         assert "and 15 more" in summary
+
+
+class TestGateReportsWhatTrippedIt:
+    """A amostra do relatório não pode contradizer o portão.
+
+    Caso real: um build reprovou com "0 finding(s) at or above CRITICAL". O
+    portão estava certo -- as *contagens* vinham do scan completo e havia
+    CRITICAL. O resumo, não: ele procurava os culpados na amostra, que era
+    `vulnerabilities[:100]` cortada na ordem em que o scanner devolveu (ordem
+    de pacote, não de gravidade). Numa imagem com mais de cem achados, as
+    CRITICAL caíam fora da amostra e o leitor recebia uma reprovação que se
+    contradizia, sem nenhum CVE para investigar.
+    """
+
+    def _trivy_payload(self, criticals: int, lows: int) -> dict:
+        vulns = [
+            {
+                "VulnerabilityID": f"CVE-LOW-{i}",
+                "PkgName": f"pkg{i}",
+                "Severity": "LOW",
+                "InstalledVersion": "1.0",
+            }
+            for i in range(lows)
+        ]
+        vulns += [
+            {
+                "VulnerabilityID": f"CVE-CRIT-{i}",
+                "PkgName": f"crit{i}",
+                "Severity": "CRITICAL",
+                "InstalledVersion": "1.0",
+                "FixedVersion": "1.1",
+            }
+            for i in range(criticals)
+        ]
+        return {"Results": [{"Vulnerabilities": vulns}]}
+
+    def test_criticals_survive_the_sample_even_when_listed_last(self):
+        # 150 LOW antes de 2 CRITICAL: no corte antigo, em ordem de scanner,
+        # as duas CRITICAL não entravam nos primeiros 100.
+        result = BuildImageUseCase._parse_trivy_scan(self._trivy_payload(criticals=2, lows=150))
+        assert result.critical == 2
+        retained = [v["severity"] for v in result.vulnerabilities]
+        assert retained.count("CRITICAL") == 2
+        assert retained[:2] == ["CRITICAL", "CRITICAL"]
+
+    def test_the_summary_counts_the_scan_not_the_sample(self):
+        use_case = BuildImageUseCase(MagicMock(), MagicMock())
+        scan = BuildImageUseCase._parse_trivy_scan(self._trivy_payload(criticals=2, lows=150))
+        summary = use_case._gate_failure_summary(scan, "critical")
+        assert "2 finding(s) at or above CRITICAL" in summary
+        assert "CVE-CRIT-0" in summary
+
+    def test_a_clean_image_never_reaches_the_summary(self):
+        use_case = BuildImageUseCase(MagicMock(), MagicMock())
+        scan = BuildImageUseCase._parse_trivy_scan(self._trivy_payload(criticals=0, lows=5))
+        assert use_case._should_fail(scan, "critical") is False
+
+    def test_the_sample_stays_bounded(self):
+        result = BuildImageUseCase._parse_trivy_scan(self._trivy_payload(criticals=0, lows=500))
+        assert len(result.vulnerabilities) == BuildImageUseCase.MAX_RETAINED_VULNERABILITIES
+        assert result.low == 500
