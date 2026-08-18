@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,7 +62,7 @@ class DockerfileParser:
     ENV_PREFIX = re.compile(r"^ENV\s+(.+)$", re.IGNORECASE)
     # Pares chave=valor de uma linha ENV, com valor opcionalmente entre aspas.
     ENV_KV = re.compile(r"""([\w.\-]+)=(?:"[^"]*"|'[^']*'|\S*)""")
-    LABEL_PATTERN = re.compile(r"^LABEL\s+([^=]+)=(.*)$", re.IGNORECASE)
+    LABEL_PREFIX = re.compile(r"^LABEL\s+(.+)$", re.IGNORECASE | re.DOTALL)
     EXPOSE_PATTERN = re.compile(r"^EXPOSE\s+(\d+)", re.IGNORECASE)
     USER_PATTERN = re.compile(r"^USER\s+(\S+)(?::(\d+))?$", re.IGNORECASE)
     HEALTHCHECK_PATTERN = re.compile(r"^HEALTHCHECK\s+", re.IGNORECASE)
@@ -244,11 +245,10 @@ class DockerfileParser:
                         self._info.secret_env_vars.append(env_name)
 
         # LABEL
-        elif match := self.LABEL_PATTERN.match(line):
-            label_key = match.group(1).strip()
-            label_value = match.group(2).strip()
-            self._info.labels[label_key] = label_value
-            self._info.has_labels = True
+        elif match := self.LABEL_PREFIX.match(line):
+            for label_key, label_value in _parse_label_pairs(match.group(1)).items():
+                self._info.labels[label_key] = label_value
+                self._info.has_labels = True
 
         # EXPOSE
         elif match := self.EXPOSE_PATTERN.match(line):
@@ -1101,3 +1101,42 @@ class HardeningTemplates(HardeningTemplateProvider):
                 content += "\nUSER appuser\n"
 
         return content
+
+
+def _parse_label_pairs(text: str) -> dict[str, str]:
+    """Todos os pares de uma instrução LABEL, não só o primeiro.
+
+    O padrão anterior era `^LABEL\\s+([^=]+)=(.*)$`: ele casava até o primeiro
+    `=` e engolia o resto da linha como *valor*. Numa instrução idiomática --
+
+        LABEL maintainer="GhostN3xus" \\
+              security.scanner="dockerls"
+
+    -- as continuações já vêm unidas numa linha lógica, então o resultado era a
+    chave `maintainer` com valor `"GhostN3xus" security.scanner="dockerls"`, e
+    `security.scanner` simplesmente não existia. A regra DF007 então reprovava
+    um Dockerfile que declara o rótulo que ela cobra. Um falso positivo é pior
+    que nenhuma checagem: ele ensina o leitor a ignorar o aviso.
+
+    `shlex` faz o trabalho de aspas, que é onde um split ingênuo erra: o valor
+    pode conter espaços e é isso que exige o parser em vez de um regex.
+    """
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        # Aspas desbalanceadas: o Docker também recusaria. Cai para o split
+        # simples em vez de descartar a instrução inteira.
+        tokens = text.split()
+    if not tokens:
+        return {}
+
+    # Forma legada `LABEL chave valor com espaços`, sem `=` nenhum.
+    if "=" not in tokens[0]:
+        return {tokens[0]: " ".join(tokens[1:])}
+
+    pairs: dict[str, str] = {}
+    for token in tokens:
+        key, separator, value = token.partition("=")
+        if separator and key:
+            pairs[key.strip()] = value.strip()
+    return pairs

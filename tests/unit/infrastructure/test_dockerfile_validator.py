@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from dockerls.domain.entities.dockerfile_analysis import ValidationStatus
-from dockerls.infrastructure.dockerfile_validator import DockerfileValidator
+from dockerls.infrastructure.dockerfile_validator import DockerfileParser, DockerfileValidator
 
 
 @pytest.fixture
@@ -247,3 +247,56 @@ class TestUnreadableDockerignore:
         result = DockerfileValidator().validate(tmp_path)
         check = next(c for c in result.checks if c.check == "dockerignore_complete")
         assert check.status == ValidationStatus.SKIP
+
+
+class TestLabelParsing:
+    """Uma instrução LABEL declara vários pares, e todos contam.
+
+    O padrão anterior casava até o primeiro `=` e engolia o resto como valor,
+    então a forma idiomática -- vários pares numa instrução, quebrada com
+    barras invertidas -- produzia uma chave só, com um valor sem sentido. A
+    consequência era um falso positivo em DF007: o Dockerfile deste próprio
+    repositório declarava `security.scanner` e era reprovado por não declarar
+    `security.scanner`. Um aviso que dispara sobre algo que está lá ensina o
+    leitor a ignorar o aviso.
+    """
+
+    def _labels(self, content: str) -> dict[str, str]:
+        return DockerfileParser().parse(content).labels
+
+    def test_every_pair_of_a_multi_pair_label_is_parsed(self):
+        labels = self._labels(
+            'FROM x\nLABEL maintainer="me" security.scanner="dockerls" org.foo="bar"\n'
+        )
+        assert labels == {
+            "maintainer": "me",
+            "security.scanner": "dockerls",
+            "org.foo": "bar",
+        }
+
+    def test_pairs_survive_line_continuations(self):
+        labels = self._labels(
+            'FROM x\nLABEL maintainer="me" \\\n      security.scanner="dockerls"\n'
+        )
+        assert labels["security.scanner"] == "dockerls"
+
+    def test_a_quoted_value_may_contain_spaces(self):
+        labels = self._labels('FROM x\nLABEL org.opencontainers.image.title="Docker Ls"\n')
+        assert labels["org.opencontainers.image.title"] == "Docker Ls"
+
+    def test_the_legacy_space_separated_form_still_parses(self):
+        labels = self._labels("FROM x\nLABEL description some text here\n")
+        assert labels == {"description": "some text here"}
+
+    def test_unbalanced_quotes_do_not_discard_the_instruction(self):
+        # O Docker recusaria isto; o parser não pode explodir por causa disso.
+        labels = self._labels('FROM x\nLABEL maintainer="me security.scanner=dockerls\n')
+        assert labels
+
+    def test_a_dockerfile_declaring_the_required_labels_passes_df007(self, validate):
+        checks = validate(
+            "FROM python:3.12-slim\n"
+            'LABEL maintainer="GhostN3xus" security.scanner="dockerls"\n'
+            "USER 1001\n"
+        )
+        assert checks["security_labels"] == ValidationStatus.PASS
