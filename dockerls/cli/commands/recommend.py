@@ -82,7 +82,10 @@ def recommend(
         None, "--limit", "-l", help="Max tags to scan [config: max_tags, default 100]"
     ),
     workers: int | None = typer.Option(
-        None, "--workers", "-w", help="Concurrent workers [config: workers, default 10]"
+        None,
+        "--workers",
+        "-w",
+        help="Concurrent scanner processes; 0 sizes it to this machine [config: workers]",
     ),
     fail_on: FailOn = typer.Option(
         FailOn.NONE, "--fail-on", help="Exit non-zero if the top result has vulns at/above severity"
@@ -139,7 +142,9 @@ def recommend(
         max_medium = check_threshold(max_medium, "max_medium")
     if limit is not None:
         limit = check_limit(limit)
-    if workers is not None:
+    # `0` means "size it to this machine", so it is passed through rather
+    # than validated: the resolver, not the flag, decides what it becomes.
+    if workers:
         workers = check_workers(workers)
 
     try:

@@ -5,7 +5,52 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
-## [Não lançado]
+## [1.2.0] -- 2026-08-18
+
+Release de correções. Reúne duas auditorias -- uma de evidência, outra de
+desempenho -- e o motor multi-source construído sobre elas. O relatório
+completo de cada achado, com severidade e caminho de código, está em
+`AUDIT.md`.
+
+### Desempenho — auditoria de CPU e memória (relatório em `AUDIT.md`)
+
+Segunda auditoria, dirigida a consumo de recursos. Tudo foi medido antes de
+ser alterado, e o perfil do pipeline inteiro mostrou que ele não é limitado
+por CPU — os dois custos reais estavam fora dele.
+
+- **`redact()` levava 19 segundos por imagem escaneada** *(crítico)*. O padrão
+  de chave começava com `[\w.-]*`, então numa descrição de CVE com centenas
+  de caracteres de texto corrido o motor de regex tentava cada divisão
+  possível em cada posição — backtracking catastrófico. Numa execução de 100
+  tags isso é meia hora de CPU só mascarando. A correção inverte a ordem: a
+  alternância literal vem primeiro, o motor varre atrás da palavra-chave e só
+  então expande para os lados. **19 445 ms → 245 ms (79x)**, com a saída
+  idêntica caractere por caractere e teste de equivalência sobre doze
+  formatos.
+- **A contagem de workers ignorava a máquina.** Cada worker segura um
+  *processo de scanner*, não uma corrotina: o Trivy carrega uma base de
+  centenas de MB e consome um núcleo inteiro. Dez deles num runner de dois
+  núcleos terminam mais devagar, despejam o page cache e podem levar o job a
+  ser morto por falta de memória. Pior: esta ferramenta analisa containers e
+  costuma rodar dentro de um, onde `os.cpu_count()` reporta os núcleos do
+  *host* enquanto o cgroup permite uma fração de um núcleo. `workers` passa a
+  ter padrão `0` = "dimensione para esta máquina", derivado da cota de cgroup
+  (v2 e v1), da máscara de afinidade e da memória disponível.
+  `cross_validate_workers` segue a mesma regra e é limitado pelo pool
+  primário. Valor explícito continua sendo honrado, com aviso quando excede o
+  que a máquina comporta.
+
+### Alterado
+
+- **`--workers 0` passou a significar "dimensione para esta máquina"** em vez
+  de ser recusado. O deadlock que a recusa protegia (um zero chegando a um
+  `asyncio.Semaphore`) é hoje impossível por construção: o resolvedor nunca
+  devolve zero e o caso de uso continua validando o argumento. Valores
+  negativos ou acima de 50 seguem recusados.
+- Novo `benchmarks/bench_resources.py`, que fixa o orçamento de redação, o
+  dimensionamento de workers e a memória de uma execução — as três medidas
+  cujas regressões são invisíveis num teste funcional, porque a saída não
+  muda, só o custo.
 
 ### Corrigido — auditoria de evidência (relatório completo em `AUDIT.md`)
 

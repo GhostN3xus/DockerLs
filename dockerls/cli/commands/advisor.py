@@ -32,7 +32,10 @@ diagnostics = Console(stderr=True)
 def advisor(
     image: str = typer.Argument(help="Docker image name (e.g., node, python, nginx)"),
     workers: int | None = typer.Option(
-        None, "--workers", "-w", help="Concurrent workers [config: workers, default 10]"
+        None,
+        "--workers",
+        "-w",
+        help="Concurrent scanner processes; 0 sizes it to this machine [config: workers]",
     ),
     output_format: str = typer.Option(
         OutputFormat.TABLE.value, "--format", "-f", help="Output format: table or json"
@@ -43,7 +46,9 @@ def advisor(
     if no_color:
         console.no_color = True
     fmt = parse_output_format(output_format)
-    if workers is not None:
+    # `0` means "size it to this machine", so it is passed through rather
+    # than validated: the resolver, not the flag, decides what it becomes.
+    if workers:
         workers = check_workers(workers)
     try:
         asyncio.run(_advisor(image, workers, fmt))

@@ -244,3 +244,75 @@ falta é *dizer* que a tag se moveu — informação acionável para quem fixou 
 num Dockerfile.
 
 **Proposta.** Registrar o último digest visto por tag e reportar a mudança.
+
+
+---
+
+# Auditoria de desempenho — 2026-08
+
+Segunda passagem, dirigida a consumo de CPU e memória. Diferente da primeira,
+aqui **tudo foi medido** antes de ser mexido: o perfil do pipeline inteiro
+mostrou que ele não é limitado por CPU, e que os dois custos reais estavam
+fora dele.
+
+| # | Sev. | Achado | Medição | Status |
+|---|------|--------|---------|--------|
+| P1 | CRÍTICA | `redact()` com backtracking catastrófico, executado uma vez por imagem escaneada | **19 445 ms** num artefato de 2,1 MB | **corrigido** — 245 ms (79x) |
+| P2 | ALTA | `workers = 10` fixo, sem nenhuma referência à máquina; num container lê os núcleos do *host*, não a cota | 10 processos de scanner num runner de 2 núcleos | **corrigido** — derivado de CPU e memória, ciente de cgroup |
+| P3 | MÉDIA | `cross_validate_workers = 5` igualmente fixo, abrindo uma segunda leva de processos | — | **corrigido** — limitado pela máquina e pelo pool primário |
+| P4 | — | Memória do pipeline | 107 MB de pico para 100 tags x 800 achados, 6 MB residuais | **aceitável** — sem vazamento, liberada ao fim |
+| P5 | — | Recontagem de severidades a cada acesso (`sum(1 for v in ...)`) | 90 ms para pontuar 100 tags x 800 achados | **não alterado** — ver abaixo |
+
+## P1 — a regressão que eu mesmo introduzi
+
+O padrão de chave começava com `[\w.-]*`:
+
+```
+["']?[\w.-]*(?:token|password|...)[\w.-]*["']?\s*[:=]\s*
+```
+
+Numa descrição de CVE com 400 caracteres de texto corrido, o motor tenta cada
+divisão possível daquele `*` em cada posição, e falha em todas. O custo
+explode com o tamanho do documento.
+
+A correção não é "otimizar o regex": é **inverter a ordem**. Com a alternância
+literal na frente, o motor procura uma palavra-chave — coisa que ele faz por
+varredura direta — e só então expande para os lados, onde os limites são a
+própria palavra:
+
+```
+(?:token|password|...)[\w.-]*["']?\s*[:=]\s*
+```
+
+O texto antes da palavra-chave (`x_` em `x_api_key`) fica fora do casamento e
+sobrevive intacto, então a saída é idêntica caractere por caractere. Há teste
+de equivalência sobre doze formatos e teste de orçamento de tempo.
+
+## P2 — o número que ignorava a máquina
+
+Cada worker segura um **processo de scanner**, não uma corrotina: o `trivy`
+carrega uma base de centenas de MB, desempacota camadas e casa pacotes,
+consumindo um núcleo inteiro enquanto isso. Dez deles num runner de dois
+núcleos não terminam dez vezes mais rápido — terminam mais devagar, despejam o
+page cache e podem levar o job a ser morto por falta de memória.
+
+O agravante é específico desta ferramenta: ela analisa containers e é rodada
+*dentro* de um. `os.cpu_count()` ali reporta os núcleos do host enquanto o
+cgroup permite uma fração de um. `utils/resources.py` lê a cota real (cgroup v2
+e v1), a máscara de afinidade e a memória disponível, e o padrão passa a ser o
+menor dos três.
+
+Configuração explícita continua valendo: quem pede 20 recebe 20, com um aviso
+dizendo o que a máquina comporta.
+
+## P5 — o que foi medido e deliberadamente não mudou
+
+`ScanResult.critical_count` e as sete contagens vizinhas percorrem a lista
+inteira a cada acesso. Parecia gargalo; medido, são 90 ms para pontuar 100 tags
+com 800 achados cada — irrelevante ao lado de um único scan real, que leva
+segundos.
+
+Cachear essas contagens exigiria invalidação em `model_copy`, que é usado pelas
+regras de ignore e pelo enriquecimento de threat intel. Trocar um custo
+irrelevante por um risco de contagem obsoleta seria um mau negócio, e "otimizar
+o que não é gargalo" é como se introduz o próximo P1.

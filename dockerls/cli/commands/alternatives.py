@@ -64,7 +64,10 @@ TOP_ALTERNATIVES = 4
 def alternatives(
     image: str = typer.Argument(help="The image you run today (e.g. node:22, python:3.12-slim)"),
     workers: int | None = typer.Option(
-        None, "--workers", "-w", help="Concurrent workers [config: workers, default 10]"
+        None,
+        "--workers",
+        "-w",
+        help="Concurrent scanner processes; 0 sizes it to this machine [config: workers]",
     ),
     source: list[str] = typer.Option(
         [],
@@ -85,7 +88,9 @@ def alternatives(
     if no_color:
         console.no_color = True
     fmt = parse_output_format(output_format)
-    if workers is not None:
+    # `0` means "size it to this machine", so it is passed through rather
+    # than validated: the resolver, not the flag, decides what it becomes.
+    if workers:
         workers = check_workers(workers)
     try:
         asyncio.run(

@@ -62,7 +62,7 @@ class TestUsageErrorsAreOperationalNotPolicy:
     @pytest.mark.parametrize(
         ("args", "expected_text"),
         [
-            (["recommend", "node", "--workers", "0"], "workers must be between"),
+            (["recommend", "node", "--workers", "-1"], "workers must be between"),
             (["recommend", "node", "--limit", "0"], "limit must be at least 1"),
             (["recommend", "node", "--max-critical", "-1"], "must be non-negative"),
             (["search", "node", "--limit", "0"], "limit must be at least 1"),

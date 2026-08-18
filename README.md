@@ -1732,9 +1732,40 @@ flag explícita sempre vence a configuração.
 | max-critical  | 0       |
 | max-high      | 0       |
 | max-medium    | 5       |
-| workers       | 10      |
+| workers       | automático (ver abaixo) |
 | limit (tags)  | 100     |
 | TTL do cache  | 24h     |
+
+### Uso de recursos
+
+Cada worker segura um **processo de scanner**, não uma corrotina: o Trivy
+carrega uma base de centenas de MB, desempacota camadas e casa pacotes,
+ocupando um núcleo inteiro enquanto isso. Dez deles num runner de dois núcleos
+não terminam dez vezes mais rápido — terminam mais devagar e podem levar o job
+a ser morto por falta de memória.
+
+Por isso o padrão é `0`, que significa **"dimensione para esta máquina"**:
+
+```
+workers = min(CPUs utilizáveis, memória disponível / 768 MB), limitado a 16
+```
+
+"CPUs utilizáveis" é a cota real, não o que o host tem. Isso importa porque
+esta ferramenta analisa containers e costuma rodar dentro de um, onde
+`os.cpu_count()` reporta os núcleos da máquina inteira enquanto o cgroup
+permite meio núcleo. São lidos: cota de cgroup (v2 e v1), máscara de afinidade
+e `MemAvailable`.
+
+Um valor explícito continua valendo — `--workers 20` entrega 20, com um aviso
+no log dizendo o que a máquina comporta. Quem mede o próprio runner tem o
+direito de sobrecarregá-lo de propósito; o que não pode é isso acontecer em
+silêncio.
+
+```bash
+dockerls recommend node              # dimensiona sozinho
+dockerls recommend node --workers 2  # explícito, para runner apertado
+dockerls recommend node --workers 0  # explicitamente automático
+```
 
 ### Rede e política de acesso
 

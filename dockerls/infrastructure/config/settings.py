@@ -62,7 +62,11 @@ class Settings(BaseSettings):
     # disappearing matters sooner than a score going slightly stale.
     tag_cache_ttl_seconds: int = 6 * 3600
     max_tags: int = 100
-    workers: int = 10
+    # 0 means "derive from this machine": each worker holds a scanner
+    # process that wants a core and hundreds of megabytes, so a flat number
+    # oversubscribes small runners and underuses large ones. Any explicit
+    # value is honoured as given -- the operator knows their machine.
+    workers: int = 0
     max_critical: int = 0
     max_high: int = 0
     max_medium: int = 5
@@ -80,8 +84,11 @@ class Settings(BaseSettings):
     cross_validate: bool = True
     # Confirm each recommended tag really exists on Docker Hub.
     verify_hub_tags: bool = True
-    # Concurrent secondary scans during cross-validation.
-    cross_validate_workers: int = 5
+    # Concurrent secondary scans during cross-validation. 0 means "derive
+    # from this machine", like `workers`: these are scanner processes too,
+    # and five of them on a two-core runner contend for exactly the same
+    # cores the primary scan just finished using.
+    cross_validate_workers: int = 0
     # Search free hardened catalogues (Chainguard, Distroless) alongside
     # Docker Hub, so a hardened image can win on measured vulnerabilities.
     include_hardened_sources: bool = True

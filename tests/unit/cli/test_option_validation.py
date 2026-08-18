@@ -44,7 +44,7 @@ def _invoke(args: list[str]):
 
 
 class TestWorkersValidation:
-    @pytest.mark.parametrize("value", ["0", "-1", "-5", "51", "1000"])
+    @pytest.mark.parametrize("value", ["-1", "-5", "51", "1000"])
     def test_out_of_range_workers_rejected(self, value):
         r = _invoke(["recommend", "node", "--workers", value])
         assert r.exit_code != 0
@@ -52,9 +52,19 @@ class TestWorkersValidation:
         # A readable CLI error, not a traceback and not a hang.
         assert "Traceback" not in r.output
 
+    def test_zero_workers_is_accepted_as_size_it_to_the_machine(self):
+        """`0` reaches the builder instead of being rejected at the flag.
+
+        The poisoned builder proves it got that far: what used to be an
+        out-of-range value is now the documented way to ask for the
+        machine-derived worker count.
+        """
+        r = _invoke(["recommend", "node", "--workers", "0"])
+        assert "workers must be between" not in r.output
+
     @pytest.mark.parametrize("command", ["advisor", "export"])
-    def test_other_commands_reject_workers_zero(self, command):
-        r = _invoke([command, "node", "--workers", "0"])
+    def test_other_commands_reject_negative_workers(self, command):
+        r = _invoke([command, "node", "--workers", "-1"])
         assert r.exit_code != 0
         assert "workers must be between 1 and 50" in r.output
 
