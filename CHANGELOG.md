@@ -5,6 +5,44 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] -- 2026-08-18
+
+### Adicionado
+
+- **Referências documentais nas regras do `analyze-dockerfile`.** Cada achado
+  passa a citar o controle publicado que a regra implementa — CIS Docker
+  Benchmark, NIST SP 800-190, OWASP Docker Security Cheat Sheet, documentação
+  da Docker e especificação OCI — em vez de apenas um código opaco. O motivo é
+  prático: `DF002` não significa nada fora deste repositório, então quem
+  recebia o achado só podia obedecer ou ignorar. Um achado que cita *CIS Docker
+  Benchmark 4.1* pode ser discutido, escalado, dispensado com justificativa e
+  mapeado para um programa de auditoria. As citações aparecem no terminal
+  (abaixo da tabela, só para `FAIL` e `WARN`) e nos campos `references` e
+  `rationale` do `--format json`.
+- **Comando `dockerls controls`.** Lista o catálogo inteiro sem exigir que
+  alguém produza antes um Dockerfile que falhe, e explica uma regra específica
+  com `dockerls controls DF002`. Também tem `--format json`, e falha com exit
+  code `1` numa regra desconhecida em vez de responder uma lista vazia.
+
+### Notas sobre a exatidão das citações
+
+Todo identificador e todo título foi conferido na fonte primária, não
+recuperado de memória: a seção 4 do CIS Docker Benchmark contra a
+implementação da própria Docker (`docker/docker-bench-security`,
+`tests/4_container_images.sh`), o OWASP Docker Security Cheat Sheet contra a
+página publicada, e o NIST SP 800-190 contra o sumário da publicação oficial.
+A conferência mudou o conteúdo: **três das quatro citações rascunhadas de
+memória estavam erradas** — `NIST SP 800-190 4.4.2` é *Unbounded network access
+from containers*, não "least privilege", e `OWASP RULE #8` é *Set filesystem
+and volumes to read-only*, não "minimal base images". Uma citação errada é pior
+que nenhuma, porque um leitor que confere e encontra outro assunto passa a
+duvidar do relatório inteiro.
+
+Onde nenhum controle publicado cobre a regra, isso é dito explicitamente em vez
+de esticado: `controls_for` devolve tupla vazia e os renderizadores dizem que a
+orientação é do próprio DockerLs. Inventar um número plausível seria pior que
+não ter nenhum, porque é o tipo de erro que sobrevive à revisão.
+
 ## [1.2.0] -- 2026-08-18
 
 Release de correções. Reúne duas auditorias -- uma de evidência, outra de

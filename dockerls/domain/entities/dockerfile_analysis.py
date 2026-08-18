@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from dockerls.domain.security_controls import mapping_for, references_for
+
 
 class ValidationStatus(StrEnum):
     """Status de uma validação de Dockerfile."""
@@ -40,6 +42,22 @@ class ValidationCheck:
     fix_suggestion: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def references(self) -> list[str]:
+        """Published controls this finding implements, as citable strings.
+
+        Empty when the rule is DockerLs's own guidance rather than a
+        published control -- which the renderers state, instead of leaving
+        the reader to assume a citation was merely omitted.
+        """
+        return references_for(self.rule_id)
+
+    @property
+    def rationale(self) -> str:
+        """Why the rule matters, in terms of what an attacker gains."""
+        mapping = mapping_for(self.rule_id)
+        return mapping.rationale if mapping else ""
+
     def model_dump(self) -> dict[str, Any]:
         """Retorna dicionário serializável."""
         return {
@@ -49,6 +67,13 @@ class ValidationCheck:
             "severity": self.severity.value,
             "line": self.line,
             "rule_id": self.rule_id,
+            # The published controls this rule implements, resolved from the
+            # catalogue rather than stored per check: the mapping is static,
+            # and duplicating it into every finding is how the two drift.
+            # Emitted in the payload because a consumer mapping findings onto
+            # a compliance programme should not have to know the catalogue.
+            "references": self.references,
+            "rationale": self.rationale,
             "fix_suggestion": self.fix_suggestion,
             "details": self.details,
         }

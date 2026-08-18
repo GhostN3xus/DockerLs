@@ -113,6 +113,7 @@ recebe nível e não entra na recomendação.
 | [`sbom`](#sbom) | Gera SBOM (CycloneDX ou SPDX) via Trivy | `0` / `1` |
 | [`export`](#export) | Exporta o relatório em JSON/CSV/HTML/Markdown/SARIF | `0` / `1` |
 | [`analyze-dockerfile`](#analyze-dockerfile) | Valida um Dockerfile contra regras de hardening | `0` `1` `2` |
+| [`controls`](#controls) | Mostra os controles publicados (CIS, NIST, OWASP) por trás de cada regra | `0` / `1` |
 | [`build`](#build) | Valida, constrói, escaneia e (opcionalmente) publica | `0` `1` `2` |
 | [`doctor`](#doctor) | Checa as dependências locais (scanners) | `0` / `1` |
 | [`health`](#health) | Checa a conectividade com os serviços externos | `0` / `1` |
@@ -858,6 +859,62 @@ não existe para ser checada, e não que ela passou.
 **Exit codes:** `2` quando algum check falha (`errors > 0`), `1` quando o
 Dockerfile não existe ou não pôde ser lido, `0` quando passa. Avisos nunca
 reprovam.
+
+**Controles de referência.** Abaixo da tabela, cada check que falhou ou avisou
+aparece com o controle publicado que ele implementa:
+
+```
+Controles de referência
+  DF002  non_root_user
+    A process running as uid 0 starts from the most privileged position
+    available inside the container, so any code-execution bug begins with
+    control of the filesystem and of anything mounted into it.
+    -> CIS Docker Benchmark 4.1 -- Ensure that a user for the container has been created
+    -> OWASP Docker Security Cheat Sheet RULE #2 -- Set a user
+    -> NIST SP 800-190 4.1.2 -- Image configuration defects
+```
+
+Isso existe porque `DF002` não significa nada fora deste repositório. Um achado
+que cita *CIS Docker Benchmark 4.1* pode ser discutido, escalado, dispensado com
+justificativa e mapeado para um programa de auditoria; um achado que cita
+`DF002` só pode ser obedecido ou ignorado. Regras que **não** têm controle
+publicado dizem isso explicitamente, em vez de omitir a linha — a diferença
+entre "isto é CIS 4.1" e "isto é opinião nossa" é justamente o que o leitor tem
+direito de saber.
+
+### controls
+
+Lista o catálogo inteiro de regras e os controles que elas implementam, sem
+precisar produzir um Dockerfile que falhe primeiro.
+
+```bash
+dockerls controls              # o regulamento inteiro
+dockerls controls DF002        # uma regra, com a justificativa
+dockerls controls --format json
+```
+
+```
+DF002  Run as a non-root user
+  A process running as uid 0 starts from the most privileged position available
+  inside the container, so any code-execution bug begins with control of the
+  filesystem and of anything mounted into it.
+  -> CIS Docker Benchmark 4.1 -- Ensure that a user for the container has been created
+  -> OWASP Docker Security Cheat Sheet RULE #2 -- Set a user
+  -> NIST SP 800-190 4.1.2 -- Image configuration defects
+```
+
+Todo identificador e todo título foram **conferidos na fonte primária**, não
+recuperados de memória: a seção 4 do CIS Docker Benchmark contra a
+implementação da própria Docker (`docker/docker-bench-security`,
+`tests/4_container_images.sh`), o OWASP Docker Security Cheat Sheet contra a
+página publicada, e o NIST SP 800-190 contra o sumário da publicação oficial.
+A conferência mudou o conteúdo: três das quatro citações rascunhadas de memória
+estavam erradas. Uma ferramenta que se recusa a reportar uma contagem de
+vulnerabilidades que não mediu também não pode citar um controle que não
+conferiu.
+
+**Exit codes:** `1` para uma regra desconhecida (falha em vez de responder
+vazio), `0` caso contrário.
 
 ### build
 

@@ -390,3 +390,49 @@ para o disco sem passar por padrão nenhum. Um redator, duas portas.
 **Consequência registrada.** A redação não pode destruir diagnóstico: há
 teste afirmando que CVE, pacote, versão instalada e versão corrigida
 sobrevivem intactos.
+
+---
+
+## D-018 — Toda regra cita o controle publicado, ou admite que não tem um
+
+**Ambiguidade.** `analyze-dockerfile` sempre respondeu com um código: `DF002
+falhou`. Esse código não significa nada fora deste repositório. Quem recebe o
+achado não tem como saber se a regra é um requisito publicado ou a preferência
+de um mantenedor, e um auditor que precisa mapear achados para um framework de
+conformidade faz isso à mão, a partir do texto da mensagem.
+
+**Decisão.** Um catálogo em `domain/security_controls.py` liga cada regra
+DF001–DF012 aos controles que ela implementa (CIS Docker Benchmark, NIST SP
+800-190, OWASP Docker Security Cheat Sheet, documentação da Docker,
+especificação OCI), com uma justificativa em nossas próprias palavras num campo
+separado. As citações aparecem no terminal e no JSON, e o comando `dockerls
+controls` expõe o catálogo inteiro.
+
+**Motivo.** Um achado que cita *CIS Docker Benchmark 4.1* pode ser discutido,
+escalado, dispensado com justificativa e mapeado para um programa de auditoria.
+Um achado que cita `DF002` só pode ser obedecido ou ignorado. A diferença é
+quem carrega o ônus da prova.
+
+**Consequência registrada — a citação é conferida, não lembrada.** Todo
+identificador e todo título foi verificado na fonte primária. Isso não foi
+cerimônia: **três das quatro citações rascunhadas de memória estavam erradas**.
+`NIST SP 800-190 4.4.2` é *Unbounded network access from containers*, não
+"least privilege"; `OWASP RULE #8` é *Set filesystem and volumes to read-only*,
+não "minimal base images". Uma ferramenta que se recusa a reportar uma contagem
+de vulnerabilidades que não mediu não pode citar um controle que não conferiu —
+é o mesmo princípio, aplicado à outra metade do relatório.
+
+**Consequência registrada — o título é citado, não parafraseado.** `Control.title`
+guarda a redação da fonte. Parafrasear tornaria a citação impossível de
+localizar, o que anula a razão de existir dela. Por isso `rationale` mora num
+campo separado: o controle diz *o quê*, nós dizemos *por quê*, e a separação é
+o que impede que a paráfrase seja lida como citação.
+
+**Consequência registrada — ausência de controle é declarada.** Onde nenhum
+controle publicado cobre a regra, `controls_for` devolve tupla vazia e os
+renderizadores dizem que a orientação é do próprio DockerLs. Inventar um número
+plausível seria pior que não ter nenhum: é o tipo de erro que sobrevive à
+revisão, porque parece exatamente com o acerto. Um teste garante que toda regra
+emitida pelo validador está catalogada e que nenhuma regra catalogada é órfã,
+de modo que a divergência aparece como falha e não como citação faltando em
+silêncio.
