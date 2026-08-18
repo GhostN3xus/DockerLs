@@ -6,10 +6,14 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Typed](https://img.shields.io/badge/mypy-strict-blue)](pyproject.toml)
 
-**Motor de decisão de segurança para imagens de container.** O DockerLs descobre,
-normaliza, verifica, escaneia, valida cruzado e ranqueia imagens de múltiplos
-ecossistemas confiáveis para identificar a escolha mais segura para produção --
-e explica por quê.
+**Consultor de segurança de imagens Docker dirigido por evidência.** O DockerLs
+descobre, normaliza, verifica, escaneia, valida cruzado e ranqueia imagens de
+múltiplos ecossistemas confiáveis para identificar a escolha mais segura para
+produção -- e explica por quê.
+
+Segurança aqui não é ausência de achados. É uma conclusão sustentada por
+evidência verificável: quando a evidência não basta, a ferramenta prefere dizer
+**"não foi possível determinar"** a dizer "está seguro".
 
 A pergunta que ele responde não é *"quantas CVEs esta imagem tem?"*, e sim:
 
@@ -46,6 +50,10 @@ que o DockerLs foi construído.
 | Superfície | confundida com tamanho | **Attack Surface Score** próprio: shell, gerenciador de pacotes, ferramentas de debug, privilégio |
 | Metadados do fornecedor | aceitos como fato | tratados como *declaração*; contradições com o que foi medido viram achado |
 | Qualidade da evidência | invisível | **Confidence** (`HIGH`/`MEDIUM`/`LOW`/`UNVERIFIED`) em cada linha |
+| Falha de scan | vira "0 vulnerabilidades" | vira `UNVERIFIED`, com causa classificada e sem pontuação |
+| Dado ausente | vira `false` | vira `unknown`, e `unknown` nunca credita nem penaliza |
+| Veredito de produção | espalhado pelo código | uma política central, com códigos de bloqueio estáveis |
+| Reprodutibilidade | nenhuma | versão do DockerLs e do scanner, digest e fingerprint no manifesto |
 | Confiança | a palavra de um scanner | **validação cruzada** com um segundo scanner; divergência material é sinalizada, não escondida |
 | EOL | fora do escopo | penaliza no score, e uma base EOL nunca é `production ready` |
 | Exploração real | só severidade | CISA KEV + EPSS pesam no score |
@@ -67,6 +75,8 @@ recebe nível e não entra na recomendação.
 - [Início rápido](#início-rápido)
 - [Comandos](#comandos)
 - [Exit codes](#exit-codes)
+- [Por que falha de scan não é segurança](#por-que-falha-de-scan-não-é-segurança)
+- [Segurança de rede](#segurança-de-rede)
 - [Fontes de imagens (multi-source)](#fontes-de-imagens-multi-source)
 - [Como a recomendação funciona](#como-a-recomendação-funciona)
 - [Algoritmo de pontuação](#algoritmo-de-pontuação)
@@ -976,6 +986,93 @@ achei alternativas" é um desfecho que `0`/`1`/`2` não sabem expressar, então
 
 ---
 
+## Por que falha de scan não é segurança
+
+Esta é a seção mais importante do README, e a razão de o projeto existir na
+forma em que existe.
+
+Um scanner que não conseguiu rodar produz **zero achados**. Um scanner que
+rodou numa imagem impecável produz **zero achados**. Os dois números são
+idênticos, e toda ferramenta que os trata igual acaba dizendo, com a mesma
+confiança, "nenhuma vulnerabilidade encontrada" nos dois casos — sendo que só
+um deles é uma afirmação sobre a imagem.
+
+```
+Trivy não instalado           ->  0 achados  ->  "imagem limpa"?     NÃO
+Banco de vulnerabilidades off ->  0 achados  ->  "imagem limpa"?     NÃO
+Scan expirou aos 300s         ->  0 achados  ->  "imagem limpa"?     NÃO
+Registry recusou o pull       ->  0 achados  ->  "imagem limpa"?     NÃO
+Scan parcial (alvos ilegíveis)->  0 achados  ->  "imagem limpa"?     NÃO
+Scan completo, nada encontrado->  0 achados  ->  "imagem limpa"?     sim
+```
+
+No DockerLs, os cinco primeiros produzem `UNVERIFIED`: sem pontuação, sem
+nível, sem recomendação, sem "production ready" — e com a causa classificada.
+Só o último produz um veredito.
+
+O mesmo princípio se aplica a tudo que a ferramenta não conseguiu determinar:
+
+| Situação | O que **não** se conclui | O que o DockerLs diz |
+|---|---|---|
+| Catálogo de EOL fora do ar | "a release está em suporte" | `eol_status: unknown`, e isso aparece nos trade-offs |
+| CISA KEV inacessível | "não há CVE explorado" | `kev_status: unknown`; a frase afirmativa não é impressa |
+| EPSS não retornado | "probabilidade baixa" | `epss_known: false` |
+| Config OCI não lida | "não tem shell" | `has_shell: unknown`, e a cobertura de hardening cai |
+| Segundo scanner ausente | "o primeiro está certo" | confiança limitada a `MEDIUM`, com a lacuna nomeada |
+
+**O veredito é uma política única.** `ProductionReadiness` é o único lugar que
+escreve `production_ready`, e ele bloqueia por: não medido, confiança baixa,
+EOL confirmado, achados acima do limite, CRITICAL sem correção, divergência
+material entre scanners, ou tier abaixo do piso. Cada bloqueio tem um código
+estável (`NOT_MEASURED`, `END_OF_LIFE`, ...) que um pipeline lê sem precisar
+interpretar prosa.
+
+```
+UNVERIFIED
+  Evidence gaps:
+    - no completed scan: nothing was measured
+  Not production ready
+    x the scan did not complete, so nothing about this image was measured
+    x the evidence behind this result has a material problem
+```
+
+```
+HIGH
+  Evidence:
+    - scanned, pinned to a digest, confirmed in its registry
+    - corroborated by a second scanner that agreed
+  Production ready
+```
+
+Nenhuma dessas saídas pode ser confundida com a outra, e é esse o ponto.
+
+---
+
+## Segurança de rede
+
+Uma referência de imagem é entrada do usuário e carrega um hostname.
+`dockerls analyze 169.254.169.254/latest` é uma referência bem formada — e
+resolvê-la significa requisitar o endpoint de metadados da nuvem. Num runner
+de CI, com um nome vindo de um PR ou de uma variável de ambiente, isso é um
+primitivo de SSRF.
+
+O DockerLs decide por **resolução**, não por grafia (`localhost` e um nome
+cujo registro A aponta para 127.0.0.1 são a mesma requisição), e exige que
+**todos** os endereços de um nome passem — o que fecha também o rebinding.
+
+| Configuração | Padrão | Por quê |
+|---|---|---|
+| `network_allow_loopback` | `false` | é o caminho para serviços do próprio runner |
+| `network_allow_link_local` | `false` | `169.254.0.0/16` é onde vivem as credenciais de instância |
+| `network_allow_private_networks` | **`true`** | registry interno é infraestrutura legítima e comum |
+| `network_allowed_hosts` | `[]` | allowlist explícita, vence os três acima |
+
+Permitir RFC1918 por padrão é deliberado: bloquear `10.x` fecharia o SSRF e
+quebraria todo mundo que roda um registry interno. Quem quer o modo estrito
+desliga num ajuste.
+
+---
+
 ## Fontes de imagens (multi-source)
 
 O DockerLs procura candidatos em vários catálogos ao mesmo tempo e os coloca
@@ -1638,6 +1735,15 @@ flag explícita sempre vence a configuração.
 | workers       | 10      |
 | limit (tags)  | 100     |
 | TTL do cache  | 24h     |
+
+### Rede e política de acesso
+
+| Configuração                      | Padrão | O que faz |
+|-----------------------------------|--------|-----------|
+| `network_allow_private_networks`  | `true`  | Permite registries em faixas RFC1918 |
+| `network_allow_loopback`          | `false` | Permite referências que resolvem para loopback |
+| `network_allow_link_local`        | `false` | Permite link-local, incluindo o endpoint de metadados |
+| `network_allowed_hosts`           | `[]`    | Hosts liberados independentemente de onde resolvem |
 
 ### Motor multi-source
 

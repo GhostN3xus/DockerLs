@@ -43,6 +43,10 @@ class CSVExporter(ExporterInterface):
                 "Hardening Coverage",
                 "Attack Surface",
                 "Confidence",
+                "Production Ready",
+                "Readiness Blockers",
+                "EOL Status",
+                "Cross Validation",
             ]
         )
         for a in result.recommendations or result.alternatives:
@@ -70,6 +74,12 @@ class CSVExporter(ExporterInterface):
                     a.hardening.coverage,
                     a.attack_surface.score if a.attack_surface.reportable else "",
                     a.confidence.value,
+                    a.production_ready,
+                    # Codes, semicolon-separated: a CSV consumer gating on
+                    # "NOT_MEASURED" should not have to parse a sentence.
+                    ";".join(a.readiness_blockers),
+                    a.eol_status.value,
+                    a.cross_validation,
                 ]
             )
         return output.getvalue()
