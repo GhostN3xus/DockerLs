@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from loguru import logger
 
-from dockerls.infrastructure.logging.setup import _mask_secrets, setup_logging
+from dockerls.infrastructure.logging.setup import setup_logging
+from dockerls.infrastructure.redaction import redact as _mask_secrets
 
 
 class TestSecretMasking:

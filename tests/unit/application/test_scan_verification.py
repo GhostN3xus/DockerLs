@@ -357,7 +357,14 @@ class TestCrossValidation:
 
         assert result.recommendations
         for a in result.recommendations:
-            assert "HIGH trivy=0 vs grype=10" in a.scan_divergence
+            # Asserted by substance rather than by wording: the message
+            # names both scanners, what each found, and which findings are
+            # disputed. Pinning the exact sentence would break every time
+            # the explanation improves.
+            assert "HIGH" in a.scan_divergence
+            assert "trivy" in a.scan_divergence and "grype" in a.scan_divergence
+            assert "10" in a.scan_divergence
+            assert a.cross_validation == "MATERIAL_DIVERGENCE"
 
     @pytest.mark.asyncio
     async def test_small_difference_is_not_flagged(self):

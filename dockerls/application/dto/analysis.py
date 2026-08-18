@@ -8,6 +8,7 @@ from dockerls.domain.entities.recommendation import Recommendation
 from dockerls.domain.entities.scan_result import ScanResult
 from dockerls.domain.entities.vulnerability import Vulnerability
 from dockerls.domain.value_objects.confidence import Confidence
+from dockerls.domain.value_objects.tristate import Tristate
 
 
 class DimensionReport(BaseModel):
@@ -40,15 +41,38 @@ class ImageAnalysis(BaseModel):
     security_score: float
     tier: str
     remediation_score: int
-    # The domain's verdict, carried so the CLI and --format json state
-    # it rather than each re-deriving the rule from the tier letter.
-    production_ready: bool = True
+    # The domain's verdict. Written **only** by the central
+    # ProductionReadiness policy (see application/services/verdict.py), never
+    # by the tier: the tier can see the score and nothing else, so it cannot
+    # tell a clean image from an image nobody managed to scan. Defaults to
+    # False so an analysis that never reached the policy is not ready by
+    # omission rather than ready by omission.
+    production_ready: bool = False
+    #: Stable codes for every rule the image failed (NOT_MEASURED,
+    #: END_OF_LIFE, ...), so a pipeline can branch without parsing prose.
+    readiness_blockers: list[str] = Field(default_factory=list)
+    #: The same blockers in the reader's terms.
+    readiness_reasons: list[str] = Field(default_factory=list)
+    # Kept as the boolean every exporter and template already reads. It
+    # answers False both for "supported" and for "nobody could tell", which
+    # is why `eol_status` carries the three-valued truth beside it.
     is_eol: bool = False
+    #: TRUE / FALSE / UNKNOWN. An unknown lifecycle does not penalise the
+    #: score -- there is nothing to penalise -- but it is never spent as if
+    #: it were a confirmation that the release is still supported.
+    eol_status: Tristate = Tristate.UNKNOWN
     is_lts: bool = False
     recommendation: Recommendation | None = None
     # Set when a second scanner disagreed materially with the primary one.
     # A non-empty value means the score must be presented as disputed.
     scan_divergence: str = ""
+    #: AGREEMENT / MINOR_DIVERGENCE / MATERIAL_DIVERGENCE / NO_SECOND_SCANNER.
+    #: Distinct from `scan_divergence`, which stays reserved for the material
+    #: case: two databases differing on a finding or two is ordinary, and
+    #: calling that "disputed" would make every image look contested.
+    cross_validation: str = "NO_SECOND_SCANNER"
+    #: Which findings differed, named, so the disagreement can be checked.
+    cross_validation_detail: str = ""
     # Docker Hub linkage. `hub_tag_verified` is deliberately tri-state:
     # True = confirmed present, False = confirmed absent, None = not checked
     # (image not on Docker Hub, or verification unavailable).
@@ -145,6 +169,10 @@ class RunMetrics(BaseModel):
     # Candidates whose OCI config was fetched and verified, which is what
     # makes their hardening facts measurements rather than claims.
     images_inspected: int = 0
+    #: Which scanner, at which version, produced this run's measurements.
+    #: Reported rather than assumed: two runs of the same command against the
+    #: same image are only comparable if this matches.
+    scanner_identity: str = ""
 
     @property
     def duplicates_collapsed(self) -> int:

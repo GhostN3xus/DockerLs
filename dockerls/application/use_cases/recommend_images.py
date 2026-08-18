@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 from pydantic import ValidationError
 
+from dockerls import __version__
 from dockerls.application.dto.analysis import (
     AnalysisResult,
     BaselineCriteria,
@@ -31,6 +33,7 @@ from dockerls.domain.entities.recommendation import (
 from dockerls.domain.value_objects.remediation_score import RemediationScore
 from dockerls.domain.value_objects.security_score import SecurityScore
 from dockerls.domain.value_objects.security_tier import SecurityTier
+from dockerls.domain.value_objects.tristate import Tristate
 from dockerls.integrations.registry.urls import source_url
 from dockerls.utils.ignore_file import active_ignored_cve_ids, load_ignore_rules
 from dockerls.utils.validation import validate_threshold, validate_workers
@@ -105,6 +108,11 @@ class RecommendImagesUseCase:
         self._cache_ttl_seconds = cache_ttl_seconds
         self._hardening = hardening
         self._resolve_digests = resolve_digests
+        # Filled in once the scanner has been asked who it is. Until then the
+        # fingerprint deliberately carries "unknown-scanner" rather than
+        # nothing: a run that could not identify its scanner must not share
+        # a cache namespace with one that could.
+        self._scanner_identity = "unknown-scanner"
         self._analysis_fingerprint = self._compute_analysis_fingerprint()
         self._metrics = RunMetrics()
 
@@ -123,9 +131,39 @@ class RecommendImagesUseCase:
             [
                 ",".join(sorted(self._ignored_cves)),
                 "threat-intel" if self._threat_intel is not None else "no-threat-intel",
+                # Which tool, at which version, produced the cached numbers.
+                # Without this the cache served a Trivy result to a run using
+                # Grype, and kept serving results from before a scanner
+                # upgrade -- a stale measurement presented as a current one,
+                # which is the same substitution this project refuses
+                # everywhere else, just slower.
+                self._scanner_identity,
             ]
         )
         return hashlib.sha256(material.encode()).hexdigest()[:12]
+
+    async def _identify_scanner(self) -> None:
+        """Ask the scanner who it is, and re-key the cache accordingly.
+
+        Done once per run, before anything is read from or written to the
+        cache. A scanner that cannot answer leaves the identity as
+        "unknown-scanner", which is its own namespace: results whose
+        provenance is unknown are reused only by other runs in the same
+        situation.
+        """
+        version = getattr(self._scanner, "version", None)
+        name = type(self._scanner).__name__
+        if callable(version):
+            try:
+                reported = await version()
+            except Exception as e:  # pragma: no cover - identity is best-effort
+                logger.debug(f"Could not identify {name}: {e}")
+                reported = ""
+            if isinstance(reported, str) and reported:
+                self._scanner_identity = reported
+        self._metrics.scanner_identity = self._scanner_identity
+        self._analysis_fingerprint = self._compute_analysis_fingerprint()
+        logger.info(f"Scanner identity for this run: {self._scanner_identity}")
 
     def _cache_key(self, image: DockerImage) -> str:
         """Chaveia a análise pelo **digest** do manifesto, não pela tag.
@@ -187,6 +225,7 @@ class RecommendImagesUseCase:
         )
 
     async def _execute(self, image_name: str, limit: int = 100) -> AnalysisResult:
+        await self._identify_scanner()
         self._observer.phase("Preparing vulnerability database")
         setup_errors: list[str] = []
         refresh_db = getattr(self._scanner, "refresh_db", None)
@@ -383,7 +422,8 @@ class RecommendImagesUseCase:
                     scan = await _enrich_with_threat_intel(scan, self._threat_intel)
 
                 product, version = _extract_product_version(image)
-                is_eol = await self._eol_checker.is_eol(product, version)
+                eol_status = await _eol_status(self._eol_checker, product, version)
+                is_eol = eol_status.is_true
                 is_lts = await self._eol_checker.is_lts(product, version)
 
                 score = SecurityScore(image, scan, is_eol=is_eol, is_lts=is_lts)
@@ -395,9 +435,9 @@ class RecommendImagesUseCase:
                     scan=scan,
                     security_score=score.value,
                     tier=tier.tier.value,
-                    production_ready=tier.production_ready,
                     remediation_score=rem_score.value,
                     is_eol=is_eol,
+                    eol_status=eol_status,
                     is_lts=is_lts,
                     evidence_paths=(
                         {scan.scanner: scan.evidence_path} if scan.evidence_path else {}
@@ -521,6 +561,12 @@ class RecommendImagesUseCase:
         entries = [
             {
                 "image": a.image.full_reference,
+                "pinned_reference": a.image.pinned_reference,
+                "digest": a.image.digest,
+                "confidence": a.confidence.value,
+                "production_ready": a.production_ready,
+                "readiness_blockers": a.readiness_blockers,
+                "cross_validation": a.cross_validation,
                 "security_score": a.security_score,
                 "tier": a.tier,
                 "critical": a.scan.critical_count,
@@ -535,7 +581,16 @@ class RecommendImagesUseCase:
             }
             for a in selected
         ]
-        return await self._evidence.record_manifest(query, entries)
+        return await self._evidence.record_manifest(
+            query,
+            entries,
+            provenance={
+                "dockerls_version": __version__,
+                "scanner": self._scanner_identity,
+                "resolved_at": datetime.now(tz=UTC).isoformat(),
+                "analysis_fingerprint": self._analysis_fingerprint,
+            },
+        )
 
     async def _close_scanners(self) -> None:
         secondary = self._cross_validator.scanner if self._cross_validator else None
@@ -635,9 +690,20 @@ def _assert_verified(analyses: list[ImageAnalysis]) -> None:
 
 
 async def _enrich_with_threat_intel(scan: Any, threat_intel: ThreatIntelClient) -> Any:
-    """Tag CRITICAL/HIGH vulnerabilities with CISA KEV / EPSS signal so
-    SecurityScore can weigh confirmed-exploited or high-probability CVEs
-    more heavily than an unweighted severity count would."""
+    """Tag CRITICAL/HIGH vulnerabilities with CISA KEV / EPSS signal.
+
+    The enrichment records *whether the feeds answered*, not just what they
+    said. With the KEV catalogue unreachable every lookup returns the empty
+    set, and marking each CVE `exploit_known=False` on that basis turned a
+    failed request into an affirmative safety claim -- the report went on to
+    state that the image had no known-exploited vulnerabilities. So a
+    CVE now carries `kev_status`: TRUE (listed), FALSE (catalogue answered
+    and does not list it), UNKNOWN (nothing was consulted).
+
+    Enrichment is attempted only for CRITICAL/HIGH findings, so anything
+    below stays UNKNOWN by construction -- which is correct: it was not
+    looked up.
+    """
     notable_ids = [
         v.cve_id
         for v in scan.vulnerabilities
@@ -648,19 +714,87 @@ async def _enrich_with_threat_intel(scan: Any, threat_intel: ThreatIntelClient) 
 
     kev_ids = await threat_intel.known_exploited(notable_ids)
     epss = await threat_intel.epss_scores(notable_ids)
-    if not kev_ids and not epss:
+    kev_available = _answered(threat_intel.kev_available, bool(kev_ids))
+    epss_available = _answered(threat_intel.epss_available, bool(epss))
+    if not kev_available and not epss_available:
+        # Nothing was learned. Returning the scan untouched leaves every
+        # `kev_status` at UNKNOWN, which is exactly what happened.
+        logger.warning(
+            "Threat intelligence unavailable: exploitation status stays UNKNOWN for "
+            f"{len(notable_ids)} finding(s) in {scan.image_reference}"
+        )
         return scan
 
-    updated = [
-        v.model_copy(
-            update={
-                "exploit_known": v.cve_id.upper() in kev_ids,
-                "epss_score": epss.get(v.cve_id.upper(), v.epss_score),
-            }
+    timestamp = datetime.now(tz=UTC).isoformat()
+    notable = set(notable_ids)
+    updated = []
+    for v in scan.vulnerabilities:
+        if v.cve_id not in notable:
+            updated.append(v)
+            continue
+        key = v.cve_id.upper()
+        listed = key in kev_ids
+        score = epss.get(key)
+        updated.append(
+            v.model_copy(
+                update={
+                    "exploit_known": listed,
+                    "kev_status": Tristate.of(listed) if kev_available else Tristate.UNKNOWN,
+                    "epss_score": score if score is not None else v.epss_score,
+                    "epss_known": epss_available and score is not None,
+                    "epss_percentile": threat_intel.percentile_of(key),
+                    "threat_intel_timestamp": timestamp,
+                }
+            )
         )
-        for v in scan.vulnerabilities
-    ]
     return scan.model_copy(update={"vulnerabilities": updated})
+
+
+async def _eol_status(checker: Any, product: str, version: str) -> Tristate:
+    """The three-valued lifecycle answer, from a checker that can give one.
+
+    Dispatched dynamically for the same reason `tag_exists` and `refresh_db`
+    are: `EOLCheckerInterface` predates the tri-state, and every test double
+    and alternative implementation in the wild implements the boolean. A
+    checker that only answers `is_eol` can distinguish TRUE from
+    "not TRUE", and "not TRUE" is honestly reported as FALSE only because
+    that is the entire content of what it said -- the richer checker is the
+    one that gets to say UNKNOWN.
+    """
+    status = getattr(checker, "eol_status", None)
+    if callable(status):
+        result = await status(product, version)
+        # The answer is validated, not assumed: `getattr` on a test double
+        # (or on any object with dynamic attributes) happily produces a
+        # callable that returns something else entirely, and a value that is
+        # not a Tristate must not be coerced into one -- `bool(mock)` is
+        # True, which would silently declare every image end-of-life.
+        if isinstance(result, Tristate):
+            return result
+        logger.debug(
+            f"{type(checker).__name__}.eol_status returned {type(result).__name__}, "
+            "not a Tristate; falling back to is_eol"
+        )
+    return Tristate.of(await checker.is_eol(product, version))
+
+
+def _answered(reported: bool | None, produced_data: bool) -> bool:
+    """Whether a threat-intel source actually answered.
+
+    The client records this directly, and that record is authoritative in
+    both directions. `None` means nothing set it -- a source that was never
+    queried, or a substitute that does not track it -- and there the only
+    evidence available is the payload itself: data that came back proves the
+    source answered, while an empty result proves nothing either way and is
+    treated as "not consulted".
+
+    The asymmetry is the whole point. Erring towards UNKNOWN costs a
+    confidence level; erring towards "answered" would let a dead feed
+    produce the sentence "no known-exploited vulnerabilities".
+    """
+    if reported is not None:
+        return reported
+    return produced_data
 
 
 def _apply_ignore_rules(scan: Any, ignored_cves: set[str]) -> Any:

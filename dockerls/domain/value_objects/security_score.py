@@ -18,7 +18,20 @@ EOL_PENALTY = 20.0
 # ever competing with measured severity.
 MAX_AGE_PENALTY = 3.0
 EXPLOITED_PENALTY = 10.0
+# The step: a vulnerability at or above this probability draws a flat
+# penalty. Kept because it is the part an operator can reason about ("EPSS
+# over 0.5 costs 5 points"), and because removing it would silently change
+# every score this tool has ever produced.
 HIGH_EPSS_PENALTY = 5.0
+HIGH_EPSS_THRESHOLD = 0.5
+# The slope, added on top. The step alone made 0.97 and 0.51 cost exactly
+# the same, and 0.49 cost nothing -- a cliff edge in the middle of a
+# continuous measurement, where the difference between "half the time" and
+# "almost certainly" is the whole point of having the number. The term is
+# proportional to the probability itself and is capped well below a single
+# HIGH finding, so it orders comparable images without ever competing with
+# measured severity.
+EPSS_SLOPE_PENALTY = 4.0
 
 # Qualitative bonuses. Their total is deliberately held *below* the HIGH
 # penalty: no amount of "official + minimal + signed + LTS + recent" may
@@ -84,8 +97,16 @@ class SecurityScore:
         # severity penalties above.
         penalty += EXPLOITED_PENALTY * sum(1 for v in self._scan.vulnerabilities if v.exploit_known)
         penalty += HIGH_EPSS_PENALTY * sum(
-            1 for v in self._scan.vulnerabilities if v.epss_score >= 0.5
+            1 for v in self._scan.vulnerabilities if v.epss_score >= HIGH_EPSS_THRESHOLD
         )
+        # Continuous term, over the same findings as the step. No
+        # `epss_known` check is needed here and adding one would be wrong:
+        # the field defaults to 0.0, so a *non-zero* score is itself proof
+        # that a lookup returned it, and a zero contributes nothing either
+        # way. `epss_known` earns its keep in the reporting layer, where the
+        # difference between "scored at zero" and "never looked up" is a
+        # statement rather than a number.
+        penalty += EPSS_SLOPE_PENALTY * sum(v.epss_score for v in self._scan.vulnerabilities)
 
         if self._is_eol:
             penalty += EOL_PENALTY

@@ -14,9 +14,11 @@ from dockerls.application.use_cases.recommend_images import RecommendImagesUseCa
 from dockerls.application.use_cases.search_images import SearchImagesUseCase
 from dockerls.cache.sqlite_cache import SQLiteCache
 from dockerls.domain.entities.image import DOCKER_HUB
+from dockerls.domain.value_objects.network_policy import NetworkPolicy
 from dockerls.infrastructure.config.settings import Settings
 from dockerls.infrastructure.evidence import EvidenceStore
 from dockerls.infrastructure.logging.setup import setup_logging
+from dockerls.infrastructure.network.host_guard import HostGuard
 from dockerls.integrations.dhi.catalog import DHICatalogClient
 from dockerls.integrations.dhi.repository import DHI, DHIRepository
 from dockerls.integrations.dockerhub.client import DockerHubClient
@@ -320,6 +322,24 @@ async def build_recommend_use_case(
     )
 
 
+def build_host_guard() -> HostGuard:
+    """Where a reference is allowed to make this process connect.
+
+    Built here rather than on `Settings` so the settings object stays a
+    plain data holder and the policy is assembled in the one place that
+    assembles everything else.
+    """
+    s = _settings()
+    return HostGuard(
+        NetworkPolicy(
+            allow_private_networks=s.network_allow_private_networks,
+            allow_loopback=s.network_allow_loopback,
+            allow_link_local=s.network_allow_link_local,
+            allowed_hosts=frozenset(s.network_allowed_hosts),
+        )
+    )
+
+
 def build_hardening_analyzer() -> HardeningAnalyzer:
     """The registry-backed evidence gatherer, or a disabled one.
 
@@ -329,7 +349,11 @@ def build_hardening_analyzer() -> HardeningAnalyzer:
     to look, and is very different from reporting an image as clean.
     """
     s = _settings()
-    inspector = RegistryInspector(timeout=s.http_timeout) if s.inspect_image_config else None
+    inspector = (
+        RegistryInspector(timeout=s.http_timeout, guard=build_host_guard())
+        if s.inspect_image_config
+        else None
+    )
     return HardeningAnalyzer(inspector=inspector)
 
 

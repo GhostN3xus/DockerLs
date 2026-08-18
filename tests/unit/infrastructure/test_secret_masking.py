@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import pytest
 
-from dockerls.infrastructure.logging.setup import MASK, _mask_secrets
+from dockerls.infrastructure.redaction import MASK
+from dockerls.infrastructure.redaction import redact as _mask_secrets
 
 SECRET = "dckr_pat_AbCdEf123456789xyz"
 

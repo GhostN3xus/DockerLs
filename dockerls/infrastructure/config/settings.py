@@ -110,6 +110,16 @@ class Settings(BaseSettings):
     # Fetch the OCI config of each finalist to measure how it is configured
     # (non-root, ports, entrypoint) instead of relying on vendor claims.
     inspect_image_config: bool = True
+    # Where an image reference is allowed to make this process connect. A
+    # reference is user input, so without these a crafted name reaches the
+    # cloud metadata endpoint or a service on the runner. Private ranges are
+    # allowed by default because internal registries are ordinary; loopback
+    # and link-local are not, because that is the actual attack.
+    network_allow_private_networks: bool = True
+    network_allow_loopback: bool = False
+    network_allow_link_local: bool = False
+    #: Hosts permitted regardless of where they resolve ("registry:5000").
+    network_allowed_hosts: list[str] = Field(default_factory=list)
     scanner_timeout: int = 300
     http_timeout: int = 30
     retry_max_attempts: int = 3

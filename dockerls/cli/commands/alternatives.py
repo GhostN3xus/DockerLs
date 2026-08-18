@@ -35,6 +35,7 @@ from dockerls.application.services.source_registry import UnknownSourceError
 from dockerls.cli.dependencies import build_analyze_use_case, build_recommend_use_case
 from dockerls.cli.options import OutputFormat, parse_output_format
 from dockerls.cli.progress import RichScanObserver
+from dockerls.cli.text import safe
 from dockerls.cli.validators import check_workers
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK
 
@@ -209,7 +210,9 @@ def _render(
     console.print(Panel(f"[bold cyan]Alternatives to {reference}[/bold cyan]", expand=False))
 
     console.print("\n[bold]CURRENT[/bold]")
-    console.print(f"  {current.image.full_reference}  [dim]{current.image.source}[/dim]")
+    console.print(
+        f"  {safe(current.image.full_reference)}  [dim]{safe(current.image.source)}[/dim]"
+    )
     console.print(
         f"  score {current.security_score}  tier {current.tier}  "
         f"C/H/M {current.scan.critical_count}/{current.scan.high_count}/"
@@ -239,8 +242,8 @@ def _render(
         delta_text = f"[green]+{delta:.1f}[/green]" if delta > 0 else f"[red]{delta:.1f}[/red]"
         table.add_row(
             str(i),
-            candidate.image.full_reference,
-            candidate.image.source,
+            safe(candidate.image.full_reference),
+            safe(candidate.image.source),
             f"{candidate.security_score:.1f}",
             delta_text,
             f"{candidate.scan.critical_count}/{candidate.scan.high_count}/"
@@ -250,18 +253,18 @@ def _render(
     console.print(table)
 
     best, best_plan = candidates[0], plans[0]
-    console.print(f"\n[bold]WHY {best.image.full_reference}[/bold]")
+    console.print(f"\n[bold]WHY {safe(best.image.full_reference)}[/bold]")
     for reason in best_plan.improvements[:8]:
-        console.print(f"  [green]+[/green] {reason}")
+        console.print(f"  [green]+[/green] {safe(reason)}")
 
     if best_plan.trade_offs:
         console.print("\n[bold]TRADE-OFFS[/bold]")
         for cost in best_plan.trade_offs[:8]:
-            console.print(f"  [yellow]![/yellow] {cost}")
+            console.print(f"  [yellow]![/yellow] {safe(cost)}")
 
     console.print("\n[bold]MIGRATION CHECKLIST[/bold]")
     for step_number, step in enumerate(best_plan.checklist, 1):
-        console.print(f"  {step_number}. {step}")
+        console.print(f"  {step_number}. {safe(step)}")
 
     if best.image.digest_known:
         console.print(f"\n[dim]Pin to: {best.pinned_reference}[/dim]", soft_wrap=True)

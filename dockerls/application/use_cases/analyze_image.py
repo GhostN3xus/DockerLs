@@ -6,7 +6,10 @@ from typing import TYPE_CHECKING
 from dockerls.application.dto.analysis import ImageAnalysis
 from dockerls.application.services.teardown import close_quietly, sources_of
 from dockerls.application.services.verdict import apply_facts, finalize_verdict
-from dockerls.application.use_cases.recommend_images import _enrich_with_threat_intel
+from dockerls.application.use_cases.recommend_images import (
+    _enrich_with_threat_intel,
+    _eol_status,
+)
 from dockerls.domain.entities.image import DockerImage
 from dockerls.domain.value_objects.remediation_score import RemediationScore
 from dockerls.domain.value_objects.security_score import SecurityScore
@@ -60,7 +63,8 @@ class AnalyzeImageUseCase:
         match = re.match(r"^\d+(?:\.\d+){0,3}", tag)
         version = match.group(0) if match else ""
 
-        is_eol = await self._eol_checker.is_eol(product, version)
+        eol_status = await _eol_status(self._eol_checker, product, version)
+        is_eol = eol_status.is_true
         is_lts = await self._eol_checker.is_lts(product, version)
 
         score = SecurityScore(image, scan, is_eol=is_eol, is_lts=is_lts)
@@ -72,9 +76,9 @@ class AnalyzeImageUseCase:
             scan=scan,
             security_score=score.value,
             tier=tier.tier.value,
-            production_ready=tier.production_ready,
             remediation_score=rem_score.value,
             is_eol=is_eol,
+            eol_status=eol_status,
             is_lts=is_lts,
             evidence_paths={scan.scanner: scan.evidence_path} if scan.evidence_path else {},
         )

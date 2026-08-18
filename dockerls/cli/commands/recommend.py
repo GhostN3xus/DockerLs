@@ -20,6 +20,7 @@ from dockerls.cli.dependencies import (
 )
 from dockerls.cli.options import OutputFormat, parse_output_format
 from dockerls.cli.progress import RichScanObserver
+from dockerls.cli.text import safe
 from dockerls.cli.validators import check_limit, check_threshold, check_workers
 from dockerls.domain.value_objects.confidence import Confidence
 from dockerls.domain.value_objects.security_tier import SecurityTier, Tier
@@ -363,8 +364,8 @@ def _print_table(analyses: list[ImageAnalysis]) -> None:
         )
         table.add_row(
             str(i),
-            a.image.full_reference,
-            a.image.source,
+            safe(a.image.full_reference),
+            safe(a.image.source),
             score,
             f"[{ts}]{a.tier}[/{ts}]" if ts else a.tier,
             counts,
@@ -423,24 +424,54 @@ def _print_why(analyses: list[ImageAnalysis]) -> None:
     if not analyses:
         return
     best = analyses[0]
-    console.print(f"\n[bold]Why {best.image.full_reference}?[/bold]")
+    console.print(f"\n[bold]Why {safe(best.image.full_reference)}?[/bold]")
     for reason in best.why[:10]:
-        console.print(f"  [green]+[/green] {reason}")
+        console.print(f"  [green]+[/green] {safe(reason)}")
     if best.trade_offs:
         console.print("\n[bold]Trade-offs[/bold]")
         for cost in best.trade_offs[:10]:
-            console.print(f"  [yellow]![/yellow] {cost}")
+            console.print(f"  [yellow]![/yellow] {safe(cost)}")
+
+    _print_verdict(best)
 
     facts = best.facts
     console.print(
         f"\n[dim]Evidence: {facts.determined_count} fact(s) determined | "
         f"hardening coverage {best.hardening.coverage:.0%} | "
-        f"confidence {best.confidence.value} ({'; '.join(best.confidence_reasons)})[/dim]"
+        f"scanner {safe(best.scan.scanner)}[/dim]"
     )
     if best.image.digest_known:
         console.print(
             f"[dim]Deploy this exact image: {best.pinned_reference}[/dim]", soft_wrap=True
         )
+
+
+def _print_verdict(analysis: ImageAnalysis) -> None:
+    """State the verdict and the evidence behind it, in that order.
+
+    The failure this prevents is the one the whole project is organised
+    around: a reader glancing at a table and reading an empty findings
+    column as "clean". An image nobody could scan and an image with nothing
+    wrong occupy the same row shape, so the difference is spelled out --
+    the confidence level, what is missing, and whether the thing may go to
+    production at all.
+    """
+    level = analysis.confidence
+    style = _CONFIDENCE_STYLES.get(level, "")
+    console.print(f"\n[{style}]{level.value}[/{style}]" if style else f"\n{level.value}")
+
+    # At HIGH the reasons are what was verified; below it they are what is
+    # missing. Same list, opposite meaning, so the heading says which.
+    console.print(f"  [dim]{'Evidence:' if level is Confidence.HIGH else 'Evidence gaps:'}[/dim]")
+    for reason in analysis.confidence_reasons:
+        console.print(f"    - {safe(reason)}")
+
+    if analysis.production_ready:
+        console.print("  [green]Production ready[/green]")
+        return
+    console.print("  [red]Not production ready[/red]")
+    for reason in analysis.readiness_reasons:
+        console.print(f"    [red]x[/red] {safe(reason)}")
 
 
 def _print_details(analyses: list[ImageAnalysis]) -> None:
@@ -454,7 +485,9 @@ def _print_details(analyses: list[ImageAnalysis]) -> None:
         return
     console.print("\n[bold]Details[/bold]")
     for i, a in enumerate(analyses, 1):
-        console.print(f"  {i}. [cyan]{a.image.full_reference}[/cyan]  [dim]{a.image.source}[/dim]")
+        console.print(
+            f"  {i}. [cyan]{safe(a.image.full_reference)}[/cyan]  [dim]{safe(a.image.source)}[/dim]"
+        )
         if a.hub_url:
             # soft_wrap keeps the URL on one line so it stays copy-pasteable.
             console.print(f"     link:     [link={a.hub_url}]{a.hub_url}[/link]", soft_wrap=True)
@@ -496,7 +529,7 @@ def _print_tier_warnings(analyses: list[ImageAnalysis]) -> None:
         return
     console.print("\n[bold yellow]! Requires review[/bold yellow]")
     for a, advice in flagged:
-        console.print(f"  {a.image.full_reference}  [dim]Tier {a.tier}: {advice}[/dim]")
+        console.print(f"  {safe(a.image.full_reference)}  [dim]Tier {safe(a.tier)}: {advice}[/dim]")
 
 
 def _print_divergences(analyses: list[ImageAnalysis]) -> None:
@@ -505,7 +538,7 @@ def _print_divergences(analyses: list[ImageAnalysis]) -> None:
         return
     console.print("\n[bold yellow]! Scanner divergence[/bold yellow]")
     for a in disputed:
-        console.print(f"  {a.image.full_reference}: [dim]{a.scan_divergence}[/dim]")
+        console.print(f"  {safe(a.image.full_reference)}: [dim]{safe(a.scan_divergence)}[/dim]")
 
 
 REASON_MAX_LEN = 90
@@ -547,7 +580,8 @@ def _print_unverified(result: AnalysisResult) -> None:
 
     for item in result.unverified[:10]:
         console.print(
-            f"  {item.image_reference}  [dim]{item.kind}: {_short_reason(item.reason)}[/dim]"
+            f"  {safe(item.image_reference)}  "
+            f"[dim]{safe(item.kind)}: {safe(_short_reason(item.reason))}[/dim]"
         )
     remaining = len(result.unverified) - 10
     if remaining > 0:

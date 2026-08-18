@@ -35,6 +35,7 @@ from loguru import logger
 
 from dockerls.domain.entities.image_facts import EvidenceSource, HardeningFacts
 from dockerls.domain.value_objects.tristate import Tristate
+from dockerls.infrastructure.network.host_guard import HostGuard
 from dockerls.integrations.registry.oci import OCIRegistryClient
 
 if TYPE_CHECKING:
@@ -77,8 +78,13 @@ class RegistryInspector:
     (repository, reference) pair is resolved at most once per run.
     """
 
-    def __init__(self, timeout: int = 30):
+    def __init__(self, timeout: int = 30, guard: HostGuard | None = None):
         self._timeout = timeout
+        # Where this inspector is permitted to send a request. A reference is
+        # user input carrying a hostname, so without a policy `dockerls
+        # analyze 169.254.169.254/x` is an outbound request to the cloud
+        # metadata endpoint chosen by whoever supplied the reference.
+        self._guard = guard or HostGuard()
         self._clients: dict[str, OCIRegistryClient] = {}
         self._clients_lock = asyncio.Lock()
         self._resolved: dict[str, tuple[str, dict[str, Any] | None]] = {}
@@ -90,6 +96,12 @@ class RegistryInspector:
     async def _client(self, host: str) -> OCIRegistryClient | None:
         if not _HOST.match(host):
             logger.warning(f"Refusing to contact registry with unexpected host: {host!r}")
+            return None
+        # Checked here rather than at the call sites: this is the single
+        # place a host becomes a connection, so a future caller cannot
+        # forget the check.
+        if not self._guard.allows(host):
+            logger.warning(f"Refusing to contact {host}: {self._guard.explain(host)}")
             return None
         async with self._clients_lock:
             client = self._clients.get(host)

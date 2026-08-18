@@ -78,6 +78,11 @@ class ConfidenceInputs(NamedTuple):
     cross_validated: bool = False
     #: A second scanner ran and disagreed materially with the first.
     scanners_disagree: bool = False
+    #: A second scanner ran and differed on individual findings without the
+    #: disagreement being material. Two vulnerability databases legitimately
+    #: differ at the margins, so this does not refute the result -- but it is
+    #: not the clean corroboration that HIGH is meant to represent either.
+    scanners_differ_slightly: bool = False
     #: The candidate is pinned to a manifest digest.
     digest_resolved: bool = False
     #: The registry that owns the reference confirmed the tag exists.
@@ -134,6 +139,8 @@ class ConfidenceAssessment:
         gaps: list[str] = []
         if not i.cross_validated:
             gaps.append("only one scanner ran")
+        if i.scanners_differ_slightly:
+            gaps.append("the second scanner differed on individual findings")
         if not i.digest_resolved:
             gaps.append("no manifest digest resolved")
         if i.hardening_coverage < THIN_COVERAGE:
