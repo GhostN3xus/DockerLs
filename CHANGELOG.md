@@ -5,6 +5,43 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] -- 2026-08-18
+
+### Alterado — a imagem passa a partir de Alpine
+
+Sobre a base Debian slim, o `trivy` reportava **seis CRITICAL, nenhuma com
+versão de correção publicada** — `apt-get upgrade` não resolvia uma sequer:
+
+| CVE | Pacote | bookworm | trixie |
+|---|---|---|---|
+| CVE-2025-7458 | libsqlite3-0 | vulnerável | corrigida |
+| CVE-2023-45853 | zlib1g | vulnerável | corrigida |
+| CVE-2026-13221 | perl-base | vulnerável | vulnerável |
+| CVE-2026-42496 | perl-base (Archive::Tar) | vulnerável | vulnerável |
+| CVE-2026-57433 | perl-base (Storable) | vulnerável | vulnerável |
+| CVE-2026-8376 | perl-base | vulnerável | vulnerável |
+
+(estado conferido no rastreador de segurança do Debian, não deduzido)
+
+As quatro do `perl` são o caso decisivo: o DockerLs não invoca perl em lugar
+nenhum. Ele está na imagem porque `perl-base` é `Essential: yes` no Debian —
+nem `apt-get purge` o remove sem quebrar o `dpkg` — e segue vulnerável também
+no trixie, com correção só no `sid`. Numa distribuição sem dpkg o pacote não
+existe, e com ele somem quatro das seis; as outras duas somem porque o Alpine
+carrega `zlib` e `sqlite-libs` mais novos que os do bookworm.
+
+A alternativa era silenciar as quatro no `.dockerls-ignore.yaml`. Trocar a base
+resolve de verdade em vez de esconder — numa ferramenta que recusa apresentar
+como segura uma imagem que não pôde medir, fazer o próprio portão passar por
+supressão seria o pior precedente possível.
+
+**O custo, declarado:** a libc passa a ser musl. É aceitável porque toda
+dependência compilada deste projeto (`pydantic-core`, `sqlalchemy`, `pyyaml`,
+`greenlet`, `rpds-py`) publica wheel `musllinux` — verificado no PyPI —, então
+nada é compilado no build e nenhuma toolchain entra na imagem. `useradd` /
+`groupadd` viram `adduser` / `addgroup`, e `apt-get upgrade` vira
+`apk upgrade --no-cache`.
+
 ## [1.3.3] -- 2026-08-18
 
 ### Corrigido
