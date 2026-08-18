@@ -95,6 +95,20 @@ class SecurityTier:
 
     @property
     def production_ready(self) -> bool:
+        """Whether the *tier* alone would permit production use.
+
+        **This is not the verdict.** It answers a narrower question than it
+        appears to: it can see the score and the EOL flag, and nothing else
+        -- not whether the scan completed, not whether two scanners agreed,
+        not whether anything was verified. Read as the verdict, it reported
+        a PARTIAL scan with no findings as production ready on the same
+        analysis that reported UNVERIFIED.
+
+        `ProductionReadiness` in `domain/value_objects/production_readiness.py`
+        is the policy that decides, and `ImageAnalysis.production_ready` is
+        written only by it. This property survives as the tier-level rule
+        that policy consumes.
+        """
         # An EOL base is never production-ready, regardless of its
         # vulnerability tier -- it will stop receiving security patches.
         if self._is_eol:

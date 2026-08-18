@@ -62,7 +62,11 @@ class Settings(BaseSettings):
     # disappearing matters sooner than a score going slightly stale.
     tag_cache_ttl_seconds: int = 6 * 3600
     max_tags: int = 100
-    workers: int = 10
+    # 0 means "derive from this machine": each worker holds a scanner
+    # process that wants a core and hundreds of megabytes, so a flat number
+    # oversubscribes small runners and underuses large ones. Any explicit
+    # value is honoured as given -- the operator knows their machine.
+    workers: int = 0
     max_critical: int = 0
     max_high: int = 0
     max_medium: int = 5
@@ -80,8 +84,11 @@ class Settings(BaseSettings):
     cross_validate: bool = True
     # Confirm each recommended tag really exists on Docker Hub.
     verify_hub_tags: bool = True
-    # Concurrent secondary scans during cross-validation.
-    cross_validate_workers: int = 5
+    # Concurrent secondary scans during cross-validation. 0 means "derive
+    # from this machine", like `workers`: these are scanner processes too,
+    # and five of them on a two-core runner contend for exactly the same
+    # cores the primary scan just finished using.
+    cross_validate_workers: int = 0
     # Search free hardened catalogues (Chainguard, Distroless) alongside
     # Docker Hub, so a hardened image can win on measured vulnerabilities.
     include_hardened_sources: bool = True
@@ -110,6 +117,16 @@ class Settings(BaseSettings):
     # Fetch the OCI config of each finalist to measure how it is configured
     # (non-root, ports, entrypoint) instead of relying on vendor claims.
     inspect_image_config: bool = True
+    # Where an image reference is allowed to make this process connect. A
+    # reference is user input, so without these a crafted name reaches the
+    # cloud metadata endpoint or a service on the runner. Private ranges are
+    # allowed by default because internal registries are ordinary; loopback
+    # and link-local are not, because that is the actual attack.
+    network_allow_private_networks: bool = True
+    network_allow_loopback: bool = False
+    network_allow_link_local: bool = False
+    #: Hosts permitted regardless of where they resolve ("registry:5000").
+    network_allowed_hosts: list[str] = Field(default_factory=list)
     scanner_timeout: int = 300
     http_timeout: int = 30
     retry_max_attempts: int = 3

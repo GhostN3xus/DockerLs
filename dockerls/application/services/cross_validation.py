@@ -1,24 +1,94 @@
 from __future__ import annotations
 
 import asyncio
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from dockerls.domain.entities.vulnerability import Severity
+
 if TYPE_CHECKING:
     from dockerls.application.dto.analysis import ImageAnalysis
     from dockerls.domain.entities.scan_result import ScanResult
+    from dockerls.domain.entities.vulnerability import Vulnerability
     from dockerls.domain.interfaces.scanner import ScannerInterface
 
-# A second scanner never reproduces the first one's counts exactly -- the
+# A second scanner never reproduces the first one's findings exactly -- the
 # databases differ and each maps severities its own way. Only a difference
-# that is both large in absolute terms *and* large relative to the primary
-# count is treated as a real disagreement worth flagging.
+# that is both large in absolute terms *and* large relative to what was found
+# is treated as a real disagreement worth flagging.
 DEFAULT_ABS_TOLERANCE = 2
 DEFAULT_REL_TOLERANCE = 0.5
+
+
+class CrossValidationOutcome(StrEnum):
+    """What the second opinion amounted to.
+
+    Kept as a named outcome rather than a boolean because the three
+    interesting states are not "agrees / disagrees" but "agrees",
+    "differs in ways two databases normally differ", and "tells a
+    different story" -- and the last of those must reach the confidence
+    model, while the middle one merely stops it reaching the top.
+    """
+
+    NO_SECOND_SCANNER = "NO_SECOND_SCANNER"
+    AGREEMENT = "AGREEMENT"
+    MINOR_DIVERGENCE = "MINOR_DIVERGENCE"
+    MATERIAL_DIVERGENCE = "MATERIAL_DIVERGENCE"
+
+
+#: Severity bands compared by identity. LOW and MEDIUM are deliberately out:
+#: their populations are large, the two databases classify them differently
+#: as a matter of course, and comparing them would make every image look
+#: disputed.
+_COMPARED_SEVERITIES = (Severity.CRITICAL, Severity.HIGH)
+
+
+def finding_identity(vuln: Vulnerability) -> str:
+    """A stable identity for one finding, for comparison across scanners.
+
+    Vulnerability id *and* package, because the same CVE affecting two
+    packages in one image is two findings to fix, and the same package
+    carrying two CVEs is likewise two. Version is deliberately excluded:
+    the scanners frequently report the same installed package with
+    differently normalised version strings, and keying on that would
+    manufacture disagreement out of formatting.
+    """
+    return f"{vuln.cve_id.strip().upper()}|{vuln.package_name.strip().lower()}"
+
+
 # Validations are independent of each other, so they run concurrently. The
 # cap keeps a handful of scanner processes from thrashing the machine.
 DEFAULT_WORKERS = 5
+
+
+#: Worst-first, so `_worse` needs no comparison table of its own.
+_SEVERITY_OF_OUTCOME = {
+    CrossValidationOutcome.MATERIAL_DIVERGENCE: 3,
+    CrossValidationOutcome.MINOR_DIVERGENCE: 2,
+    CrossValidationOutcome.AGREEMENT: 1,
+    CrossValidationOutcome.NO_SECOND_SCANNER: 0,
+}
+
+
+def _worse(a: CrossValidationOutcome, b: CrossValidationOutcome) -> CrossValidationOutcome:
+    return a if _SEVERITY_OF_OUTCOME[a] >= _SEVERITY_OF_OUTCOME[b] else b
+
+
+#: How many differing findings to name before the message stops being
+#: readable. The full picture is in the raw evidence of both scanners.
+_MAX_EXAMPLES = 3
+
+
+def _examples(identities: set[str]) -> str:
+    """Name a few of the disputed findings, so the reader can go and look."""
+    if not identities:
+        return ""
+    shown = sorted(identities)[:_MAX_EXAMPLES]
+    names = ", ".join(identity.split("|", 1)[0] for identity in shown)
+    more = len(identities) - len(shown)
+    return f" [{names}{f', +{more} more' if more > 0 else ''}]"
 
 
 class CrossValidator:
@@ -88,24 +158,60 @@ class CrossValidator:
         if secondary.evidence_path:
             analysis.evidence_paths[secondary.scanner] = secondary.evidence_path
 
-        divergence = self._describe_divergence(analysis, secondary)
-        if divergence:
-            logger.warning(f"Scanner divergence for {reference}: {divergence}")
-            analysis.scan_divergence = divergence
+        outcome, description = self.compare(analysis.scan, secondary)
+        analysis.cross_validation = outcome.value
+        analysis.cross_validation_detail = description
+        if outcome is CrossValidationOutcome.MATERIAL_DIVERGENCE:
+            logger.warning(f"Material scanner divergence for {reference}: {description}")
+            # `scan_divergence` remains the field the table, the exporters
+            # and the confidence model already read, and it stays reserved
+            # for material disagreement -- a minor one is recorded in
+            # `cross_validation` without disputing the score.
+            analysis.scan_divergence = description
+        elif outcome is CrossValidationOutcome.MINOR_DIVERGENCE:
+            logger.info(f"Minor scanner divergence for {reference}: {description}")
 
-    def _describe_divergence(self, analysis: ImageAnalysis, secondary: ScanResult) -> str:
-        primary = analysis.scan
+    def compare(
+        self, primary: ScanResult, secondary: ScanResult
+    ) -> tuple[CrossValidationOutcome, str]:
+        """Classify two scans of the same image by *which* findings differ.
+
+        Comparing counts alone accepted a case it should not: two scanners
+        each reporting one CRITICAL, for two entirely different CVEs, agreed
+        perfectly on the arithmetic while describing different images. What
+        is compared here is the set of findings, so that case reads as the
+        divergence it is.
+        """
         parts: list[str] = []
-        for label in ("critical", "high"):
-            a: int = getattr(primary, f"{label}_count")
-            b: int = getattr(secondary, f"{label}_count")
-            if self._is_material(a, b):
-                parts.append(f"{label.upper()} {primary.scanner}={a} vs {secondary.scanner}={b}")
-        return "; ".join(parts)
+        worst = CrossValidationOutcome.AGREEMENT
 
-    def _is_material(self, primary: int, secondary: int) -> bool:
-        delta = abs(primary - secondary)
-        if delta <= self._abs_tolerance:
-            return False
-        baseline = max(primary, secondary, 1)
-        return (delta / baseline) > self._rel_tolerance
+        for severity in _COMPARED_SEVERITIES:
+            mine = {finding_identity(v) for v in primary.vulnerabilities if v.severity is severity}
+            theirs = {
+                finding_identity(v) for v in secondary.vulnerabilities if v.severity is severity
+            }
+            only_mine = mine - theirs
+            only_theirs = theirs - mine
+            if not only_mine and not only_theirs:
+                continue
+
+            magnitude = len(only_mine) + len(only_theirs)
+            baseline = max(len(mine), len(theirs), 1)
+            material = (
+                magnitude > self._abs_tolerance and (magnitude / baseline) > self._rel_tolerance
+            )
+            worst = _worse(
+                worst,
+                CrossValidationOutcome.MATERIAL_DIVERGENCE
+                if material
+                else CrossValidationOutcome.MINOR_DIVERGENCE,
+            )
+            parts.append(
+                f"{severity.value}: {primary.scanner} found {len(mine)} "
+                f"({len(only_mine)} not seen by {secondary.scanner}), "
+                f"{secondary.scanner} found {len(theirs)} "
+                f"({len(only_theirs)} not seen by {primary.scanner})"
+                + _examples(only_mine | only_theirs)
+            )
+
+        return worst, "; ".join(parts)

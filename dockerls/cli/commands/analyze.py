@@ -15,6 +15,7 @@ from dockerls.application.services.remediation import (
     render_dockerfile_patch,
 )
 from dockerls.cli.dependencies import build_analyze_use_case
+from dockerls.cli.text import safe
 from dockerls.cli.vulnerability_view import (
     count_by_origin,
     npm_remediation_hint,
@@ -253,7 +254,7 @@ def _emit_machine_readable(result: ImageAnalysis, fmt: str, output: str) -> None
 
 
 def _render_table(result: ImageAnalysis, wide: bool) -> None:
-    console.print(f"\n[bold]Analysis: {result.image.full_reference}[/bold]\n")
+    console.print(f"\n[bold]Analysis: {safe(result.image.full_reference)}[/bold]\n")
 
     info = Table(show_header=False, box=None, padding=(0, 2))
     info.add_column("Key", style="bold")
@@ -306,15 +307,20 @@ def _render_table(result: ImageAnalysis, wide: bool) -> None:
             st = sev_styles.get(v.severity.value, "")
             status = "FIX AVAILABLE" if v.is_fixable else "NO FIX"
             status_style = "green" if v.is_fixable else "red"
+            # Every value below originates outside this process: the CVE id
+            # and versions come from an upstream advisory, the package name
+            # from inside the image being analysed. Rich would interpret
+            # bracket markup in any of them, so a crafted package name could
+            # style a CRITICAL row to look benign.
             vtable.add_row(
-                v.cve_id,
+                safe(v.cve_id),
                 f"[{st}]{v.severity.value}[/{st}]" if st else v.severity.value,
                 f"{v.cvss_score:.1f}",
-                v.cvss_source or "-",
-                v.package_name,
+                safe(v.cvss_source) if v.cvss_source else "-",
+                safe(v.package_name),
                 origin_label(v),
-                v.installed_version,
-                v.fixed_version or "-",
+                safe(v.installed_version),
+                safe(v.fixed_version) if v.fixed_version else "-",
                 f"[{status_style}]{status}[/{status_style}]",
             )
         _print_vulnerabilities(vtable, wide)

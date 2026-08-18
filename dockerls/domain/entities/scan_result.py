@@ -36,6 +36,11 @@ class ScanErrorKind(StrEnum):
     RATE_LIMITED = "RATE_LIMITED"
     INVALID_OUTPUT = "INVALID_OUTPUT"
     SCANNER_MISSING = "SCANNER_MISSING"
+    #: The reference named a host the network policy refuses to contact.
+    #: The scan never ran, so this is an absence of measurement like any
+    #: other error -- and it is *not* a scanner fault: a second tool would
+    #: pull from exactly the same refused host.
+    BLOCKED_BY_POLICY = "BLOCKED_BY_POLICY"
     UNKNOWN = "UNKNOWN"
 
     @property

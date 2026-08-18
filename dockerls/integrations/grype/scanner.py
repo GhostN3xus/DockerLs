@@ -12,22 +12,70 @@ from dockerls.domain.entities.scan_result import ScanErrorKind, ScanResult, Scan
 from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.scanner import ScannerInterface
 from dockerls.integrations.scan_errors import classify_scanner_error
+from dockerls.integrations.scan_target import blocked_scan_result, blocked_target_reason
 from dockerls.utils.executables import ExecutableNotFoundError, resolve_executable
-from dockerls.utils.subprocess_runner import run_capture
+from dockerls.utils.subprocess_runner import (
+    VERSION_TIMEOUT_SECONDS,
+    OutputTooLargeError,
+    run_capture,
+)
 from dockerls.utils.validation import sanitize_image_name
 
 if TYPE_CHECKING:
     from dockerls.infrastructure.evidence import EvidenceStore
+    from dockerls.infrastructure.network.host_guard import HostGuard
 
 
 class GrypeScanner(ScannerInterface):
-    def __init__(self, timeout: int = 300, evidence: EvidenceStore | None = None):
+    def __init__(
+        self,
+        timeout: int = 300,
+        evidence: EvidenceStore | None = None,
+        guard: HostGuard | None = None,
+    ):
         self._timeout = timeout
         self._evidence = evidence
+        self._version: str | None = None
         self._skip_db_update = False
+        # Grype pulls the image itself, so the reference has to clear the
+        # network policy here or it never clears it at all.
+        self._guard = guard
 
     async def is_available(self) -> bool:
         return shutil.which("grype") is not None
+
+    async def version(self) -> str:
+        """The scanner's own version string, memoised for the run.
+
+        Recorded so an analysis can be reconstructed: a score produced by
+        grype 0.48 and one produced by 0.58 are different measurements of
+        the same image, and until this existed nothing wrote down which one
+        happened. It is also what keeps a cached result from being served
+        across a scanner upgrade.
+
+        Returns "" when the binary is missing or does not answer -- an
+        unknown version, which the cache key treats as its own value rather
+        than as "same as before".
+        """
+        if self._version is not None:
+            return self._version
+        self._version = await self._read_version()
+        return self._version
+
+    async def _read_version(self) -> str:
+        try:
+            returncode, stdout, _ = await run_capture(
+                [resolve_executable("grype"), "--version"], timeout=VERSION_TIMEOUT_SECONDS
+            )
+        except (TimeoutError, OSError, ExecutableNotFoundError) as e:
+            logger.debug(f"Could not read grype version: {e}")
+            return ""
+        if returncode != 0 or not stdout:
+            return ""
+        # `<tool> --version` prints a banner; the first line carries the
+        # version and the rest is database metadata that changes on its own
+        # schedule and would churn the cache key for no reason.
+        return stdout.decode(errors="replace").strip().splitlines()[0].strip()
 
     def _scan_env(self) -> dict[str, str] | None:
         """Environment for a scan invocation.
@@ -67,6 +115,9 @@ class GrypeScanner(ScannerInterface):
 
     async def scan(self, image_reference: str) -> ScanResult:
         safe_ref = sanitize_image_name(image_reference)
+        blocked = blocked_target_reason(safe_ref, self._guard)
+        if blocked:
+            return blocked_scan_result(safe_ref, "grype", blocked)
         logger.info(f"Scanning {safe_ref} with Grype")
         timestamp = datetime.now(tz=UTC).isoformat()
 
@@ -106,6 +157,19 @@ class GrypeScanner(ScannerInterface):
                 result.evidence_path = await self._evidence.record_scan(safe_ref, "grype", raw)
             return result
 
+        except OutputTooLargeError as e:
+            # Unbounded output is not a measurement: the document was never
+            # read in full, so there is nothing to parse and nothing to
+            # conclude. INVALID_OUTPUT is already a non-verified state.
+            logger.error(f"Grype output exceeded the size limit for {safe_ref}: {e}")
+            return ScanResult(
+                image_reference=safe_ref,
+                scanner="grype",
+                scan_timestamp=timestamp,
+                status=ScanStatus.ERROR,
+                error_message=str(e),
+                error_kind=ScanErrorKind.INVALID_OUTPUT,
+            )
         except TimeoutError:
             logger.error(f"Grype scan timed out for {safe_ref}")
             return ScanResult(

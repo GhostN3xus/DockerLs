@@ -8,6 +8,7 @@ import httpx
 from loguru import logger
 
 from dockerls.domain.interfaces.eol_checker import EOLCheckerInterface
+from dockerls.domain.value_objects.tristate import Tristate
 from dockerls.utils.retry import (
     DEFAULT_BACKOFF_BASE,
     DEFAULT_MAX_ATTEMPTS,
@@ -154,22 +155,56 @@ class EndOfLifeChecker(EOLCheckerInterface):
         return best
 
     async def is_eol(self, product: str, version: str) -> bool:
+        """Whether this release is past its end-of-life date.
+
+        Kept as the boolean the interface has always published. It answers
+        `False` for "supported" *and* for "nobody could tell", which is why
+        `eol_status` exists -- callers that can represent the difference
+        should ask that instead.
+        """
+        return (await self.eol_status(product, version)).is_true
+
+    async def eol_status(self, product: str, version: str) -> Tristate:
+        """Three-valued end-of-life: TRUE, FALSE, or UNKNOWN.
+
+        Every path that previously answered `False` had one of two very
+        different meanings behind it, and collapsing them meant an image
+        whose lifecycle nobody could look up was scored, and gated, exactly
+        like one confirmed to be inside its support window:
+
+        * no version could be extracted from the tag -- UNKNOWN;
+        * the product is not in the catalogue (404) -- UNKNOWN;
+        * the catalogue could not be reached -- UNKNOWN;
+        * no cycle matches this version -- UNKNOWN;
+        * the cycle exists and carries a date or a boolean -- TRUE/FALSE,
+          the only two answers actually supported by evidence.
+        """
         if not version:
-            return False
+            return Tristate.UNKNOWN
         cycles = await self._fetch_product(product)
+        if not cycles:
+            # Empty covers "unknown product" and "request failed" alike;
+            # neither is a statement that the release is supported.
+            return Tristate.UNKNOWN
         cycle = self._find_cycle(cycles, version)
         if cycle is None:
-            return False
+            return Tristate.UNKNOWN
+
         eol = cycle.get("eol")
         if isinstance(eol, bool):
-            return eol
+            return Tristate.of(eol)
         if isinstance(eol, str):
             try:
                 eol_date = datetime.strptime(eol, "%Y-%m-%d").replace(tzinfo=UTC)
-                return datetime.now(tz=UTC) > eol_date
             except ValueError:
-                return False
-        return False
+                # A date the catalogue publishes but we cannot parse is a
+                # gap in our reading of it, not a supported release.
+                logger.debug(f"Unparseable EOL date for {product} {version}: {eol!r}")
+                return Tristate.UNKNOWN
+            return Tristate.of(datetime.now(tz=UTC) > eol_date)
+        # `eol: false` arrives as a bool; anything else (null, missing) means
+        # the catalogue has not set a date yet.
+        return Tristate.UNKNOWN
 
     async def is_lts(self, product: str, version: str) -> bool:
         if not version:

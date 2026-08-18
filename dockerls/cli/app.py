@@ -9,6 +9,7 @@ from dockerls.cli.commands.analyze_dockerfile import analyze as analyze_dockerfi
 from dockerls.cli.commands.build import build
 from dockerls.cli.commands.cache_cmd import cache_app
 from dockerls.cli.commands.compare import compare
+from dockerls.cli.commands.controls import controls
 from dockerls.cli.commands.doctor import doctor
 from dockerls.cli.commands.export import export
 from dockerls.cli.commands.health import health
@@ -43,6 +44,7 @@ app.command(name="analyze")(analyze_image)
 app.command(name="analyze-dockerfile")(analyze_dockerfile_cmd)
 app.command()(build)
 app.command()(compare)
+app.command()(controls)
 app.command()(export)
 app.command()(login)
 app.command()(logout)

@@ -256,3 +256,216 @@ o erro é sedutor: um limite de aliases *parece* proteger e não protege.
 **Consequência registrada.** O teste afirma o tempo de recusa, não só a
 exceção. Um guard que recusa depois de expandir executou o ataque em vez de
 impedi-lo, e só o tempo distingue os dois casos.
+
+---
+
+## D-012 — `ProductionReadiness` é uma política central, não uma propriedade do tier
+
+**Ambiguidade.** `production_ready` já existia como propriedade de
+`SecurityTier`, e a regra parecia completa: tier A/B e não-EOL.
+
+**Decisão.** Criar `domain/value_objects/production_readiness.py` como
+**única** fonte do veredito, consumindo tier, confidence, verificação do
+scan, EOL tri-state, contagens e divergência material. `ImageAnalysis.
+production_ready` passa a ser escrito só por ela, e o default do campo virou
+`False`.
+
+**Motivo.** O tier enxerga o score e nada mais. Ele não sabe se o scan
+terminou — então um scan `PARTIAL` sem achados nos alvos que conseguiu ler
+produzia score alto, tier A e `production_ready = True`, na mesma análise que
+reportava `confidence = UNVERIFIED`. Uma análise que afirma as duas coisas é
+pior que uma que não afirma nenhuma, e o campo contraditório é justamente o
+que um portão de CI lê.
+
+**Consequência registrada.** O default `False` é deliberado: uma análise que
+nunca passou pela política não é "pronta por omissão". `SecurityTier.
+production_ready` continua existindo como a regra de nível de tier que a
+política consome, com um docstring dizendo, com todas as letras, que não é o
+veredito.
+
+---
+
+## D-013 — Confiança mínima para produção é MEDIUM, não HIGH
+
+**Ambiguidade.** Se `HIGH` exige validação cruzada, exigir `HIGH` para
+produção parece a leitura mais segura.
+
+**Decisão.** O piso é `MEDIUM`.
+
+**Motivo.** `HIGH` requer um segundo scanner. Exigir isso transformaria o
+veredito numa afirmação sobre o *toolchain do operador* em vez de sobre a
+imagem: numa máquina com só o Trivy instalado, nenhuma imagem do mundo seria
+production ready, e o campo perderia sentido. `MEDIUM` já exige scan
+concluído, sem divergência material e com referência fixada ou confirmada —
+que é evidência suficiente para uma decisão, com as lacunas nomeadas ao lado.
+
+---
+
+## D-014 — Ausência de dado nunca vira dado favorável (EOL, KEV, EPSS)
+
+**Ambiguidade.** As três integrações externas degradavam "para não quebrar o
+scan" — `is_eol` devolvia `False`, o KEV devolvia conjunto vazio, o EPSS
+devolvia dicionário vazio.
+
+**Decisão.** Cada uma passa a distinguir *consultado* de *não consultado*:
+`eol_status` tri-state, `kev_status` tri-state, `epss_known`.
+
+**Motivo.** Degradar para "sem sinal" é correto para o *fluxo*; o erro estava
+em traduzir "sem sinal" como "sem risco". O caso mais grave era o KEV: com o
+catálogo fora do ar, todo CVE ficava `exploit_known=False` e o relatório
+imprimia, afirmativamente, `no known-exploited (CISA KEV) vulnerabilities` —
+a frase mais forte que a ferramenta produz sobre exploração real, emitida
+exatamente quando nada foi consultado.
+
+**Consequência registrada.** A frase afirmativa agora nomeia quantos achados
+foram de fato checados. `UNKNOWN` não penaliza o score (não há evidência de
+risco) e também não credita (não há evidência de segurança): aparece nos
+trade-offs e limita a confiança.
+
+---
+
+## D-015 — Política de rede: bloquear loopback e link-local, permitir RFC1918
+
+**Ambiguidade.** Uma referência de imagem carrega um hostname e é entrada do
+usuário. Bloquear tudo que é privado fecha o SSRF; também quebra todo
+registry interno, que é infraestrutura legítima e comum.
+
+**Decisão.** Padrão: **loopback e link-local bloqueados**, **RFC1918
+permitido**. Ambos configuráveis, com allowlist de hosts vencendo os dois.
+A decisão é tomada por **resolução**, não por grafia, e *todos* os endereços
+que um nome resolve precisam passar.
+
+**Motivo.** `169.254.0.0/16` é onde os provedores servem credencial de
+instância — não existe registry legítimo ali, e é o alvo real. Loopback é o
+caminho para serviços do próprio runner. Já `10.x`/`192.168.x` é onde os
+registries internos de verdade moram, e uma ferramenta que não consegue olhar
+para `registry.internal:5000` não é usável. Julgar por resolução fecha o
+caso em que um nome inócuo aponta para 127.0.0.1 — e exigir que *todos* os
+endereços passem fecha o rebinding, em que uma resposta pública e uma
+loopback chegam juntas.
+
+**Consequência registrada.** A regra vive no domínio e a resolução DNS na
+infraestrutura, porque o guarda de arquitetura proíbe `socket` em `domain/` —
+e ele está certo: essa separação é o que permite testar a política inteira
+contra literais de endereço, sem rede.
+
+---
+
+## D-016 — Cross-validation compara identidade de achado, não contagem
+
+**Ambiguidade.** A comparação por contagem de CRITICAL/HIGH já existia e
+funcionava para o caso óbvio (0 vs 5).
+
+**Decisão.** Comparar conjuntos de `CVE|pacote` por faixa de severidade, e
+classificar o desfecho em `AGREEMENT` / `MINOR_DIVERGENCE` /
+`MATERIAL_DIVERGENCE` / `NO_SECOND_SCANNER`.
+
+**Motivo.** Contagem aceitava um caso que não deveria: dois scanners
+reportando **um** CRITICAL cada, para CVEs completamente diferentes,
+concordavam perfeitamente na aritmética enquanto descreviam imagens
+diferentes. A versão está no `AUDIT.md` (F12) e o caso vira teste.
+
+**Consequência registrada.** Divergência *menor* passou a existir como
+categoria própria: duas bases de vulnerabilidade legitimamente diferem nas
+margens, e chamar isso de "disputado" faria toda imagem parecer contestada.
+Ela não refuta o resultado — só impede que a confiança chegue a `HIGH`.
+`scan_divergence`, que a tabela e os exporters já liam, continua reservado ao
+caso material.
+
+---
+
+## D-017 — O que é evidência é redigido, não só o que é log
+
+**Ambiguidade.** O mascaramento de segredos já existia e era bom; morava
+dentro do sink de log.
+
+**Decisão.** Extrair para `infrastructure/redaction.py` e aplicar também aos
+artefatos brutos de scan e ao manifesto.
+
+**Motivo.** O log é o arquivo que ninguém abre; a evidência é o arquivo que
+as pessoas anexam a ticket e colam em chat. Um scanner que falha um pull
+autenticado ecoa a requisição que tentou, cabeçalhos inclusos — e isso ia
+para o disco sem passar por padrão nenhum. Um redator, duas portas.
+
+**Consequência registrada.** A redação não pode destruir diagnóstico: há
+teste afirmando que CVE, pacote, versão instalada e versão corrigida
+sobrevivem intactos.
+
+---
+
+## D-018 — Toda regra cita o controle publicado, ou admite que não tem um
+
+**Ambiguidade.** `analyze-dockerfile` sempre respondeu com um código: `DF002
+falhou`. Esse código não significa nada fora deste repositório. Quem recebe o
+achado não tem como saber se a regra é um requisito publicado ou a preferência
+de um mantenedor, e um auditor que precisa mapear achados para um framework de
+conformidade faz isso à mão, a partir do texto da mensagem.
+
+**Decisão.** Um catálogo em `domain/security_controls.py` liga cada regra
+DF001–DF012 aos controles que ela implementa (CIS Docker Benchmark, NIST SP
+800-190, OWASP Docker Security Cheat Sheet, documentação da Docker,
+especificação OCI), com uma justificativa em nossas próprias palavras num campo
+separado. As citações aparecem no terminal e no JSON, e o comando `dockerls
+controls` expõe o catálogo inteiro.
+
+**Motivo.** Um achado que cita *CIS Docker Benchmark 4.1* pode ser discutido,
+escalado, dispensado com justificativa e mapeado para um programa de auditoria.
+Um achado que cita `DF002` só pode ser obedecido ou ignorado. A diferença é
+quem carrega o ônus da prova.
+
+**Consequência registrada — a citação é conferida, não lembrada.** Todo
+identificador e todo título foi verificado na fonte primária. Isso não foi
+cerimônia: **três das quatro citações rascunhadas de memória estavam erradas**.
+`NIST SP 800-190 4.4.2` é *Unbounded network access from containers*, não
+"least privilege"; `OWASP RULE #8` é *Set filesystem and volumes to read-only*,
+não "minimal base images". Uma ferramenta que se recusa a reportar uma contagem
+de vulnerabilidades que não mediu não pode citar um controle que não conferiu —
+é o mesmo princípio, aplicado à outra metade do relatório.
+
+**Consequência registrada — o título é citado, não parafraseado.** `Control.title`
+guarda a redação da fonte. Parafrasear tornaria a citação impossível de
+localizar, o que anula a razão de existir dela. Por isso `rationale` mora num
+campo separado: o controle diz *o quê*, nós dizemos *por quê*, e a separação é
+o que impede que a paráfrase seja lida como citação.
+
+**Consequência registrada — ausência de controle é declarada.** Onde nenhum
+controle publicado cobre a regra, `controls_for` devolve tupla vazia e os
+renderizadores dizem que a orientação é do próprio DockerLs. Inventar um número
+plausível seria pior que não ter nenhum: é o tipo de erro que sobrevive à
+revisão, porque parece exatamente com o acerto. Um teste garante que toda regra
+emitida pelo validador está catalogada e que nenhuma regra catalogada é órfã,
+de modo que a divergência aparece como falha e não como citação faltando em
+silêncio.
+
+---
+
+## D-019 — A política de rede vale para toda conexão, não só para as nossas
+
+**Ambiguidade.** `NetworkPolicy` foi escrita pensando nas requisições que este
+processo faz com `httpx`. Mas `trivy image X` também é uma conexão que este
+processo causa — só que aberta por um filho.
+
+**Decisão.** Verificar o alvo contra o `HostGuard` antes de invocar o binário,
+nos dois scanners, e recusar com `ERROR` / `BLOCKED_BY_POLICY`.
+
+**Motivo.** A pergunta que a política responde não é "quem abriu o socket", é
+"para onde uma referência não confiável consegue apontar esta máquina". Pelo
+critério errado, a defesa cobria a porta que era fácil de ver.
+
+**Consequência registrada — a recusa é ausência de medição, não medição limpa.**
+Zero vulnerabilidades com status `ERROR` é o mesmo estado que um scan que deu
+timeout, e o pipeline inteiro já trata não-medido como não-verificado. Um teste
+fixa isso explicitamente, porque a alternativa (devolver `SUCCESS` com lista
+vazia) seria a exata substituição que este projeto recusa em todo lugar.
+
+**Consequência registrada — `BLOCKED_BY_POLICY` não é culpa do scanner.** O
+`FallbackScanner` tenta a segunda ferramenta quando a primeira falha por
+motivo próprio. Um host recusado não é isso: o grype puxaria do mesmo lugar.
+Marcar como falha de scanner gastaria o dobro do tempo para chegar à mesma
+recusa.
+
+**Consequência registrada — uma única definição de "host de registry".** A
+regra estava em duas cópias e as duas erravam em `localhost`. Agora
+`DockerImage.registry_host` delega para o domínio. Duas cópias de uma regra de
+segurança não divergem em teoria — elas divergem exatamente no caso que
+importa.

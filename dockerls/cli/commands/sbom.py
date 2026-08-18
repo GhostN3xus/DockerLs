@@ -6,6 +6,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from dockerls.cli.dependencies import build_host_guard
 from dockerls.exit_codes import EXIT_ERROR
 from dockerls.integrations.trivy.scanner import TrivyScanner
 
@@ -37,7 +38,7 @@ def sbom(
 
 
 async def _sbom(image: str, fmt: str, output: str) -> None:
-    scanner = TrivyScanner()
+    scanner = TrivyScanner(guard=build_host_guard())
     if not await scanner.is_available():
         console.print("[red]Trivy is required for SBOM generation. Run `dockerls doctor`.[/red]")
         raise typer.Exit(EXIT_ERROR)

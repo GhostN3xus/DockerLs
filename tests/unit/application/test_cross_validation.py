@@ -164,7 +164,14 @@ class TestConcurrentAnnotationIsCorrect:
         await CrossValidator(scanner, workers=5).validate(items)
 
         for a in items:
-            assert "HIGH trivy=0 vs grype=10" in a.scan_divergence
+            # Asserted by substance rather than by wording: the message
+            # names both scanners, what each found, and which findings are
+            # disputed. Pinning the exact sentence would break every time
+            # the explanation improves.
+            assert "HIGH" in a.scan_divergence
+            assert "trivy" in a.scan_divergence and "grype" in a.scan_divergence
+            assert "10" in a.scan_divergence
+            assert a.cross_validation == "MATERIAL_DIVERGENCE"
 
     @pytest.mark.asyncio
     async def test_one_failed_validation_does_not_block_the_others(self):

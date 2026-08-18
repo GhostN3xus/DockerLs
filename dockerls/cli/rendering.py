@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 from rich.panel import Panel
 from rich.table import Table
 
+from dockerls.domain.entities.dockerfile_analysis import ValidationStatus
+
 if TYPE_CHECKING:
     from rich.console import Console
 
@@ -102,6 +104,46 @@ def _render_checks(console: Console, validation: DockerfileValidationResult) -> 
         )
 
     console.print(table)
+    console.print()
+    _render_controls(console, validation)
+
+
+def _render_controls(console: Console, validation: DockerfileValidationResult) -> None:
+    """Cite the published control behind each finding that failed.
+
+    Only failures and warnings: a passing check needs no justification, and
+    printing a citation for all twelve rules would bury the two the reader
+    has to act on.
+
+    A rule with no published control says so. Leaving the line out would
+    read as "citation omitted", and the difference between "this is CIS 4.1"
+    and "this is our opinion" is exactly what the reader is entitled to.
+    """
+    actionable = [
+        check
+        for check in validation.checks
+        if check.status in (ValidationStatus.FAIL, ValidationStatus.WARN) and check.rule_id
+    ]
+    if not actionable:
+        return
+
+    console.print("[bold]Controles de referência[/bold]")
+    seen: set[str] = set()
+    for check in actionable:
+        rule_id = check.rule_id or ""
+        if rule_id in seen:
+            continue
+        seen.add(rule_id)
+        console.print(f"  [cyan]{rule_id}[/cyan]  {check.check}")
+        if check.rationale:
+            console.print(f"    [dim]{check.rationale}[/dim]")
+        for reference in check.references:
+            console.print(f"    [green]->[/green] {reference}")
+        if not check.references:
+            console.print(
+                "    [dim]-> orientação do próprio DockerLs; nenhum controle publicado "
+                "no catálogo cobre esta regra[/dim]"
+            )
     console.print()
 
 

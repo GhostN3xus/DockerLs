@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
     from dockerls.domain.interfaces.scanner import ScannerInterface
     from dockerls.infrastructure.evidence import EvidenceStore
+    from dockerls.infrastructure.network.host_guard import HostGuard
 
 
 class ScannerFactory:
@@ -22,6 +23,7 @@ class ScannerFactory:
         workers: int = 1,
         cache_dir: Path | None = None,
         evidence: EvidenceStore | None = None,
+        guard: HostGuard | None = None,
     ) -> ScannerInterface:
         """Build the scanner the pipeline will use.
 
@@ -36,8 +38,9 @@ class ScannerFactory:
             workers=workers,
             cache_dir=cache_dir,
             evidence=evidence,
+            guard=guard,
         )
-        grype = GrypeScanner(timeout=timeout, evidence=evidence)
+        grype = GrypeScanner(timeout=timeout, evidence=evidence, guard=guard)
         has_trivy = await trivy.is_available()
         has_grype = await grype.is_available()
 
@@ -59,6 +62,7 @@ class ScannerFactory:
         primary: ScannerInterface,
         timeout: int = 300,
         evidence: EvidenceStore | None = None,
+        guard: HostGuard | None = None,
     ) -> ScannerInterface | None:
         """Return an *independent* scanner for cross-validation.
 
@@ -73,10 +77,10 @@ class ScannerFactory:
             primary = primary.primary
 
         if isinstance(primary, GrypeScanner):
-            trivy = TrivyScanner(timeout=timeout, evidence=evidence)
+            trivy = TrivyScanner(timeout=timeout, evidence=evidence, guard=guard)
             return trivy if await trivy.is_available() else None
 
-        grype = GrypeScanner(timeout=timeout, evidence=evidence)
+        grype = GrypeScanner(timeout=timeout, evidence=evidence, guard=guard)
         if await grype.is_available():
             return grype
         logger.info("Grype not installed; cross-validation disabled")

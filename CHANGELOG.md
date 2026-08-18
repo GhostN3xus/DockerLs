@@ -5,7 +5,201 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
-## [Não lançado]
+## [1.3.1] -- 2026-08-18
+
+### Corrigido — segurança
+
+- **O pull do próprio scanner agora passa pela política de rede** *(alta)*. A
+  política de SSRF guardava o inspector de registry, que é *uma* das portas:
+  `trivy image X` e `grype X` abrem o próprio socket e puxam a imagem
+  sozinhos. Uma referência como `169.254.169.254/latest:v1` — sintaticamente
+  válida e chegando de uma variável de CI, de um arquivo de config ou de um
+  pull request — mirava a conexão do scanner no endpoint de metadados da nuvem
+  enquanto a porta guardada continuava fechada. A verificação agora acontece
+  **antes** do binário ser invocado, e a recusa é um `ScanResult` com status
+  `ERROR` e `error_kind=BLOCKED_BY_POLICY` — nunca uma lista de achados vazia,
+  que seria indistinguível de uma imagem limpa.
+- **`localhost/evil` era lido como um usuário do Docker Hub.** A regra "o
+  primeiro componente é um host de registry" testava só ponto-ou-dois-pontos,
+  e `localhost` não tem nenhum dos dois — justamente o host interessante para
+  quem ataca. A regra passa a viver num único lugar
+  (`domain/value_objects/image_reference.py`), com `localhost` explícito, e
+  `DockerImage.registry_host` delega para ela: duas cópias de "o que conta
+  como host" é como um caso acaba guardado num lugar e não no outro.
+
+`BLOCKED_BY_POLICY` é deliberadamente **não** `is_scanner_fault`: um segundo
+scanner puxaria do mesmo host recusado, então o fallback só gastaria o dobro do
+tempo para chegar à mesma recusa. Docker Hub nunca é julgado e registries
+internos em RFC1918 continuam escaneáveis — nada de legítimo foi fechado.
+
+## [1.3.0] -- 2026-08-18
+
+### Adicionado
+
+- **Referências documentais nas regras do `analyze-dockerfile`.** Cada achado
+  passa a citar o controle publicado que a regra implementa — CIS Docker
+  Benchmark, NIST SP 800-190, OWASP Docker Security Cheat Sheet, documentação
+  da Docker e especificação OCI — em vez de apenas um código opaco. O motivo é
+  prático: `DF002` não significa nada fora deste repositório, então quem
+  recebia o achado só podia obedecer ou ignorar. Um achado que cita *CIS Docker
+  Benchmark 4.1* pode ser discutido, escalado, dispensado com justificativa e
+  mapeado para um programa de auditoria. As citações aparecem no terminal
+  (abaixo da tabela, só para `FAIL` e `WARN`) e nos campos `references` e
+  `rationale` do `--format json`.
+- **Comando `dockerls controls`.** Lista o catálogo inteiro sem exigir que
+  alguém produza antes um Dockerfile que falhe, e explica uma regra específica
+  com `dockerls controls DF002`. Também tem `--format json`, e falha com exit
+  code `1` numa regra desconhecida em vez de responder uma lista vazia.
+
+### Notas sobre a exatidão das citações
+
+Todo identificador e todo título foi conferido na fonte primária, não
+recuperado de memória: a seção 4 do CIS Docker Benchmark contra a
+implementação da própria Docker (`docker/docker-bench-security`,
+`tests/4_container_images.sh`), o OWASP Docker Security Cheat Sheet contra a
+página publicada, e o NIST SP 800-190 contra o sumário da publicação oficial.
+A conferência mudou o conteúdo: **três das quatro citações rascunhadas de
+memória estavam erradas** — `NIST SP 800-190 4.4.2` é *Unbounded network access
+from containers*, não "least privilege", e `OWASP RULE #8` é *Set filesystem
+and volumes to read-only*, não "minimal base images". Uma citação errada é pior
+que nenhuma, porque um leitor que confere e encontra outro assunto passa a
+duvidar do relatório inteiro.
+
+Onde nenhum controle publicado cobre a regra, isso é dito explicitamente em vez
+de esticado: `controls_for` devolve tupla vazia e os renderizadores dizem que a
+orientação é do próprio DockerLs. Inventar um número plausível seria pior que
+não ter nenhum, porque é o tipo de erro que sobrevive à revisão.
+
+## [1.2.0] -- 2026-08-18
+
+Release de correções. Reúne duas auditorias -- uma de evidência, outra de
+desempenho -- e o motor multi-source construído sobre elas. O relatório
+completo de cada achado, com severidade e caminho de código, está em
+`AUDIT.md`.
+
+### Desempenho — auditoria de CPU e memória (relatório em `AUDIT.md`)
+
+Segunda auditoria, dirigida a consumo de recursos. Tudo foi medido antes de
+ser alterado, e o perfil do pipeline inteiro mostrou que ele não é limitado
+por CPU — os dois custos reais estavam fora dele.
+
+- **`redact()` levava 19 segundos por imagem escaneada** *(crítico)*. O padrão
+  de chave começava com `[\w.-]*`, então numa descrição de CVE com centenas
+  de caracteres de texto corrido o motor de regex tentava cada divisão
+  possível em cada posição — backtracking catastrófico. Numa execução de 100
+  tags isso é meia hora de CPU só mascarando. A correção inverte a ordem: a
+  alternância literal vem primeiro, o motor varre atrás da palavra-chave e só
+  então expande para os lados. **19 445 ms → 245 ms (79x)**, com a saída
+  idêntica caractere por caractere e teste de equivalência sobre doze
+  formatos.
+- **A contagem de workers ignorava a máquina.** Cada worker segura um
+  *processo de scanner*, não uma corrotina: o Trivy carrega uma base de
+  centenas de MB e consome um núcleo inteiro. Dez deles num runner de dois
+  núcleos terminam mais devagar, despejam o page cache e podem levar o job a
+  ser morto por falta de memória. Pior: esta ferramenta analisa containers e
+  costuma rodar dentro de um, onde `os.cpu_count()` reporta os núcleos do
+  *host* enquanto o cgroup permite uma fração de um núcleo. `workers` passa a
+  ter padrão `0` = "dimensione para esta máquina", derivado da cota de cgroup
+  (v2 e v1), da máscara de afinidade e da memória disponível.
+  `cross_validate_workers` segue a mesma regra e é limitado pelo pool
+  primário. Valor explícito continua sendo honrado, com aviso quando excede o
+  que a máquina comporta.
+
+### Alterado
+
+- **`--workers 0` passou a significar "dimensione para esta máquina"** em vez
+  de ser recusado. O deadlock que a recusa protegia (um zero chegando a um
+  `asyncio.Semaphore`) é hoje impossível por construção: o resolvedor nunca
+  devolve zero e o caso de uso continua validando o argumento. Valores
+  negativos ou acima de 50 seguem recusados.
+- Novo `benchmarks/bench_resources.py`, que fixa o orçamento de redação, o
+  dimensionamento de workers e a memória de uma execução — as três medidas
+  cujas regressões são invisíveis num teste funcional, porque a saída não
+  muda, só o custo.
+
+### Corrigido — auditoria de evidência (relatório completo em `AUDIT.md`)
+
+Uma auditoria dirigida ao princípio "uma imagem que não pôde ser medida nunca
+é apresentada como segura" encontrou treze pontos onde a ferramenta o
+violava. Quatro eram reproduzíveis contra o pacote instalado.
+
+- **`production_ready` ignorava a confiança** *(crítico)*. `SecurityTier`
+  decide com o score e nada mais, então um scan `PARTIAL` sem achados nos
+  alvos que conseguiu ler produzia tier A e `production_ready = True` — na
+  **mesma análise** que reportava `confidence = UNVERIFIED`. Agora existe uma
+  política central (`ProductionReadiness`) que é a única escritora do campo,
+  consumindo tier, confiança, verificação do scan, EOL, contagens e
+  divergência; o default do campo passou a ser `False`, para que uma análise
+  que nunca chegou à política não seja "pronta por omissão".
+- **EOL desconhecido virava "não EOL"**. Todo caminho de falha do
+  `EndOfLifeChecker` — produto fora do catálogo, rede indisponível, versão
+  não extraída — devolvia `False`, e o score tratava isso como confirmação de
+  que a release estava dentro do suporte. Agora `eol_status` é tri-state:
+  `UNKNOWN` não penaliza, não credita, aparece nos trade-offs e limita a
+  confiança.
+- **Feed de threat intel fora do ar virava "não explorado"**. Com o catálogo
+  CISA KEV inacessível, todo CVE ficava `exploit_known=False` e o relatório
+  imprimia, afirmativamente, `no known-exploited (CISA KEV) vulnerabilities`.
+  A frase mais forte que esta ferramenta produz sobre exploração real era
+  emitida exatamente quando nada havia sido consultado. `kev_status` passa a
+  ser tri-state, `epss_known`/`epss_percentile` acompanham o EPSS, e a
+  afirmação só sai nomeando quantos achados foram de fato checados.
+- **SSRF por referência de imagem** *(demonstrado)*. `dockerls analyze
+  169.254.169.254/latest` é uma referência bem formada, e resolvê-la
+  significava requisitar o endpoint de metadados da nuvem — num runner de CI,
+  a partir de um nome que veio de um PR ou de uma variável de ambiente.
+  Agora há `NetworkPolicy` (regra, no domínio) e `HostGuard` (resolução, na
+  infraestrutura): loopback e link-local bloqueados por padrão, RFC1918
+  permitido porque registry interno é caso legítimo, allowlist explícita
+  vencendo os dois, e decisão por **resolução** — todos os endereços de um
+  nome precisam passar, o que fecha também o rebinding.
+- **Injeção de markup no terminal** *(demonstrado)*. Descrições de CVE, nomes
+  de pacote e stderr de scanner iam para o Rich sem escape, e
+  `[red]FIXED - no action needed[/red]` era *interpretado*: quem controla um
+  advisory upstream ou os metadados de um pacote controlava a formatação do
+  relatório. `cli/text.safe()` escapa toda interpolação de terceiros.
+- **Saída de scanner sem teto**. `communicate()` acumulava stdout inteiro em
+  memória. Passa a haver limite por fluxo (256 MiB); o excesso é classificado
+  como `INVALID_OUTPUT`, que já é um estado não verificado. Junto veio um
+  vazamento de recurso: um processo morto por timeout deixava o transporte
+  para o coletor de lixo, e o `__del__` rodava depois do event loop fechar.
+- **Evidência bruta gravada sem redação**. O mascaramento existia só no sink
+  de log — a porta que ninguém usa. Extraído para `infrastructure/redaction.py`
+  e aplicado também aos artefatos de scan e ao manifesto, com teste afirmando
+  que CVE, pacote e versões sobrevivem intactos.
+- **Cache reusava medição incompatível**. A chave não incluía qual scanner
+  produziu os números nem em que versão, então uma troca de Trivy para Grype,
+  ou um upgrade de scanner, continuava servindo o resultado antigo dentro do
+  TTL. A identidade do scanner entra no fingerprint, e `CACHE_SCHEMA_VERSION`
+  foi para `v4`.
+- **EPSS era binário**. `epss_score >= 0.5` fazia 0.97 e 0.51 custarem o
+  mesmo e 0.49 custar zero. O degrau foi preservado (é o que o operador
+  entende) e ganhou um termo contínuo por cima, com teto abaixo de um único
+  HIGH. Há teste de monotonicidade.
+- **Cross-validation comparava contagens**. Dois scanners reportando um
+  CRITICAL cada, para CVEs diferentes, "concordavam". A comparação passa a
+  ser por identidade (`CVE|pacote`) e o desfecho é classificado em
+  `AGREEMENT` / `MINOR_DIVERGENCE` / `MATERIAL_DIVERGENCE` /
+  `NO_SECOND_SCANNER`. Divergência menor não disputa o score, mas impede
+  `HIGH`.
+
+### Adicionado
+
+- **Proveniência da execução**: versão do DockerLs, identidade do scanner
+  (nome e versão, lidas do próprio binário), timestamp e fingerprint da
+  análise no manifesto de evidência — uma análise que ninguém consegue
+  reconstruir é uma afirmação, não evidência.
+- **Veredito explícito na CLI**: nível de confiança, o que foi verificado (ou
+  o que falta), e se a imagem pode ir a produção com os bloqueios nomeados.
+  A saída passou a tornar impossível ler uma coluna de achados vazia como
+  "limpa".
+- **Novos campos nos exporters**, todos aditivos: `production_ready`,
+  `readiness_blockers` (códigos estáveis), `eol_status`, `cross_validation`.
+- **87 testes novos**: invariantes de propriedade (falha nunca vira
+  segurança, `UNKNOWN` nunca vira `FALSE`, hardening nunca compensa
+  CRITICAL, EOL confirmado nunca é production ready, EPSS monotônico) e
+  adversariais (SSRF, rebinding, injeção de markup, saída ilimitada,
+  vazamento de credencial na evidência).
 
 ### Adicionado — motor de decisão multi-source
 

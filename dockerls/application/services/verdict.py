@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from dockerls.application.services.cross_validation import CrossValidationOutcome
 from dockerls.domain.value_objects.attack_surface import AttackSurfaceScore
 from dockerls.domain.value_objects.confidence import (
     Confidence,
@@ -31,6 +32,11 @@ from dockerls.domain.value_objects.confidence import (
     confidence_rank,
 )
 from dockerls.domain.value_objects.hardening import HardeningScore
+from dockerls.domain.value_objects.production_readiness import (
+    ProductionReadiness,
+    ReadinessInputs,
+)
+from dockerls.domain.value_objects.security_tier import Tier
 from dockerls.domain.value_objects.tristate import Tristate
 
 if TYPE_CHECKING:
@@ -83,6 +89,9 @@ def finalize_verdict(analysis: ImageAnalysis, *, cross_validated: bool) -> None:
             scan_verified=analysis.scan.is_verified,
             cross_validated=cross_validated,
             scanners_disagree=bool(analysis.scan_divergence),
+            scanners_differ_slightly=(
+                analysis.cross_validation == CrossValidationOutcome.MINOR_DIVERGENCE.value
+            ),
             digest_resolved=analysis.image.digest_known,
             registry_verified=analysis.hub_tag_verified,
             hardening_coverage=analysis.hardening.coverage,
@@ -90,6 +99,31 @@ def finalize_verdict(analysis: ImageAnalysis, *, cross_validated: bool) -> None:
     )
     analysis.confidence = assessment.level
     analysis.confidence_reasons = assessment.reasons
+
+    # Production readiness is decided here, not by the tier, and not before
+    # the evidence is in. `SecurityTier.production_ready` can only see the
+    # score, so a PARTIAL scan with no findings in the targets it managed to
+    # read produced tier A and "production ready" on the same analysis that
+    # reported UNVERIFIED. The policy below is the only thing that writes
+    # this field.
+    readiness = ProductionReadiness.evaluate(
+        ReadinessInputs(
+            tier=Tier(analysis.tier),
+            confidence=analysis.confidence,
+            scan_verified=analysis.scan.is_verified,
+            eol=analysis.eol_status,
+            critical_count=analysis.scan.critical_count,
+            high_count=analysis.scan.high_count,
+            unfixable_critical_count=(
+                analysis.scan.critical_count - analysis.scan.fixable_critical_count
+            ),
+            has_material_divergence=bool(analysis.scan_divergence),
+        )
+    )
+    analysis.production_ready = readiness.is_ready
+    analysis.readiness_blockers = readiness.codes
+    analysis.readiness_reasons = readiness.reasons
+
     analysis.why = _why(analysis)
     analysis.trade_offs = _trade_offs(analysis)
 
@@ -143,12 +177,21 @@ def _why(analysis: ImageAnalysis) -> list[str]:
         reasons.append("no CRITICAL vulnerabilities")
     if scan.high_count == 0:
         reasons.append("no HIGH vulnerabilities")
+    # "No known-exploited vulnerabilities" is the strongest claim this tool
+    # makes about real-world exploitation, and it may only be made when the
+    # KEV catalogue actually answered. With the feed unreachable every CVE
+    # comes back `exploit_known=False`, and stating the claim on that basis
+    # would be reporting a failed lookup as a security property.
     exploited = sum(1 for v in scan.vulnerabilities if v.exploit_known)
-    if exploited == 0 and scan.total_count:
-        reasons.append("no known-exploited (CISA KEV) vulnerabilities")
-    elif exploited:
+    checked = [v for v in scan.vulnerabilities if v.kev_status.is_known]
+    if exploited:
         reasons.append(f"{exploited} known-exploited vulnerability(ies) present")
-    if not analysis.is_eol:
+    elif checked:
+        reasons.append(
+            f"no known-exploited (CISA KEV) vulnerabilities among the "
+            f"{len(checked)} finding(s) checked"
+        )
+    if analysis.eol_status.is_false:
         reasons.append("not end-of-life")
     if analysis.is_lts:
         reasons.append("long-term-support release")
@@ -177,6 +220,11 @@ def cross_validation_agreed(analysis: ImageAnalysis) -> bool:
     Distinguished from "no second scanner ran": the evidence path for the
     secondary scanner is what proves one did.
     """
+    if analysis.cross_validation == CrossValidationOutcome.AGREEMENT.value:
+        return True
+    # Fall back to the older signal for analyses produced before the outcome
+    # was recorded (a cache entry, a hand-built DTO): two evidence files and
+    # no material dispute is what "agreed" used to mean.
     scanners = set(analysis.evidence_paths)
     return len(scanners) > 1 and not analysis.scan_divergence
 
@@ -190,8 +238,17 @@ def _trade_offs(analysis: ImageAnalysis) -> list[str]:
         costs.append(f"{scan.critical_count} CRITICAL vulnerability(ies) present")
     if scan.high_count:
         costs.append(f"{scan.high_count} HIGH vulnerability(ies) present")
-    if analysis.is_eol:
+    if analysis.eol_status.is_true:
         costs.append("this release is end-of-life and will not receive security fixes")
+    elif analysis.eol_status is Tristate.UNKNOWN:
+        costs.append(
+            "end-of-life status could not be determined: this is not a statement that "
+            "the release is supported"
+        )
+    if analysis.scan.total_count and not any(
+        v.kev_status.is_known for v in analysis.scan.vulnerabilities
+    ):
+        costs.append("exploitation status (CISA KEV) could not be determined for any finding")
     if analysis.scan_divergence:
         costs.append(f"scanners disagree: {analysis.scan_divergence}")
     if analysis.confidence is not Confidence.HIGH:

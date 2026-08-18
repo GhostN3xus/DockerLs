@@ -12,15 +12,21 @@ from dockerls.domain.entities.scan_result import ScanErrorKind, ScanResult, Scan
 from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.scanner import ScannerInterface
 from dockerls.integrations.scan_errors import classify_scanner_error
+from dockerls.integrations.scan_target import blocked_scan_result, blocked_target_reason
 from dockerls.integrations.trivy.cache_pool import TrivyCachePool, default_trivy_cache_dir
 from dockerls.utils.executables import ExecutableNotFoundError, resolve_executable
-from dockerls.utils.subprocess_runner import run_capture
+from dockerls.utils.subprocess_runner import (
+    VERSION_TIMEOUT_SECONDS,
+    OutputTooLargeError,
+    run_capture,
+)
 from dockerls.utils.validation import sanitize_image_name
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from dockerls.infrastructure.evidence import EvidenceStore
+    from dockerls.infrastructure.network.host_guard import HostGuard
 
 
 class TrivyScanner(ScannerInterface):
@@ -31,11 +37,16 @@ class TrivyScanner(ScannerInterface):
         cache_dir: Path | None = None,
         workers: int = 1,
         evidence: EvidenceStore | None = None,
+        guard: HostGuard | None = None,
     ):
         self._timeout = timeout
         self._skip_db_update = skip_db_update
         self._cache_pool = TrivyCachePool(cache_dir or default_trivy_cache_dir(), workers)
         self._evidence = evidence
+        self._version: str | None = None
+        # Trivy performs its own pull, so the reference has to clear the
+        # network policy here or it never clears it at all.
+        self._guard = guard
 
     @property
     def cache_pool(self) -> TrivyCachePool:
@@ -43,6 +54,39 @@ class TrivyScanner(ScannerInterface):
 
     async def is_available(self) -> bool:
         return shutil.which("trivy") is not None
+
+    async def version(self) -> str:
+        """The scanner's own version string, memoised for the run.
+
+        Recorded so an analysis can be reconstructed: a score produced by
+        trivy 0.48 and one produced by 0.58 are different measurements of
+        the same image, and until this existed nothing wrote down which one
+        happened. It is also what keeps a cached result from being served
+        across a scanner upgrade.
+
+        Returns "" when the binary is missing or does not answer -- an
+        unknown version, which the cache key treats as its own value rather
+        than as "same as before".
+        """
+        if self._version is not None:
+            return self._version
+        self._version = await self._read_version()
+        return self._version
+
+    async def _read_version(self) -> str:
+        try:
+            returncode, stdout, _ = await run_capture(
+                [resolve_executable("trivy"), "--version"], timeout=VERSION_TIMEOUT_SECONDS
+            )
+        except (TimeoutError, OSError, ExecutableNotFoundError) as e:
+            logger.debug(f"Could not read trivy version: {e}")
+            return ""
+        if returncode != 0 or not stdout:
+            return ""
+        # `<tool> --version` prints a banner; the first line carries the
+        # version and the rest is database metadata that changes on its own
+        # schedule and would churn the cache key for no reason.
+        return stdout.decode(errors="replace").strip().splitlines()[0].strip()
 
     def _cache_args(self, cache_dir: Path) -> list[str]:
         return ["--cache-dir", str(cache_dir)]
@@ -54,6 +98,10 @@ class TrivyScanner(ScannerInterface):
             raise ValueError(f"Unsupported SBOM format: {fmt}")
 
         safe_ref = sanitize_image_name(image_reference)
+        blocked = blocked_target_reason(safe_ref, self._guard)
+        if blocked:
+            logger.warning(f"Refusing to generate an SBOM for {safe_ref}: {blocked}")
+            return None
 
         async with self._cache_pool.acquire() as cache_dir:
             try:
@@ -150,6 +198,9 @@ class TrivyScanner(ScannerInterface):
 
     async def scan(self, image_reference: str) -> ScanResult:
         safe_ref = sanitize_image_name(image_reference)
+        blocked = blocked_target_reason(safe_ref, self._guard)
+        if blocked:
+            return blocked_scan_result(safe_ref, "trivy", blocked)
         logger.info(f"Scanning {safe_ref} with Trivy")
         timestamp = datetime.now(tz=UTC).isoformat()
 
@@ -217,6 +268,19 @@ class TrivyScanner(ScannerInterface):
                     status=ScanStatus.TIMEOUT,
                     error_message=f"Scan exceeded {self._timeout}s timeout",
                     error_kind=ScanErrorKind.TIMEOUT,
+                )
+            except OutputTooLargeError as e:
+                # Unbounded output is not a measurement: the document was
+                # never read in full, so there is nothing to parse and
+                # nothing to conclude.
+                logger.error(f"{'trivy'} output exceeded the size limit for {safe_ref}: {e}")
+                return ScanResult(
+                    image_reference=safe_ref,
+                    scanner="trivy",
+                    scan_timestamp=timestamp,
+                    status=ScanStatus.ERROR,
+                    error_message=str(e),
+                    error_kind=ScanErrorKind.INVALID_OUTPUT,
                 )
             except json.JSONDecodeError as e:
                 logger.error(f"Trivy produced unparseable JSON for {safe_ref}: {e}")

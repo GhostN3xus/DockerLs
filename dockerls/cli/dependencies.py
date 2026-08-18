@@ -3,6 +3,8 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
+from loguru import logger
+
 from dockerls.application.services.composite_repository import CompositeImageRepository
 from dockerls.application.services.cross_validation import CrossValidator
 from dockerls.application.services.hardening_analysis import HardeningAnalyzer
@@ -14,9 +16,11 @@ from dockerls.application.use_cases.recommend_images import RecommendImagesUseCa
 from dockerls.application.use_cases.search_images import SearchImagesUseCase
 from dockerls.cache.sqlite_cache import SQLiteCache
 from dockerls.domain.entities.image import DOCKER_HUB
+from dockerls.domain.value_objects.network_policy import NetworkPolicy
 from dockerls.infrastructure.config.settings import Settings
 from dockerls.infrastructure.evidence import EvidenceStore
 from dockerls.infrastructure.logging.setup import setup_logging
+from dockerls.infrastructure.network.host_guard import HostGuard
 from dockerls.integrations.dhi.catalog import DHICatalogClient
 from dockerls.integrations.dhi.repository import DHI, DHIRepository
 from dockerls.integrations.dockerhub.client import DockerHubClient
@@ -30,7 +34,8 @@ from dockerls.integrations.registry.hardened import (
 from dockerls.integrations.registry.inspector import RegistryInspector
 from dockerls.integrations.threat_intel.client import ThreatIntelClient
 from dockerls.utils.auth import load_credentials
-from dockerls.utils.validation import validate_threshold
+from dockerls.utils.resources import describe_capacity, recommended_workers
+from dockerls.utils.validation import validate_threshold, validate_workers
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -81,6 +86,40 @@ def enable_console_logging() -> None:
     _LOG_FILE = setup_logging(
         s.log_level, log_dir=s.log_dir, console=True, console_level=s.log_level
     )
+
+
+def resolve_workers(requested: int | None = None) -> int:
+    """How many scanner processes this run may hold at once.
+
+    Precedence: the command line, then the configured value, then the
+    machine. `0` in either of the first two means "ask the machine", which
+    is the default -- a scanner process is not a coroutine, and ten of them
+    on a two-core runner is slower than four, not faster.
+
+    An explicit value above what the machine can carry is honoured and
+    logged. Refusing it would be presumptuous: an operator scanning tiny
+    images, or one who has measured their own runner, is entitled to
+    overcommit. Doing it silently is what must not happen.
+    """
+    s = _settings()
+    configured = requested if requested is not None else s.workers
+    recommended = recommended_workers()
+
+    if not configured:
+        logger.info(
+            f"Using {recommended} scanner worker(s) for this machine "
+            f"({describe_capacity()}); set --workers to override"
+        )
+        return recommended
+
+    effective = validate_workers(configured, "--workers")
+    if effective > recommended:
+        logger.warning(
+            f"{effective} scanner workers requested on a machine with "
+            f"{describe_capacity()}; each worker holds a scanner process, so this may "
+            f"contend for CPU or memory. {recommended} is what this machine suggests."
+        )
+    return effective
 
 
 def resolve_tag_limit(limit: int | None) -> int:
@@ -267,9 +306,7 @@ async def build_recommend_use_case(
     max_medium = validate_threshold(
         s.max_medium if max_medium is None else max_medium, "--max-medium"
     )
-    workers = validate_threshold(s.workers if workers is None else workers, "--workers")
-    if workers < 1:
-        raise ValueError("--workers must be at least 1")
+    workers = resolve_workers(workers)
 
     # `--no-cache` força uma medição nova: o cache é uma otimização, e às
     # vezes o que se quer é justamente contorná-lo.
@@ -286,6 +323,7 @@ async def build_recommend_use_case(
         workers=workers,
         cache_dir=s.trivy_cache_dir,
         evidence=evidence,
+        guard=build_host_guard(),
     )
     eol = EndOfLifeChecker(
         timeout=s.http_timeout,
@@ -296,7 +334,7 @@ async def build_recommend_use_case(
     secondary = None
     if s.cross_validate if cross_validate is None else cross_validate:
         secondary = await ScannerFactory.create_secondary(
-            scanner, timeout=s.scanner_timeout, evidence=evidence
+            scanner, timeout=s.scanner_timeout, evidence=evidence, guard=build_host_guard()
         )
 
     return RecommendImagesUseCase(
@@ -312,11 +350,35 @@ async def build_recommend_use_case(
         workers=workers,
         threat_intel=_threat_intel(),
         observer=observer,
-        cross_validator=CrossValidator(secondary, workers=s.cross_validate_workers),
+        cross_validator=CrossValidator(
+            secondary,
+            # Capped at the primary worker count as well as the machine's:
+            # cross-validation runs after the main pass, so it inherits the
+            # same budget rather than opening a second, larger one.
+            workers=min(resolve_workers(s.cross_validate_workers or None), workers),
+        ),
         evidence=evidence,
         verify_hub_tags=s.verify_hub_tags if verify_hub_tags is None else verify_hub_tags,
         log_file=current_log_file(),
         cache_ttl_seconds=s.cache_ttl_seconds,
+    )
+
+
+def build_host_guard() -> HostGuard:
+    """Where a reference is allowed to make this process connect.
+
+    Built here rather than on `Settings` so the settings object stays a
+    plain data holder and the policy is assembled in the one place that
+    assembles everything else.
+    """
+    s = _settings()
+    return HostGuard(
+        NetworkPolicy(
+            allow_private_networks=s.network_allow_private_networks,
+            allow_loopback=s.network_allow_loopback,
+            allow_link_local=s.network_allow_link_local,
+            allowed_hosts=frozenset(s.network_allowed_hosts),
+        )
     )
 
 
@@ -329,14 +391,18 @@ def build_hardening_analyzer() -> HardeningAnalyzer:
     to look, and is very different from reporting an image as clean.
     """
     s = _settings()
-    inspector = RegistryInspector(timeout=s.http_timeout) if s.inspect_image_config else None
+    inspector = (
+        RegistryInspector(timeout=s.http_timeout, guard=build_host_guard())
+        if s.inspect_image_config
+        else None
+    )
     return HardeningAnalyzer(inspector=inspector)
 
 
 async def build_analyze_use_case() -> AnalyzeImageUseCase:
     s = _settings()
     repo = await build_repository()
-    scanner = await ScannerFactory.create(timeout=s.scanner_timeout)
+    scanner = await ScannerFactory.create(timeout=s.scanner_timeout, guard=build_host_guard())
     eol = EndOfLifeChecker(
         timeout=s.http_timeout,
         max_attempts=s.retry_max_attempts,

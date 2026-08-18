@@ -124,7 +124,12 @@ def _image_properties(analysis: ImageAnalysis) -> dict[str, Any]:
         "securityScore": analysis.security_score,
         "tier": analysis.tier,
         "confidence": analysis.confidence.value,
+        "productionReady": analysis.production_ready,
+        "eolStatus": analysis.eol_status.value,
+        "crossValidation": analysis.cross_validation,
     }
+    if analysis.readiness_blockers:
+        properties["readinessBlockers"] = list(analysis.readiness_blockers)
     if analysis.image.digest_known:
         properties["digest"] = analysis.image.digest
         properties["pinnedReference"] = analysis.pinned_reference

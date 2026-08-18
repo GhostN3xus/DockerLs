@@ -5,7 +5,8 @@ class TestSettings:
     def test_defaults(self):
         s = Settings()
         assert s.max_tags == 100
-        assert s.workers == 10
+        # 0 is the documented "derive from this machine" value.
+        assert s.workers == 0
         assert s.max_critical == 0
         assert s.cache_ttl_seconds == 86400
 

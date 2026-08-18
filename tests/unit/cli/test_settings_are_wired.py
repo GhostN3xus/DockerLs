@@ -20,6 +20,8 @@ from typer.testing import CliRunner
 from dockerls.application.dto.analysis import AnalysisResult
 from dockerls.cli import dependencies
 from dockerls.cli.app import app
+from dockerls.utils.resources import recommended_workers
+from dockerls.utils.validation import validate_workers
 
 runner = CliRunner()
 
@@ -104,7 +106,12 @@ class TestThresholdsComeFromSettings:
         assert captured["max_critical"] == 0
         assert captured["max_high"] == 0
         assert captured["max_medium"] == 5
-        assert captured["workers"] == 10
+        # Workers are no longer a flat number: each one holds a scanner
+        # process, so the default is derived from the machine. What must
+        # hold is that something sane arrives -- never zero, never more
+        # than the resolver would recommend.
+        assert captured["workers"] == recommended_workers()
+        assert captured["workers"] >= 1
 
     def test_cli_flag_still_wins_over_config(self, monkeypatch):
         captured = _resolved(monkeypatch, ("max_medium", 1), env={"DOCKERLS_MAX_MEDIUM": "42"})
@@ -146,9 +153,22 @@ class TestThresholdsAreValidated:
         with pytest.raises(ValueError, match="maximum"):
             _resolved(monkeypatch, env={"DOCKERLS_MAX_MEDIUM": "999999"})
 
-    def test_zero_workers_is_rejected(self, monkeypatch):
-        with pytest.raises(ValueError, match="at least 1"):
-            _resolved(monkeypatch, env={"DOCKERLS_WORKERS": "0"})
+    def test_zero_workers_means_size_it_to_the_machine(self, monkeypatch):
+        """`0` is the documented way to ask for the machine-derived value.
+
+        It used to be rejected, because a zero reached an `asyncio.Semaphore`
+        and blocked the scan loop forever. That deadlock is now impossible by
+        construction -- `resolve_workers` never returns zero and the use case
+        still validates its argument -- so zero is free to mean what an
+        operator would expect it to mean.
+        """
+        captured = _resolved(monkeypatch, env={"DOCKERLS_WORKERS": "0"})
+        assert captured["workers"] == recommended_workers()
+        assert captured["workers"] >= 1
+
+    def test_a_negative_worker_count_is_still_rejected(self):
+        with pytest.raises(ValueError, match="between"):
+            validate_workers(-1)
 
     def test_negative_limit_is_rejected(self, monkeypatch):
         monkeypatch.delenv("DOCKERLS_MAX_TAGS", raising=False)

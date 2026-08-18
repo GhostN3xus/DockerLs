@@ -28,7 +28,14 @@ if TYPE_CHECKING:
 # "nothing determined" and `UNVERIFIED`, so a stale row would present an
 # image as uninspected rather than as unscanned. Orphaning the old rows
 # costs one cold run and removes the ambiguity entirely.
-CACHE_SCHEMA_VERSION = "v3"
+# v4: ImageAnalysis gained the readiness verdict (production_ready is now
+# written by the central policy, and its default flipped to False), the
+# three-valued EOL status, and the cross-validation outcome; Vulnerability
+# gained the three-valued KEV status and the EPSS provenance fields. A v3 row
+# would validate and fill all of them with defaults -- which read as
+# "nothing determined" and would present a cached image as uninspected
+# rather than as measured.
+CACHE_SCHEMA_VERSION = "v4"
 
 
 class CacheStats(NamedTuple):

@@ -14,6 +14,7 @@ from dockerls.application.services.migration import MigrationPlan, plan_migratio
 from dockerls.application.use_cases.recommend_images import build_recommendation
 from dockerls.cli.dependencies import build_analyze_use_case, build_recommend_use_case
 from dockerls.cli.options import OutputFormat, parse_output_format
+from dockerls.cli.text import safe
 from dockerls.cli.validators import check_workers
 from dockerls.exit_codes import EXIT_ERROR
 
@@ -31,7 +32,10 @@ diagnostics = Console(stderr=True)
 def advisor(
     image: str = typer.Argument(help="Docker image name (e.g., node, python, nginx)"),
     workers: int | None = typer.Option(
-        None, "--workers", "-w", help="Concurrent workers [config: workers, default 10]"
+        None,
+        "--workers",
+        "-w",
+        help="Concurrent scanner processes; 0 sizes it to this machine [config: workers]",
     ),
     output_format: str = typer.Option(
         OutputFormat.TABLE.value, "--format", "-f", help="Output format: table or json"
@@ -42,7 +46,9 @@ def advisor(
     if no_color:
         console.no_color = True
     fmt = parse_output_format(output_format)
-    if workers is not None:
+    # `0` means "size it to this machine", so it is passed through rather
+    # than validated: the resolver, not the flag, decides what it becomes.
+    if workers:
         workers = check_workers(workers)
     try:
         asyncio.run(_advisor(image, workers, fmt))
@@ -110,7 +116,7 @@ async def _advisor(image: str, workers: int | None, output_format: OutputFormat)
     info = Table(show_header=False, box=None, padding=(0, 2))
     info.add_column("Key", style="bold")
     info.add_column("Value")
-    info.add_row("Current Best Image", f"[cyan]{best.image.full_reference}[/cyan]")
+    info.add_row("Current Best Image", f"[cyan]{safe(best.image.full_reference)}[/cyan]")
     info.add_row("Ecosystem / Runtime", f"{insights.ecosystem} ({insights.version})")
     info.add_row("Security Score", f"[green]{best.security_score}[/green]")
     info.add_row("Tier", best.tier)
@@ -208,15 +214,15 @@ def _print_migration(plan: MigrationPlan) -> None:
     if plan.improvements:
         console.print("\n[bold]WHY[/bold]")
         for reason in plan.improvements:
-            console.print(f"  [green]OK[/green] {reason}")
+            console.print(f"  [green]OK[/green] {safe(reason)}")
     if plan.trade_offs:
         console.print("\n[bold]TRADE-OFFS[/bold]")
         for cost in plan.trade_offs:
-            console.print(f"  [yellow]![/yellow] {cost}")
+            console.print(f"  [yellow]![/yellow] {safe(cost)}")
     if plan.checklist:
         console.print("\n[bold]MIGRATION CHECKLIST[/bold]")
         for i, step in enumerate(plan.checklist, 1):
-            console.print(f"  {i}. {step}")
+            console.print(f"  {i}. {safe(step)}")
     console.print(
         "\n[dim]Compatibility is never assumed: nothing here can tell you your "
         "application still runs. That is what the checklist is for.[/dim]"
