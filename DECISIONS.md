@@ -436,3 +436,36 @@ revisão, porque parece exatamente com o acerto. Um teste garante que toda regra
 emitida pelo validador está catalogada e que nenhuma regra catalogada é órfã,
 de modo que a divergência aparece como falha e não como citação faltando em
 silêncio.
+
+---
+
+## D-019 — A política de rede vale para toda conexão, não só para as nossas
+
+**Ambiguidade.** `NetworkPolicy` foi escrita pensando nas requisições que este
+processo faz com `httpx`. Mas `trivy image X` também é uma conexão que este
+processo causa — só que aberta por um filho.
+
+**Decisão.** Verificar o alvo contra o `HostGuard` antes de invocar o binário,
+nos dois scanners, e recusar com `ERROR` / `BLOCKED_BY_POLICY`.
+
+**Motivo.** A pergunta que a política responde não é "quem abriu o socket", é
+"para onde uma referência não confiável consegue apontar esta máquina". Pelo
+critério errado, a defesa cobria a porta que era fácil de ver.
+
+**Consequência registrada — a recusa é ausência de medição, não medição limpa.**
+Zero vulnerabilidades com status `ERROR` é o mesmo estado que um scan que deu
+timeout, e o pipeline inteiro já trata não-medido como não-verificado. Um teste
+fixa isso explicitamente, porque a alternativa (devolver `SUCCESS` com lista
+vazia) seria a exata substituição que este projeto recusa em todo lugar.
+
+**Consequência registrada — `BLOCKED_BY_POLICY` não é culpa do scanner.** O
+`FallbackScanner` tenta a segunda ferramenta quando a primeira falha por
+motivo próprio. Um host recusado não é isso: o grype puxaria do mesmo lugar.
+Marcar como falha de scanner gastaria o dobro do tempo para chegar à mesma
+recusa.
+
+**Consequência registrada — uma única definição de "host de registry".** A
+regra estava em duas cópias e as duas erravam em `localhost`. Agora
+`DockerImage.registry_host` delega para o domínio. Duas cópias de uma regra de
+segurança não divergem em teoria — elas divergem exatamente no caso que
+importa.

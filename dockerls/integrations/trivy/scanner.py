@@ -12,6 +12,7 @@ from dockerls.domain.entities.scan_result import ScanErrorKind, ScanResult, Scan
 from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.scanner import ScannerInterface
 from dockerls.integrations.scan_errors import classify_scanner_error
+from dockerls.integrations.scan_target import blocked_scan_result, blocked_target_reason
 from dockerls.integrations.trivy.cache_pool import TrivyCachePool, default_trivy_cache_dir
 from dockerls.utils.executables import ExecutableNotFoundError, resolve_executable
 from dockerls.utils.subprocess_runner import (
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from dockerls.infrastructure.evidence import EvidenceStore
+    from dockerls.infrastructure.network.host_guard import HostGuard
 
 
 class TrivyScanner(ScannerInterface):
@@ -35,12 +37,16 @@ class TrivyScanner(ScannerInterface):
         cache_dir: Path | None = None,
         workers: int = 1,
         evidence: EvidenceStore | None = None,
+        guard: HostGuard | None = None,
     ):
         self._timeout = timeout
         self._skip_db_update = skip_db_update
         self._cache_pool = TrivyCachePool(cache_dir or default_trivy_cache_dir(), workers)
         self._evidence = evidence
         self._version: str | None = None
+        # Trivy performs its own pull, so the reference has to clear the
+        # network policy here or it never clears it at all.
+        self._guard = guard
 
     @property
     def cache_pool(self) -> TrivyCachePool:
@@ -92,6 +98,10 @@ class TrivyScanner(ScannerInterface):
             raise ValueError(f"Unsupported SBOM format: {fmt}")
 
         safe_ref = sanitize_image_name(image_reference)
+        blocked = blocked_target_reason(safe_ref, self._guard)
+        if blocked:
+            logger.warning(f"Refusing to generate an SBOM for {safe_ref}: {blocked}")
+            return None
 
         async with self._cache_pool.acquire() as cache_dir:
             try:
@@ -188,6 +198,9 @@ class TrivyScanner(ScannerInterface):
 
     async def scan(self, image_reference: str) -> ScanResult:
         safe_ref = sanitize_image_name(image_reference)
+        blocked = blocked_target_reason(safe_ref, self._guard)
+        if blocked:
+            return blocked_scan_result(safe_ref, "trivy", blocked)
         logger.info(f"Scanning {safe_ref} with Trivy")
         timestamp = datetime.now(tz=UTC).isoformat()
 

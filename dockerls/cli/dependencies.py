@@ -323,6 +323,7 @@ async def build_recommend_use_case(
         workers=workers,
         cache_dir=s.trivy_cache_dir,
         evidence=evidence,
+        guard=build_host_guard(),
     )
     eol = EndOfLifeChecker(
         timeout=s.http_timeout,
@@ -333,7 +334,7 @@ async def build_recommend_use_case(
     secondary = None
     if s.cross_validate if cross_validate is None else cross_validate:
         secondary = await ScannerFactory.create_secondary(
-            scanner, timeout=s.scanner_timeout, evidence=evidence
+            scanner, timeout=s.scanner_timeout, evidence=evidence, guard=build_host_guard()
         )
 
     return RecommendImagesUseCase(
@@ -401,7 +402,7 @@ def build_hardening_analyzer() -> HardeningAnalyzer:
 async def build_analyze_use_case() -> AnalyzeImageUseCase:
     s = _settings()
     repo = await build_repository()
-    scanner = await ScannerFactory.create(timeout=s.scanner_timeout)
+    scanner = await ScannerFactory.create(timeout=s.scanner_timeout, guard=build_host_guard())
     eol = EndOfLifeChecker(
         timeout=s.http_timeout,
         max_attempts=s.retry_max_attempts,

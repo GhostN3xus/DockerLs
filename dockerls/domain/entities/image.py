@@ -5,6 +5,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from dockerls.domain.entities.declared_metadata import DeclaredImageMetadata
+from dockerls.domain.value_objects.image_reference import registry_host_of
 
 #: Label carried by candidates discovered on Docker Hub. Defined here rather
 #: than written as a literal in each provider so the source registry, the
@@ -42,12 +43,12 @@ class DockerImage(BaseModel):
     def registry_host(self) -> str:
         """Registry this image lives on, or "" for Docker Hub.
 
-        A name is host-qualified only when its first component contains a
-        dot or a colon -- `cgr.dev/chainguard/node` is, `library/node` is
-        not. That is the same rule the Docker CLI applies.
+        Delegates to the shared rule so the registry this reports and the
+        registry the network policy judges can never diverge -- two copies
+        of "what counts as a host" is exactly how `localhost/evil` ends up
+        guarded in one place and not the other.
         """
-        head = self.name.split("/", 1)[0]
-        return head if ("." in head or ":" in head) else ""
+        return registry_host_of(self.name)
 
     @property
     def pinned_reference(self) -> str:

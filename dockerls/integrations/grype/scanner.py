@@ -12,6 +12,7 @@ from dockerls.domain.entities.scan_result import ScanErrorKind, ScanResult, Scan
 from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.scanner import ScannerInterface
 from dockerls.integrations.scan_errors import classify_scanner_error
+from dockerls.integrations.scan_target import blocked_scan_result, blocked_target_reason
 from dockerls.utils.executables import ExecutableNotFoundError, resolve_executable
 from dockerls.utils.subprocess_runner import (
     VERSION_TIMEOUT_SECONDS,
@@ -22,14 +23,23 @@ from dockerls.utils.validation import sanitize_image_name
 
 if TYPE_CHECKING:
     from dockerls.infrastructure.evidence import EvidenceStore
+    from dockerls.infrastructure.network.host_guard import HostGuard
 
 
 class GrypeScanner(ScannerInterface):
-    def __init__(self, timeout: int = 300, evidence: EvidenceStore | None = None):
+    def __init__(
+        self,
+        timeout: int = 300,
+        evidence: EvidenceStore | None = None,
+        guard: HostGuard | None = None,
+    ):
         self._timeout = timeout
         self._evidence = evidence
         self._version: str | None = None
         self._skip_db_update = False
+        # Grype pulls the image itself, so the reference has to clear the
+        # network policy here or it never clears it at all.
+        self._guard = guard
 
     async def is_available(self) -> bool:
         return shutil.which("grype") is not None
@@ -105,6 +115,9 @@ class GrypeScanner(ScannerInterface):
 
     async def scan(self, image_reference: str) -> ScanResult:
         safe_ref = sanitize_image_name(image_reference)
+        blocked = blocked_target_reason(safe_ref, self._guard)
+        if blocked:
+            return blocked_scan_result(safe_ref, "grype", blocked)
         logger.info(f"Scanning {safe_ref} with Grype")
         timestamp = datetime.now(tz=UTC).isoformat()
 

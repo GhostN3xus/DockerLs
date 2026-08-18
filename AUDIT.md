@@ -245,6 +245,46 @@ num Dockerfile.
 
 **Proposta.** Registrar o último digest visto por tag e reportar a mudança.
 
+**Nota da revisão de 2026-08-18.** O impacto continua BAIXO e o motivo ficou
+claro: a confiança já rebaixa toda referência não fixada num digest para
+`LOW`/`MEDIUM`, com a razão escrita ("reference is not pinned to a digest and
+was not confirmed"). Ou seja, o leitor não recebe uma tag móvel apresentada
+como se fosse medida definitiva — ele só não recebe o aviso específico de que
+ela *se moveu desde a última vez*. Segue em aberto, por essa ordem de
+prioridade.
+
+---
+
+## F14 — O pull do próprio scanner ignorava a política de rede  *(ALTA)*
+
+**Achado.** A política de SSRF (F5) guardava o `RegistryInspector`, que é
+**uma** das portas. `trivy image X` e `grype X` abrem o próprio socket e
+puxam a imagem sozinhos: uma referência como `169.254.169.254/latest:v1` —
+sintaticamente válida, aprovada por `sanitize_image_name`, e chegando de uma
+variável de CI, de um arquivo de config ou de um pull request — mirava a
+conexão do scanner no endpoint de metadados da nuvem enquanto a porta
+guardada permanecia fechada. Guarda numa porta de um prédio com duas.
+
+**Agravante encontrado no caminho.** A regra "o primeiro componente é um host
+de registry" estava escrita duas vezes (em `DockerImage.registry_host` e em
+`dockerhub/urls.py`), e ambas testavam apenas ponto-ou-dois-pontos. Com isso
+`localhost/evil` era lido como o usuário "localhost" do Docker Hub — exatamente
+o caso que um atacante quer, porque é o único host interessante que não tem
+ponto nem porta.
+
+**Correção.** `domain/value_objects/image_reference.py` passa a ser a única
+definição da regra (Docker's own: ponto, dois-pontos, **ou `localhost`**), e
+`DockerImage.registry_host` delega para ela. `integrations/scan_target.py`
+consulta o `HostGuard` **antes** de invocar o binário; a recusa é um
+`ScanResult` com status `ERROR` e `error_kind=BLOCKED_BY_POLICY` — nunca uma
+lista de achados vazia, que seria indistinguível de uma imagem limpa. O novo
+`BLOCKED_BY_POLICY` é deliberadamente **não** `is_scanner_fault`: um segundo
+scanner puxaria do mesmo host recusado, então o fallback só gastaria o dobro
+do tempo para chegar à mesma recusa.
+
+**O que continua passando.** Docker Hub nunca é julgado (contatá-lo é a função
+da ferramenta) e registries internos em RFC1918 continuam escaneáveis — a
+política que já existia, aplicada agora à porta que faltava.
 
 ---
 

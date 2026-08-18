@@ -5,6 +5,33 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] -- 2026-08-18
+
+### Corrigido — segurança
+
+- **O pull do próprio scanner agora passa pela política de rede** *(alta)*. A
+  política de SSRF guardava o inspector de registry, que é *uma* das portas:
+  `trivy image X` e `grype X` abrem o próprio socket e puxam a imagem
+  sozinhos. Uma referência como `169.254.169.254/latest:v1` — sintaticamente
+  válida e chegando de uma variável de CI, de um arquivo de config ou de um
+  pull request — mirava a conexão do scanner no endpoint de metadados da nuvem
+  enquanto a porta guardada continuava fechada. A verificação agora acontece
+  **antes** do binário ser invocado, e a recusa é um `ScanResult` com status
+  `ERROR` e `error_kind=BLOCKED_BY_POLICY` — nunca uma lista de achados vazia,
+  que seria indistinguível de uma imagem limpa.
+- **`localhost/evil` era lido como um usuário do Docker Hub.** A regra "o
+  primeiro componente é um host de registry" testava só ponto-ou-dois-pontos,
+  e `localhost` não tem nenhum dos dois — justamente o host interessante para
+  quem ataca. A regra passa a viver num único lugar
+  (`domain/value_objects/image_reference.py`), com `localhost` explícito, e
+  `DockerImage.registry_host` delega para ela: duas cópias de "o que conta
+  como host" é como um caso acaba guardado num lugar e não no outro.
+
+`BLOCKED_BY_POLICY` é deliberadamente **não** `is_scanner_fault`: um segundo
+scanner puxaria do mesmo host recusado, então o fallback só gastaria o dobro do
+tempo para chegar à mesma recusa. Docker Hub nunca é julgado e registries
+internos em RFC1918 continuam escaneáveis — nada de legítimo foi fechado.
+
 ## [1.3.0] -- 2026-08-18
 
 ### Adicionado
