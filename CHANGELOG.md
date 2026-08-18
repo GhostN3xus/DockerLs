@@ -5,6 +5,52 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] -- 2026-08-18
+
+### Corrigido — o catálogo endurecido recomendava runtimes mortos
+
+`dockerls recommend node` respondia com `gcr.io/distroless/nodejs`, cujas tags
+publicadas são `10`, `12` e `14` — Node em fim de vida há anos, apresentado
+como "alternativa endurecida" com o carimbo desta ferramenta. O mesmo com
+`distroless/java`, que só publica Java 11. A causa era o mapa de apelidos ser
+**1:1**: os runtimes atuais do Distroless vivem em repositórios com o nome
+versionado (`nodejs22-debian12`), que nenhum alias único alcançava.
+
+O mapa passa a ser 1:N, com os repositórios verificados contra o registry em
+2026-08-18, e os legados ficam de fora. Consequências medidas:
+
+| Consulta | Antes | Agora |
+|---|---|---|
+| `node` | `distroless/nodejs` (10, 12, 14) | `distroless/nodejs22-debian12`, `nodejs20-debian12` |
+| `java` | Chainguard **403** — nenhuma alternativa | `chainguard/jdk`, `chainguard/jre`, `distroless/java21-debian12` |
+| `maven` | só Docker Hub | `chainguard/maven` |
+| `gradle` | nada | `chainguard/gradle` |
+
+`chainguard/java` não existe (responde 403); as imagens reais são `jdk` e
+`jre`, e as duas são oferecidas porque escolher entre elas depende de a
+aplicação compilar em runtime — não é decisão de quem escaneia. O Distroless
+não publica ferramenta de build, e isso é declarado como ausência em vez de
+mapeado para algo parecido.
+
+### Corrigido — nomes ilegíveis na tabela
+
+Com treze colunas e `overflow="fold"`, `gcr.io/distroless/nodejs22-debian12`
+era quebrado no meio da palavra e saía em duas ou três linhas, enquanto a
+coluna `Source` encostada já dizia "Distroless". O prefixo redundante sai da
+coluna `Image`; o nome que identifica o runtime fica. Um registry que a tabela
+não identifica (`ghcr.io/org/app`) continua inteiro, porque ali o host **é** a
+identidade. A referência completa segue no `--format json`, na linha `Pin to:`
+e na evidência — que é o que alguém copia para um Dockerfile.
+
+### Corrigido — detecção de ecossistema
+
+`maven`, `gradle`, `tomcat` e `jetty` caíam em `generic` e não recebiam
+conselho nenhum, apesar de serem exatamente onde um projeto Java de verdade
+começa o Dockerfile. A detecção passa a casar o **nome do repositório**, sem
+registry e sem tag: `cgr.dev/chainguard/go` não era reconhecido como Go (o
+"go" estava no caminho, não na tag), e qualquer tag contendo "go"
+classificava a imagem errada.
+
 ## [1.4.0] -- 2026-08-18
 
 ### Alterado — a imagem passa a partir de Alpine

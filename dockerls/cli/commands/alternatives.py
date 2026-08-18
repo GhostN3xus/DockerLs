@@ -33,6 +33,7 @@ from rich.table import Table
 from dockerls.application.services.migration import MigrationPlan, plan_migration
 from dockerls.application.services.source_registry import UnknownSourceError
 from dockerls.cli.dependencies import build_analyze_use_case, build_recommend_use_case
+from dockerls.cli.image_names import display_reference
 from dockerls.cli.options import OutputFormat, parse_output_format
 from dockerls.cli.progress import RichScanObserver
 from dockerls.cli.text import safe
@@ -247,7 +248,7 @@ def _render(
         delta_text = f"[green]+{delta:.1f}[/green]" if delta > 0 else f"[red]{delta:.1f}[/red]"
         table.add_row(
             str(i),
-            safe(candidate.image.full_reference),
+            safe(display_reference(candidate.image.name, candidate.image.tag)),
             safe(candidate.image.source),
             f"{candidate.security_score:.1f}",
             delta_text,

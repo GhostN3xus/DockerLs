@@ -17,28 +17,86 @@ class EcosystemInsight:
     recommended_dockerfile_snippets: list[str] = field(default_factory=list)
 
 
+#: Nome exato do repositório -> ecossistema. Consultado antes das palavras
+#: soltas porque um nome exato não erra: `mongo` não é Go, e `maven` é Java
+#: mesmo sem a palavra "java" aparecer em lugar nenhum.
+_ECOSYSTEM_BY_NAME: dict[str, str] = {
+    "node": "node",
+    "nodejs": "node",
+    "bun": "node",
+    "deno": "node",
+    "python": "python",
+    "python3": "python",
+    "pypy": "python",
+    "go": "go",
+    "golang": "go",
+    "rust": "rust",
+    # Ferramentas de build são o ecossistema que constroem: quem roda `maven`
+    # está num projeto Java, e a alternativa endurecida que interessa é a de
+    # Java. Sem esta linha, `maven` caía em "generic" e não recebia conselho
+    # nenhum -- e ferramenta de build é exatamente onde um projeto de verdade
+    # começa o Dockerfile.
+    "maven": "java",
+    "gradle": "java",
+    "ant": "java",
+    "sbt": "java",
+    "tomcat": "java",
+    "jetty": "java",
+    "jdk": "java",
+    "jre": "java",
+    "openjdk": "java",
+    "temurin": "java",
+    "eclipse-temurin": "java",
+    "corretto": "java",
+    "amazoncorretto": "java",
+    "php": "php",
+    "composer": "php",
+    "ruby": "ruby",
+    "jruby": "ruby",
+    "dotnet": "dotnet",
+    "aspnet": "dotnet",
+}
+
+#: Fragmentos, para nomes compostos que nenhuma tabela cobre inteiramente
+#: (`nodejs22-debian12`, `python3-debian12`). A ordem importa: o primeiro que
+#: casar vence, e os mais específicos vêm antes.
+_ECOSYSTEM_KEYWORDS: tuple[tuple[str, str], ...] = (
+    ("nodejs", "node"),
+    ("node", "node"),
+    ("python", "python"),
+    ("golang", "go"),
+    ("rust", "rust"),
+    ("temurin", "java"),
+    ("openjdk", "java"),
+    ("corretto", "java"),
+    ("maven", "java"),
+    ("gradle", "java"),
+    ("java", "java"),
+    ("aspnet", "dotnet"),
+    ("dotnet", "dotnet"),
+    ("php", "php"),
+    ("ruby", "ruby"),
+)
+
+
 def detect_ecosystem_and_version(image_reference: str) -> tuple[str, str, str]:
     """Detecta ecossistema (node, python, go, etc.), versão e distribuição base."""
     ref_lower = image_reference.lower()
+    # O nome do repositório, sem registry e sem tag. Casar contra a referência
+    # inteira lia a tag e o host: `cgr.dev/chainguard/go:latest` não era
+    # reconhecido como Go (o "go" estava no caminho, não na tag), enquanto
+    # qualquer tag contendo "go" classificava a imagem errada.
+    repository = ref_lower.split("@", 1)[0].split(":", 1)[0].rstrip("/")
+    basename = repository.rsplit("/", 1)[-1]
 
     # 1. Ecossistema
-    ecosystem = "generic"
-    if any(k in ref_lower for k in ("node", "npm", "yarn", "bun")):
-        ecosystem = "node"
-    elif any(k in ref_lower for k in ("python", "pypy", "pip")):
-        ecosystem = "python"
-    elif "golang" in ref_lower or "go" in ref_lower.split(":")[-1] or ref_lower.startswith("go:"):
-        ecosystem = "go"
-    elif "rust" in ref_lower:
-        ecosystem = "rust"
-    elif any(k in ref_lower for k in ("temurin", "openjdk", "java", "corretto")):
-        ecosystem = "java"
-    elif "php" in ref_lower:
-        ecosystem = "php"
-    elif "ruby" in ref_lower:
-        ecosystem = "ruby"
-    elif "dotnet" in ref_lower or "aspnet" in ref_lower:
-        ecosystem = "dotnet"
+    ecosystem = _ECOSYSTEM_BY_NAME.get(basename, "")
+    if not ecosystem:
+        for keyword, named in _ECOSYSTEM_KEYWORDS:
+            if keyword in basename:
+                ecosystem = named
+                break
+    ecosystem = ecosystem or "generic"
 
     # 2. Versão
     version = ""

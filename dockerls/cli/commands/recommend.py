@@ -18,6 +18,7 @@ from dockerls.cli.dependencies import (
     enable_console_logging,
     resolve_tag_limit,
 )
+from dockerls.cli.image_names import display_reference
 from dockerls.cli.options import OutputFormat, parse_output_format
 from dockerls.cli.progress import RichScanObserver
 from dockerls.cli.text import safe
@@ -369,7 +370,7 @@ def _print_table(analyses: list[ImageAnalysis]) -> None:
         )
         table.add_row(
             str(i),
-            safe(a.image.full_reference),
+            safe(display_reference(a.image.name, a.image.tag)),
             safe(a.image.source),
             score,
             f"[{ts}]{a.tier}[/{ts}]" if ts else a.tier,

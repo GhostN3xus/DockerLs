@@ -72,10 +72,35 @@ class TestRepositoryMapping:
     def test_chainguard_maps_plain_names(self):
         assert ChainguardRepository().repository_for("node") == "chainguard/node"
 
-    def test_distroless_aliases_differing_names(self):
+    def test_distroless_leads_with_the_current_runtime_not_the_legacy_repo(self):
+        """`distroless/nodejs` continua publicado e lista as tags 10, 12 e 14.
+
+        Oferecer aquele repositório era responder um pedido de alternativa
+        endurecida com um runtime que morreu anos atrás -- uma imagem
+        insegura carregando a recomendação desta ferramenta.
+        """
         repo = DistrolessRepository()
-        assert repo.repository_for("node") == "distroless/nodejs"
-        assert repo.repository_for("python") == "distroless/python3"
+        assert repo.repository_for("node") == "distroless/nodejs22-debian12"
+        assert repo.repository_for("python") == "distroless/python3-debian12"
+        assert "distroless/nodejs" not in repo.repositories_for("node")
+        assert "distroless/java" not in repo.repositories_for("java")
+
+    def test_java_reaches_the_repositories_that_actually_exist(self):
+        """`chainguard/java` responde 403: o repositório não existe. Quem
+        digitava `java` recebia zero alternativas endurecidas."""
+        assert ChainguardRepository().repositories_for("java") == [
+            "chainguard/jdk",
+            "chainguard/jre",
+        ]
+        assert DistrolessRepository().repositories_for("java")[0] == "distroless/java21-debian12"
+
+    def test_build_tools_are_covered_where_they_exist(self):
+        assert ChainguardRepository().repository_for("maven") == "chainguard/maven"
+        assert ChainguardRepository().repository_for("gradle") == "chainguard/gradle"
+        # O Distroless não publica ferramenta de build: maven e gradle rodam
+        # no estágio de build, não no de execução. Ausência declarada em vez
+        # de mapeada para algo parecido.
+        assert DistrolessRepository().repositories_for("maven") == []
 
     @pytest.mark.parametrize(
         "ref", ["ghcr.io/org/app", "bitnami/node", "node:22-alpine", "", "   "]
@@ -182,8 +207,11 @@ class TestDistrolessRepository:
         with _listing(GCR_PAYLOAD):
             images = await DistrolessRepository().search_tags("node")
 
+        # A consulta agora percorre dois repositórios (nodejs22 e nodejs20),
+        # e o duplo `_listing` devolve o mesmo payload para ambos; o que este
+        # teste fixa é a ordem dentro de cada listagem.
         versioned = [i.tag for i in images if i.tag not in ("latest", "debug")]
-        assert versioned == ["20", "18"]
+        assert versioned[:2] == ["20", "18"]
 
     @pytest.mark.asyncio
     async def test_conventional_entrypoints_rank_first(self):
