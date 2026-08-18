@@ -1893,12 +1893,19 @@ que nunca dependeu do binário embutido.
 docker compose run dockerls analyze-dockerfile /work
 ```
 
-A imagem segue as boas práticas de segurança Docker da OWASP: build
-multi-estágio, base fixada por digest de manifest-list, pacotes do sistema
-atualizados no stage final (é o que corrige CVEs como as do `libexpat1`, que a
-base congelada pelo digest carregava), usuário não-root, rótulos
-`org.opencontainers.image.*` no manifesto final, suporte a sistema de arquivos
-somente leitura e todas as capabilities removidas.
+A imagem parte de `python:3.12-alpine`, e a escolha foi medida: sobre a base
+Debian slim sobravam seis CRITICAL **sem versão de correção publicada**, quatro
+delas no `perl-base` — um pacote que o DockerLs nunca invoca e que o Debian
+marca como `Essential: yes`, então nem `apt-get purge` o remove. Trocar a base
+resolve; silenciar as CVEs num arquivo de ignore só esconderia. Numa ferramenta
+que se recusa a apresentar como segura uma imagem que não conseguiu medir,
+fazer o próprio portão passar por supressão seria o pior precedente possível.
+
+Fora isso, a imagem segue as boas práticas de segurança Docker da OWASP: build
+multi-estágio, base fixada por digest de manifest-list, `apk upgrade` no stage
+final, usuário não-root, rótulos `org.opencontainers.image.*` no manifesto
+final, suporte a sistema de arquivos somente leitura e todas as capabilities
+removidas.
 
 ---
 
