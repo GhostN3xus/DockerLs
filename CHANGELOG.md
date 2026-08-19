@@ -5,6 +5,44 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] -- 2026-08-18
+
+### Adicionado — procedência: hash antes, hash depois, e a comparação entre eles
+
+O `build` media o resultado sem registrar nada sobre o que entrou: dois builds
+do mesmo `--tag` produziam relatórios indistinguíveis mesmo partindo de
+Dockerfiles diferentes, e nada ligava o scan ao artefato que ele mediu. Numa
+cadeia de fornecimento, "nós escaneamos essa imagem" sem digest é uma frase
+sobre nada.
+
+Cada build passa a produzir um registro com duas metades:
+
+- **antes** — digest do Dockerfile, digest determinístico do contexto (com o
+  número de arquivos), digest de cada base declarada nos `FROM`, commit e se a
+  árvore estava suja;
+- **depois** — id da imagem, digest do manifesto publicado (que só existe após
+  o push, e é o único identificador que outra máquina consegue usar para puxar
+  exatamente esta imagem), e qual scanner atestou.
+
+**A verificação é o que faz disso controle e não decoração:** a entrada é
+digerida de novo depois do build e comparada com a de antes. Se mudou no meio
+do caminho, o registro sai como `INPUT_CHANGED` — a imagem existe, mas não
+corresponde à entrada que foi medida. Entrada ou saída que não puderam ser
+digeridas dão `INCOMPLETE`, que é ausência de prova e nunca vira prova de
+integridade: o mesmo princípio que rege o scan que não completou.
+
+O digest do contexto é determinístico por construção — caminhos ordenados e
+relativos, e o nome de cada arquivo entrando no digest junto do conteúdo, de
+modo que renomear muda o contexto tanto quanto editar. O `.dockerignore` é
+respeitado porque ele decide o que o daemon realmente recebe: hashear o que
+fica de fora produziria um digest que muda sem a imagem mudar, e um controle
+que dispara à toa é um controle que as pessoas desligam. Um contexto acima de
+50 000 arquivos é recusado em vez de digerido pela metade — quase sempre
+significa `.dockerignore` ausente.
+
+O registro aparece no terminal, entra no `--format json` sob `provenance`, e é
+arquivado em disco quando se pede.
+
 ## [1.6.0] -- 2026-08-18
 
 ### Adicionado — destino e responsabilidade perguntados antes do build

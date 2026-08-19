@@ -22,7 +22,13 @@ from dockerls.domain.entities.dockerfile_analysis import (
     HardeningRule,
     ValidationStatus,
 )
+from dockerls.domain.value_objects.provenance import (
+    ArtifactDigests,
+    BuildProvenance,
+    SourceDigests,
+)
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY
+from dockerls.infrastructure.hashing import ContextTooLargeError, hash_context, hash_file
 from dockerls.utils.executables import ExecutableNotFoundError, resolve_executable
 
 if TYPE_CHECKING:
@@ -127,6 +133,9 @@ class BuildImageRequest:
     auto_remediate: bool = False
     max_remediation_rounds: int = 3
     target_zero_vulns: bool = False
+    #: Onde arquivar o documento de procedência. Vazio desliga o arquivamento
+    #: mas não a medição: o registro continua na resposta.
+    provenance_path: str = ""
     #: Destino completo da publicação (`meuacr.azurecr.io/apps/dockerls:1.5.0`).
     #: Vazio significa publicar a própria tag local, que só funciona quando ela
     #: já nomeia um registry -- e era o comportamento anterior, que falhava com
@@ -150,6 +159,9 @@ class BuildImageResponse:
     validation: DockerfileValidationResult | None = None
     analysis: DockerfileAnalysis | None = None
     recommendations: list[HardeningRule] = field(default_factory=list)
+    #: A cadeia entre o que entrou no build e o que saiu dele. Presente em
+    #: todo build que chegou a produzir imagem.
+    provenance: BuildProvenance | None = None
     error: str | None = None
     exit_code: int = EXIT_OK
 
@@ -203,6 +215,13 @@ class BuildImageUseCase:
                     request.base_template or "node",
                 )
 
+            # 4b. Digerir a entrada **antes** de construir. Sem isto, dois
+            #     builds do mesmo --tag produzem relatórios indistinguíveis
+            #     mesmo partindo de Dockerfiles diferentes, e o scan não fica
+            #     ligado a artefato nenhum.
+            started_at = datetime.now(tz=UTC).isoformat()
+            source_before = self._digest_source(request.context_path, dockerfile_path)
+
             # 5. Construir imagem
             build_result = self._build_image(
                 context_path=request.context_path,
@@ -225,6 +244,11 @@ class BuildImageUseCase:
                     error=build_result.error_message,
                     exit_code=EXIT_ERROR,
                 )
+
+            # 5b. Digerir a entrada de novo. A comparação é o que transforma
+            #     o registro em controle: uma entrada que mudou durante o
+            #     build não é a entrada que a imagem representa.
+            source_after = self._digest_source(request.context_path, dockerfile_path)
 
             # 6. Scan pós-build
             scan_result = None
@@ -342,6 +366,24 @@ class BuildImageUseCase:
                         exit_code=EXIT_ERROR,
                     )
 
+            # 8b. Fechar a cadeia: o digest do manifesto só existe depois do
+            #     push, e é o único identificador que outra máquina consegue
+            #     usar para puxar exatamente esta imagem.
+            provenance = BuildProvenance(
+                tag=request.tag,
+                source=source_before,
+                source_after=source_after,
+                artifact=ArtifactDigests(
+                    image_id=build_result.image_sha256 or "",
+                    repo_digest=self._repo_digest(request.push_reference or request.tag),
+                    published_reference=request.push_reference,
+                    scanner=scan_result.scan_tool if scan_result else "",
+                ),
+                started_at=started_at,
+                finished_at=datetime.now(tz=UTC).isoformat(),
+            )
+            self._archive_provenance(provenance, request.provenance_path)
+
             # 9. Gerar relatório
             report = self._generate_report(
                 validation=validation_result,
@@ -356,6 +398,7 @@ class BuildImageUseCase:
                 success=True,
                 image_tag=request.tag,
                 image_sha256=build_result.image_sha256,
+                provenance=provenance,
                 report=report,
                 validation=validation,
                 analysis=validation_result.analysis,
@@ -1039,6 +1082,119 @@ class BuildImageUseCase:
             )
         cutoff = self.FAIL_ON_THRESHOLDS.index(normalized)
         return any(counts[level] > 0 for level in self.FAIL_ON_THRESHOLDS[: cutoff + 1])
+
+    def _digest_source(self, context_path: str, dockerfile_path: str) -> SourceDigests:
+        """Digere a entrada do build: Dockerfile, contexto, bases e revisão.
+
+        Nada aqui é fatal. Um contexto que não pôde ser digerido devolve
+        campos vazios, e a procedência se declara `INCOMPLETE` -- que é a
+        ausência de prova, não uma acusação, e é muito diferente de fingir
+        que a cadeia fechou.
+        """
+        root = Path(context_path)
+        dockerfile = (
+            root / dockerfile_path
+            if not Path(dockerfile_path).is_absolute()
+            else Path(dockerfile_path)
+        )
+
+        dockerfile_digest = ""
+        base_images: dict[str, str] = {}
+        if dockerfile.is_file():
+            try:
+                dockerfile_digest = hash_file(dockerfile)
+                base_images = self._declared_bases(dockerfile)
+            except OSError as e:
+                logger.warning(f"Não foi possível digerir {dockerfile}: {e}")
+
+        context_digest, counted = "", 0
+        try:
+            context_digest, counted = hash_context(root)
+        except (OSError, ContextTooLargeError) as e:
+            logger.warning(f"Não foi possível digerir o contexto {root}: {e}")
+
+        revision, dirty = self._git_state(root)
+        return SourceDigests(
+            dockerfile=dockerfile_digest,
+            context=context_digest,
+            context_files=counted,
+            base_images=base_images,
+            git_revision=revision,
+            git_dirty=dirty,
+        )
+
+    @staticmethod
+    def _declared_bases(dockerfile: Path) -> dict[str, str]:
+        """Cada `FROM` e o digest que ele fixa, quando fixa.
+
+        Uma base sem digest é uma tag móvel, e registrar isso vale mais do
+        que omitir: é exatamente a diferença entre um build reproduzível e um
+        que depende do dia.
+        """
+        bases: dict[str, str] = {}
+        try:
+            content = dockerfile.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return bases
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped.upper().startswith("FROM "):
+                continue
+            reference = stripped.split()[1]
+            _, separator, digest = reference.partition("@")
+            bases[reference] = digest if separator else ""
+        return bases
+
+    @staticmethod
+    def _git_state(root: Path) -> tuple[str, bool]:
+        """Commit e limpeza da árvore. Um commit sozinho mentiria sobre o que
+        gerou a imagem se houvesse alteração não commitada."""
+        try:
+            revision = subprocess.run(  # nosec B603  # noqa: S603
+                [resolve_executable("git"), "-C", str(root), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            if revision.returncode != 0:
+                return "", False
+            status = subprocess.run(  # nosec B603  # noqa: S603
+                [resolve_executable("git"), "-C", str(root), "status", "--porcelain"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            return revision.stdout.strip(), bool(status.stdout.strip())
+        except (ExecutableNotFoundError, OSError, subprocess.SubprocessError):
+            return "", False
+
+    def _repo_digest(self, reference: str) -> str:
+        """O digest do manifesto, que só existe depois de um push."""
+        info = self._get_image_info(reference)
+        digests = info.get("RepoDigests") or []
+        for entry in digests:
+            _, separator, digest = str(entry).partition("@")
+            if separator:
+                return digest
+        return ""
+
+    @staticmethod
+    def _archive_provenance(provenance: BuildProvenance, destination: str) -> None:
+        """Arquiva o documento ao lado do relatório. Falhar aqui não invalida
+        o build: a procedência já está na resposta."""
+        if not destination:
+            return
+        try:
+            path = Path(destination)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(provenance.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            logger.info(f"Procedência arquivada em {path}")
+        except OSError as e:
+            logger.warning(f"Não foi possível arquivar a procedência: {e}")
 
     def _generate_report(
         self,

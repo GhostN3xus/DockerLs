@@ -20,7 +20,9 @@ from dockerls.application.use_cases.build_image import (
 from dockerls.cli.dependencies import enable_console_logging
 from dockerls.cli.publish_prompt import resolve_destination, resolve_identity
 from dockerls.cli.rendering import render_validation_report
+from dockerls.cli.text import safe
 from dockerls.domain.value_objects.build_labels import BuildIdentity, MissingBuildMetadataError
+from dockerls.domain.value_objects.provenance import BuildProvenance, ProvenanceStatus
 from dockerls.domain.value_objects.registry_target import InvalidRegistryTargetError
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK
 from dockerls.infrastructure.dockerfile_validator import DockerfileValidator, HardeningTemplates
@@ -452,6 +454,9 @@ def _print_build_output(response: BuildImageResponse, report_file: str | None) -
         _print_report(report)
         _write_report_file(report, report_file)
 
+    if response.provenance is not None:
+        _print_provenance(response.provenance)
+
     if response.recommendations:
         console.print(Panel("[bold yellow]💡 Hardening Suggestions[/bold yellow]", expand=False))
         for i, rec in enumerate(response.recommendations[:3], 1):
@@ -569,6 +574,10 @@ def _print_json_output(response: BuildImageResponse, output_file: str | None = N
     # reprovada, que é justamente quando o CI precisa saber o que falhou.
     if response.report is not None:
         output_data["report"] = _report_dict(response.report)
+    # A procedência entra no JSON sempre que existe: é o que um portão de
+    # supply chain lê para decidir, e ele não lê tabela de terminal.
+    if response.provenance is not None:
+        output_data["provenance"] = response.provenance.to_dict()
     if response.error:
         output_data["error"] = response.error
 
@@ -720,3 +729,44 @@ def _tag_part(tag: str | None) -> str:
     if ":" in value:
         return value.rpartition(":")[2] or "latest"
     return "latest"
+
+
+def _print_provenance(provenance: BuildProvenance) -> None:
+    """Os hashes de antes e depois, e o que a comparação entre eles diz.
+
+    Impresso mesmo quando tudo bate: o valor de uma cadeia de fornecimento
+    está em ser vista rotineiramente, não só quando quebra -- quem nunca leu
+    o registro íntegro não reconhece o rompido.
+    """
+    status = provenance.status
+    colors = {
+        ProvenanceStatus.VERIFIED: "green",
+        ProvenanceStatus.INCOMPLETE: "yellow",
+        ProvenanceStatus.INPUT_CHANGED: "red",
+    }
+    color = colors.get(status, "white")
+    console.print(Panel(f"[bold {color}]🔗 Supply chain: {status}[/bold {color}]", expand=False))
+    console.print(f"  [dim]{safe(provenance.explain())}[/dim]\n")
+
+    source = provenance.source
+    console.print("[bold]ENTRADA[/bold] [dim](medida antes do build)[/dim]")
+    console.print(f"  Dockerfile  {safe(source.dockerfile) or '[dim]não digerido[/dim]'}")
+    console.print(
+        f"  Contexto    {safe(source.context) or '[dim]não digerido[/dim]'}"
+        f"  [dim]({source.context_files} arquivos)[/dim]"
+    )
+    if source.git_revision:
+        dirty = " [yellow](árvore suja)[/yellow]" if source.git_dirty else ""
+        console.print(f"  Commit      {safe(source.git_revision)}{dirty}")
+    for reference, digest in source.base_images.items():
+        pinned = safe(digest) if digest else "[yellow]tag móvel, sem digest[/yellow]"
+        console.print(f"  Base        {safe(reference)} -> {pinned}")
+
+    artifact = provenance.artifact
+    console.print("\n[bold]SAÍDA[/bold] [dim](medida depois do build)[/dim]")
+    console.print(f"  Imagem      {safe(artifact.image_id) or '[dim]desconhecida[/dim]'}")
+    if artifact.repo_digest:
+        console.print(f"  Manifesto   {safe(artifact.repo_digest)}")
+    if artifact.published_reference:
+        console.print(f"  Publicada   {safe(artifact.published_reference)}")
+    console.print()
