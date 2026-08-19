@@ -5,6 +5,61 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] -- 2026-08-18
+
+### Adicionado — destino e responsabilidade perguntados antes do build
+
+`dockerls build` passa a resolver, **antes** de validar/construir/escanear:
+para onde a imagem vai, quem responde por ela, e para quem se avisa quando ela
+tiver uma vulnerabilidade. Perguntar depois desperdiça o trabalho inteiro — e é
+exatamente quando alguém publica em qualquer lugar só para não repetir a espera.
+
+Novas opções: `--registry` (também aceita `--acr`), `--owner`,
+`--security-contact`, `--source` e `--non-interactive`. O que faltar é
+perguntado no terminal; com `--non-interactive` ou `--ci-mode` vira erro, porque
+um pipeline não tem quem responda e travar esperando entrada é o pior
+comportamento possível num runner.
+
+**Compatibilidade de registries**, cada um com sua regra real de validação e o
+comando de login que o destrava:
+
+| Provedor | Formato | Login |
+|---|---|---|
+| Azure ACR | `registro.azurecr.io/apps/app` (também `.azurecr.cn` / `.azurecr.us`) | `az acr login --name <registro>` |
+| Google Artifact Registry | `regiao-docker.pkg.dev/projeto/repo/app` | `gcloud auth configure-docker` |
+| Google GCR | `gcr.io/projeto/app` (e espelhos `eu.gcr.io`) | `gcloud auth configure-docker gcr.io` |
+| Docker Hub | `minhaorg/app` | `docker login` / `dockerls login` |
+| GitHub GHCR | `ghcr.io/org/app` | `docker login ghcr.io` |
+| Registry privado | `registry.interna:5000/time/app` | `docker login <host>` |
+| DHI | — | **recusado**: `dhi.io` distribui imagens endurecidas, não aceita push |
+
+As regras não são decorativas: o Artifact Registry exige `projeto/repo/imagem`
+no caminho e o Docker Hub exige um namespace que não seja `library`. As duas
+coisas falhavam só na hora do push, minutos depois do build.
+
+### Corrigido
+
+- **`--push` publicava a tag local como está.** Numa tag sem host —
+  `dockerls:1.5.0`, que é a forma que todo mundo digita — isso vira uma
+  tentativa de publicar em `docker.io/library/dockerls`, recusada com um
+  "denied" que não explica nada. A imagem passa a ser reetiquetada para o
+  destino antes do push: era o passo que faltava entre escolher o registry e
+  publicar nele.
+- **O assistente interativo perguntava o registry e ignorava a resposta.** Ele
+  oferecia `dockerhub`, `ghcr` e `harbor`, e nenhuma das escolhas mudava o
+  destino do push.
+- **O `build` publicava imagens sem `maintainer` nem `security.scanner`** — os
+  dois rótulos que a regra DF007 deste projeto cobra de todo Dockerfile que ele
+  analisa. Cobrava dos outros o que não fazia. Os rótulos agora são derivados
+  das respostas, com as chaves `org.opencontainers.image.*` da especificação
+  OCI, e rótulos vazios são omitidos em vez de gravados em branco: uma chave
+  presente e vazia é pior que ausente, porque um inventário a lê como
+  respondida.
+
+Um build local para experimentar continua não exigindo nada: os rótulos só são
+cobrados de quem vai publicar. Transformar um teste local em formulário faria
+as pessoas desligarem a checagem inteira.
+
 ## [1.5.0] -- 2026-08-18
 
 ### Corrigido — o catálogo endurecido recomendava runtimes mortos

@@ -18,7 +18,10 @@ from dockerls.application.use_cases.build_image import (
     BuildReport,
 )
 from dockerls.cli.dependencies import enable_console_logging
+from dockerls.cli.publish_prompt import resolve_destination, resolve_identity
 from dockerls.cli.rendering import render_validation_report
+from dockerls.domain.value_objects.build_labels import BuildIdentity, MissingBuildMetadataError
+from dockerls.domain.value_objects.registry_target import InvalidRegistryTargetError
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK
 from dockerls.infrastructure.dockerfile_validator import DockerfileValidator, HardeningTemplates
 
@@ -70,6 +73,29 @@ def build(
     push: bool = typer.Option(
         False, "--push", help="Faz docker push da tag após um build bem-sucedido"
     ),
+    registry: str | None = typer.Option(
+        None,
+        "--registry",
+        "--acr",
+        help=(
+            "Destino da publicação, sem tag: meuacr.azurecr.io/apps/app, "
+            "us-central1-docker.pkg.dev/proj/repo/app, gcr.io/proj/app, minhaorg/app"
+        ),
+    ),
+    owner: str | None = typer.Option(
+        None, "--owner", help="Time ou pessoa responsável (vira maintainer e vendor)"
+    ),
+    security_contact: str | None = typer.Option(
+        None, "--security-contact", help="Contato para vulnerabilidades nesta imagem"
+    ),
+    source_url: str | None = typer.Option(
+        None, "--source", help="URL do repositório que gera a imagem"
+    ),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        help="Não pergunta nada: o que faltar vira erro, em vez de travar o pipeline",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug detalhado"),
     output: str | None = typer.Option(None, "--output", "-o", help="Arquivo de saída do relatório"),
     force: bool = typer.Option(False, "--force", help="Força build mesmo com erros de validação"),
@@ -110,6 +136,33 @@ def build(
     build_args_dict = _parse_json_option(build_args, "--build-args")
     labels_dict = _parse_json_option(labels, "--labels")
 
+    # Destino e responsabilidade são resolvidos **antes** do build: descobrir
+    # que o destino está errado depois de validar, construir e escanear
+    # desperdiça o trabalho inteiro, e rotular depois do build significa
+    # reconstruir.
+    quiet = non_interactive or ci_mode
+    identity = BuildIdentity(
+        owner=(owner or "").strip(),
+        security_contact=(security_contact or "").strip(),
+        source=(source_url or "").strip(),
+        version=(tag or "").rpartition(":")[2],
+        extra=labels_dict or {},
+    )
+    target = None
+    try:
+        if push or registry:
+            target = resolve_destination(registry, _tag_part(tag), non_interactive=quiet)
+        # Os rótulos só são exigidos de quem vai publicar: um build local para
+        # experimentar não precisa de dono, e transformar isso em obstáculo
+        # faria as pessoas desligarem a checagem inteira.
+        if target is not None:
+            identity = resolve_identity(identity, non_interactive=quiet)
+    except (InvalidRegistryTargetError, MissingBuildMetadataError) as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(EXIT_ERROR) from e
+
+    labels_dict = {**identity.to_labels(), **(labels_dict or {})}
+
     # Inicializar use case
     validator = DockerfileValidator()
     use_case = BuildImageUseCase(validator, template_provider)
@@ -131,7 +184,8 @@ def build(
         ci_mode=ci_mode,
         verbose=verbose,
         force=force,
-        push=push,
+        push=push or target is not None,
+        push_reference=target.reference if target else "",
         auto_remediate=auto_remediate or zero_vulns,
         max_remediation_rounds=max_iterations,
         target_zero_vulns=zero_vulns,
@@ -654,3 +708,15 @@ def _int(value: object) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _tag_part(tag: str | None) -> str:
+    """A tag de `nome:tag`, ou `latest` quando não há uma.
+
+    O destino recebe host e caminho; a tag vem daqui, de um lugar só, para
+    não haver duas fontes discordando sobre qual versão está sendo publicada.
+    """
+    value = (tag or "").strip()
+    if ":" in value:
+        return value.rpartition(":")[2] or "latest"
+    return "latest"

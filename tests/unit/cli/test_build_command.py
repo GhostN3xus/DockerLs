@@ -9,6 +9,7 @@ então nada disso quebrou nenhum teste.
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -437,3 +438,74 @@ class TestBaseTemplateValidation:
         assert "--base" in result.stdout
         for name in HardeningTemplates().list_templates():
             assert name in result.stdout
+
+
+class TestPublishFlow:
+    """Destino e responsabilidade resolvidos antes do build começar.
+
+    Perguntar depois desperdiça validação, build e scan -- e é exatamente
+    quando alguém publica em qualquer lugar só para não repetir a espera.
+    """
+
+    def _run(self, tmp_path, args, **kwargs):
+        (tmp_path / "Dockerfile").write_text("FROM python:3.12-alpine\nUSER 1001\n")
+        return CliRunner().invoke(app, ["build", str(tmp_path), *args], **kwargs)
+
+    def test_an_invalid_destination_fails_before_any_build(self, tmp_path):
+        with patch("dockerls.cli.commands.build.BuildImageUseCase") as use_case:
+            result = self._run(tmp_path, ["-t", "app:1.0", "--registry", "dhi.io/app", "--push"])
+        assert result.exit_code == EXIT_ERROR
+        assert "não aceita push" in result.output
+        # O build nunca chegou a ser instanciado.
+        use_case.assert_not_called()
+
+    def test_publishing_without_an_owner_fails_in_non_interactive_mode(self, tmp_path):
+        with patch("dockerls.cli.commands.build.BuildImageUseCase") as use_case:
+            result = self._run(
+                tmp_path,
+                [
+                    "-t",
+                    "app:1.0",
+                    "--registry",
+                    "meuacr.azurecr.io/apps/app",
+                    "--push",
+                    "--non-interactive",
+                ],
+            )
+        assert result.exit_code == EXIT_ERROR
+        assert "owner" in result.output
+        use_case.assert_not_called()
+
+    def test_a_complete_destination_reaches_the_use_case(self, tmp_path):
+        with patch("dockerls.cli.commands.build.BuildImageUseCase") as use_case:
+            use_case.FAIL_ON_THRESHOLDS = ("critical", "high", "medium", "low")
+            self._run(
+                tmp_path,
+                [
+                    "-t",
+                    "app:1.5.0",
+                    "--registry",
+                    "meuacr.azurecr.io/apps/app",
+                    "--push",
+                    "--owner",
+                    "Plataforma",
+                    "--security-contact",
+                    "sec@empresa",
+                    "--source",
+                    "https://git/repo",
+                    "--non-interactive",
+                ],
+            )
+        request = use_case.return_value.execute.call_args.args[0]
+        assert request.push_reference == "meuacr.azurecr.io/apps/app:1.5.0"
+        assert request.labels["maintainer"] == "Plataforma"
+        assert request.labels["security.contact"] == "sec@empresa"
+        assert request.labels["security.scanner"] == "dockerls"
+
+    def test_a_local_build_needs_no_owner(self, tmp_path):
+        # Exigir dono de um build local para experimentar faria as pessoas
+        # desligarem a checagem inteira.
+        with patch("dockerls.cli.commands.build.BuildImageUseCase") as use_case:
+            use_case.FAIL_ON_THRESHOLDS = ("critical", "high", "medium", "low")
+            result = self._run(tmp_path, ["-t", "app:1.0", "--non-interactive"])
+        assert result.exit_code != EXIT_ERROR or "owner" not in result.output

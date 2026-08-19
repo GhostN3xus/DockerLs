@@ -127,6 +127,11 @@ class BuildImageRequest:
     auto_remediate: bool = False
     max_remediation_rounds: int = 3
     target_zero_vulns: bool = False
+    #: Destino completo da publicação (`meuacr.azurecr.io/apps/dockerls:1.5.0`).
+    #: Vazio significa publicar a própria tag local, que só funciona quando ela
+    #: já nomeia um registry -- e era o comportamento anterior, que falhava com
+    #: "denied" para toda tag sem host.
+    push_reference: str = ""
 
 
 @dataclass
@@ -327,7 +332,7 @@ class BuildImageUseCase:
             # 8. Push, se pedido. Só depois dos portões: publicar uma imagem
             #    que reprovou no scan derrota o propósito de ter o portão.
             if request.push:
-                push_error = self._push_image(request.tag)
+                push_error = self._push_image(request.tag, request.push_reference)
                 if push_error is not None:
                     return BuildImageResponse(
                         success=False,
@@ -733,22 +738,42 @@ class BuildImageUseCase:
                 logs=logs,
             )
 
-    def _push_image(self, tag: str) -> str | None:
-        """Publica a imagem no registry. Devolve a mensagem de erro, ou None."""
-        logger.debug(f"Publicando imagem: {tag}")
+    def _push_image(self, tag: str, destination: str = "") -> str | None:
+        """Publica a imagem no destino. Devolve a mensagem de erro, ou None.
+
+        Antes disto o push usava a tag local como está. Numa tag sem host --
+        `dockerls:1.5.0`, que é a forma que todo mundo digita -- isso vira uma
+        tentativa de publicar em `docker.io/library/dockerls`, recusada com um
+        "denied" que não explica nada. Com um destino, a imagem é reetiquetada
+        antes: é o passo que faltava entre escolher o registry e publicar nele.
+        """
+        target = destination.strip() or tag
+        if target != tag:
+            retag_error = self._run_docker(
+                ["tag", tag, target], timeout=60, action=f"Retag para {target}"
+            )
+            if retag_error is not None:
+                return retag_error
+
+        logger.debug(f"Publicando imagem: {target}")
+        return self._run_docker(["push", target], timeout=1800, action=f"Push de {target}")
+
+    @staticmethod
+    def _run_docker(args: list[str], *, timeout: int, action: str) -> str | None:
+        """Um comando do docker, com o erro em texto em vez de exceção."""
         try:
             result = subprocess.run(  # nosec B603  # noqa: S603
-                [resolve_executable("docker"), "push", tag],
+                [resolve_executable("docker"), *args],
                 capture_output=True,
                 text=True,
-                timeout=1800,
+                timeout=timeout,
                 check=False,
             )
         except (ExecutableNotFoundError, OSError, subprocess.SubprocessError) as e:
-            return f"Push failed: {e}"
+            return f"{action} falhou: {e}"
 
         if result.returncode != 0:
-            return f"Push failed: {result.stderr.strip()[:500]}"
+            return f"{action} falhou: {result.stderr.strip()[:500]}"
         return None
 
     def _get_image_info(self, tag: str) -> dict[str, Any]:
