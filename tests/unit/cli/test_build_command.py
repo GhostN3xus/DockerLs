@@ -607,3 +607,51 @@ class TestPublishingRequiresAVerdict:
             )
         request = use_case.return_value.execute.call_args.args[0]
         assert request.provenance_path.endswith("sc.json")
+
+
+class TestTemplateDiscovery:
+    """Escolher base não pode ser adivinhação.
+
+    A lista era plana, com quase quarenta nomes e nenhuma indicação do sistema
+    operacional de cada um -- ela não respondia a pergunta que a pessoa tem,
+    que é "qual serve para a minha aplicação, e sobre qual SO ela roda".
+    """
+
+    def test_every_stack_and_os_is_listed(self):
+        result = CliRunner().invoke(app, ["build", "--list-templates"])
+        assert result.exit_code == EXIT_OK
+        for expected in ("alpine", "debian", "ubuntu", "distroless", "go-scratch"):
+            assert expected in result.output
+        for stack in ("Node.js", "Python", "Java", "Go", "Rust", "PHP", "Ruby"):
+            assert stack in result.output
+
+    def test_java_build_tools_are_covered(self):
+        # `--base maven` respondia que o template não existe, mandando a pessoa
+        # escrever o multi-stage na mão -- justamente onde um projeto Java
+        # começa o Dockerfile.
+        result = CliRunner().invoke(app, ["build", "--list-templates"])
+        assert "maven" in result.output
+        assert "maven-alpine" in result.output
+        assert "gradle" in result.output
+
+    def test_examples_are_shown(self):
+        result = CliRunner().invoke(app, ["build", "--list-templates"])
+        assert "--base node-alpine" in result.output
+        assert "--base maven-alpine" in result.output
+        # E a frase que evita a confusão de origem: sem --base, o build usa o
+        # Dockerfile que já está lá.
+        assert "Dockerfile que já está no diretório" in result.output
+
+    def test_an_unknown_base_fails_before_building(self, tmp_path):
+        (tmp_path / "Dockerfile").write_text("FROM python:3.12-alpine\n")
+        result = CliRunner().invoke(
+            app, ["build", str(tmp_path), "-t", "a:1", "--base", "alpine-inexistente"]
+        )
+        assert result.exit_code == EXIT_ERROR
+        assert "inválido" in result.output
+
+    def test_json_mode_still_lists_plain_names(self):
+        result = CliRunner().invoke(app, ["build", "--list-templates", "--ci-mode"])
+        payload = json.loads(result.output)
+        assert "maven" in payload["templates"]
+        assert len(payload["templates"]) >= 39

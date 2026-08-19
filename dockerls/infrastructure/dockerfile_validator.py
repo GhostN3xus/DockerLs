@@ -974,6 +974,13 @@ class HardeningTemplates(HardeningTemplateProvider):
         "java-debian": "java-debian.dockerfile",
         "java-ubuntu": "java-ubuntu.dockerfile",
         "java-distroless": "java-distroless.dockerfile",
+        # Ferramentas de build Java. São onde um projeto Java de verdade
+        # começa o Dockerfile, e não existiam: `--base maven` respondia que o
+        # template não existe, mandando a pessoa escrever o multi-stage na mão.
+        "maven": "maven.dockerfile",
+        "maven-alpine": "maven-alpine.dockerfile",
+        "gradle": "gradle.dockerfile",
+        "gradle-alpine": "gradle-alpine.dockerfile",
         # Rust
         "rust": "rust.dockerfile",
         "rust-scratch": "rust-scratch.dockerfile",

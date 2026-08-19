@@ -946,6 +946,53 @@ dockerls build -t minha-app:1.0 \
 dockerls build --list-templates
 ```
 
+#### Escolhendo a base: SO e stack
+
+**Sem `--base` nem `--hardened`, o build usa o Dockerfile que já está no
+diretório.** Ele não inventa base nenhuma — se o seu Dockerfile é de Python, a
+imagem sai em Python. Os templates só entram quando você pede um:
+
+```bash
+# Node sobre Alpine
+dockerls build --hardened --base node-alpine -t minha-api:1.0 .
+
+# Java com Maven: constrói com a ferramenta, roda só com o JRE
+dockerls build --hardened --base maven-alpine -t minha-api:1.0 --fail-on critical .
+
+# Go estático, sem sistema operacional nenhum embaixo
+dockerls build --hardened --base go-scratch -t minha-api:1.0 .
+
+# Só o sistema operacional, sem runtime de linguagem
+dockerls build --hardened --base ubuntu -t minha-base:1.0 .
+```
+
+São 39 templates, e `--list-templates` mostra todos agrupados por stack, com o
+sistema operacional e o que distingue cada variante:
+
+| Stack | Variantes |
+|---|---|
+| Sistema operacional puro | `alpine` `debian` `ubuntu` `distroless` |
+| Node.js | `node` `node-alpine` `node-debian` `node-ubuntu` `node-distroless` |
+| Python | `python` `python-alpine` `python-debian` `python-ubuntu` `python-distroless` |
+| Java (runtime) | `java` `java-alpine` `java-debian` `java-ubuntu` `java-distroless` |
+| Java com Maven | `maven` `maven-alpine` |
+| Java com Gradle | `gradle` `gradle-alpine` |
+| Go | `go` `go-alpine` `go-debian` `go-distroless` `go-scratch` |
+| Rust | `rust` `rust-alpine` `rust-debian` `rust-scratch` |
+| PHP | `php` `php-alpine` `php-debian` `php-ubuntu` |
+| Ruby | `ruby` `ruby-alpine` `ruby-debian` |
+
+Os de **Maven** e **Gradle** são multi-stage de verdade: a ferramenta de build
+fica no primeiro estágio e o runtime carrega apenas o JRE. Compilador, cache do
+Maven e a árvore de dependências de build não são necessários para *rodar* a
+aplicação, e cada um deles é superfície de ataque e CVE para triar depois.
+
+Ao escolher entre variantes, o que decide costuma ser a libc: `-alpine` é musl,
+o resto é glibc. Módulos nativos de Node (`sharp`, `bcrypt`) e wheels de Python
+precisam de build musllinux para funcionar lá. As `-distroless` não têm shell
+nem gerenciador de pacotes — a menor superfície entre as que ainda carregam um
+runtime; `go-scratch` e `rust-scratch` são o binário estático sozinho.
+
 #### Publicar exige veredito
 
 `--push` ou `--registry` ligam o portão de segurança automaticamente em

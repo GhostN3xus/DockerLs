@@ -5,6 +5,33 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] -- 2026-08-19
+
+### Adicionado
+
+- **Templates de Maven e Gradle** (`maven`, `maven-alpine`, `gradle`,
+  `gradle-alpine`). `--base maven` respondia que o template não existe,
+  mandando a pessoa escrever o multi-stage na mão — justamente onde um projeto
+  Java de verdade começa o Dockerfile. Os quatro são multi-stage: a ferramenta
+  de build fica no primeiro estágio e o runtime carrega só o JRE. São 39
+  templates no total, cobrindo alpine, debian, ubuntu, distroless e scratch.
+
+### Corrigido
+
+- **`--list-templates` era uma lista plana de quase quarenta nomes**, sem dizer
+  o sistema operacional de cada um. Ela não respondia a pergunta que a pessoa
+  tem — "qual serve para a minha aplicação, e sobre qual SO ela roda". Agora sai
+  agrupada por stack, com o SO e o que distingue cada variante (musl vs glibc,
+  com shell ou sem), e com exemplos de build reais.
+- **A saída não dizia de onde vinha a base.** `dockerls build` sem `--base` nem
+  `--hardened` usa o Dockerfile que já está no diretório — ele não escolhe base
+  nenhuma. Num projeto Python isso produz uma imagem Python, e nada na saída
+  explicava que os templates existem e não estavam sendo usados.
+- **`--base` aceitava nome inexistente.** A validação perguntava se algum
+  template era *substring* do que foi digitado, então `--base alpine-qualquer`
+  passava (por conter "alpine") e só explodia lá dentro, na geração. Agora é
+  nome exato, com a lista completa na mensagem de erro.
+
 ## [2.0.0] -- 2026-08-18
 
 Primeiro release publicado. As versões 1.3.0 a 1.7.1 abaixo documentam o
