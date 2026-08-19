@@ -5,6 +5,32 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] -- 2026-08-19
+
+### Documentação
+
+- **As 31 opções do `build` estão documentadas.** Nove não apareciam em lugar
+  nenhum do README: `--interactive`, `--scan`/`--no-scan`, `--auto-fix`,
+  `--zero-vulns`, `--max-iterations`, `--report`, `--acr`. Uma opção que existe
+  e não está escrita é uma opção que ninguém usa.
+- **Seção de requisitos por comando.** Dizia apenas "Python, Trivy, Grype", sem
+  mencionar que o **daemon do Docker é necessário só para o `build`** — e que
+  todo o resto funciona sem ele. A tabela agora diz, para cada requisito, o que
+  deixa de funcionar na ausência dele, e a nota sobre o `build` inclui a
+  autenticação no registry de destino.
+- **Seis exemplos práticos com a saída real do comando**: validação reprovando
+  com os três erros nomeados, build passando no portão com o placar do scan,
+  base inexistente recusada antes de construir, publicação sem responsável
+  recusada com o comando de login já nomeado, o caminho completo de produção, e
+  a forma usada em pipeline.
+
+### Corrigido
+
+- **O help do `--base` estava desatualizado.** Anunciava "(node, python, go,
+  rust, java, php)" quando existem 39 templates, incluindo `alpine`, `ubuntu`,
+  `distroless`, `maven-alpine` e `go-scratch`. Quem lia o help concluía que
+  metade das opções não existia.
+
 ## [2.0.1] -- 2026-08-19
 
 ### Adicionado

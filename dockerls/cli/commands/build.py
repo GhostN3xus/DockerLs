@@ -34,7 +34,9 @@ def build(
     path: str = typer.Argument(".", help="Diretório com Dockerfile"),
     tag: str | None = typer.Option(None, "--tag", "-t", help="Tag da imagem (obrigatório)"),
     base: str | None = typer.Option(
-        None, "--base", help="Imagem base recomendada (node, python, go, rust, java, php)"
+        None,
+        "--base",
+        help="Template hardened da base: alpine, debian, ubuntu, distroless, node-alpine, python-alpine, maven-alpine, go-scratch, ... (--list-templates mostra os 39)",
     ),
     hardened: bool = typer.Option(False, "--hardened", help="Usa templates Dockerfile hardened"),
     list_templates: bool = typer.Option(
