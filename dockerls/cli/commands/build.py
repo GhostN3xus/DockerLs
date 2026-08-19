@@ -36,7 +36,11 @@ def build(
     base: str | None = typer.Option(
         None,
         "--base",
-        help="Template hardened da base: alpine, debian, ubuntu, distroless, node-alpine, python-alpine, maven-alpine, go-scratch, ... (--list-templates mostra os 39)",
+        help=(
+            "Template hardened da base: alpine, debian, ubuntu, distroless, "
+            "node-alpine, python-alpine, maven-alpine, go-scratch, ... "
+            "(--list-templates mostra os 39)"
+        ),
     ),
     hardened: bool = typer.Option(False, "--hardened", help="Usa templates Dockerfile hardened"),
     list_templates: bool = typer.Option(
