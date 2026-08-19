@@ -18,7 +18,12 @@ from dockerls.application.use_cases.build_image import (
     BuildReport,
 )
 from dockerls.cli.dependencies import enable_console_logging
+from dockerls.cli.publish_prompt import resolve_destination, resolve_identity
 from dockerls.cli.rendering import render_validation_report
+from dockerls.cli.text import safe
+from dockerls.domain.value_objects.build_labels import BuildIdentity, MissingBuildMetadataError
+from dockerls.domain.value_objects.provenance import BuildProvenance, ProvenanceStatus
+from dockerls.domain.value_objects.registry_target import InvalidRegistryTargetError
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK
 from dockerls.infrastructure.dockerfile_validator import DockerfileValidator, HardeningTemplates
 
@@ -70,6 +75,34 @@ def build(
     push: bool = typer.Option(
         False, "--push", help="Faz docker push da tag após um build bem-sucedido"
     ),
+    registry: str | None = typer.Option(
+        None,
+        "--registry",
+        "--acr",
+        help=(
+            "Destino da publicação, sem tag: meuacr.azurecr.io/apps/app, "
+            "us-central1-docker.pkg.dev/proj/repo/app, gcr.io/proj/app, minhaorg/app"
+        ),
+    ),
+    owner: str | None = typer.Option(
+        None, "--owner", help="Time ou pessoa responsável (vira maintainer e vendor)"
+    ),
+    security_contact: str | None = typer.Option(
+        None, "--security-contact", help="Contato para vulnerabilidades nesta imagem"
+    ),
+    source_url: str | None = typer.Option(
+        None, "--source", help="URL do repositório que gera a imagem"
+    ),
+    provenance: str | None = typer.Option(
+        None,
+        "--provenance",
+        help="Arquiva o registro de supply chain (hashes de entrada e saída) em JSON",
+    ),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        help="Não pergunta nada: o que faltar vira erro, em vez de travar o pipeline",
+    ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug detalhado"),
     output: str | None = typer.Option(None, "--output", "-o", help="Arquivo de saída do relatório"),
     force: bool = typer.Option(False, "--force", help="Força build mesmo com erros de validação"),
@@ -110,6 +143,52 @@ def build(
     build_args_dict = _parse_json_option(build_args, "--build-args")
     labels_dict = _parse_json_option(labels, "--labels")
 
+    # Publicar sem veredito é a contradição que esta ferramenta existe para
+    # não cometer: o portão passa a ser obrigatório para quem publica, em vez
+    # de depender de alguém lembrar de passar --fail-on. `--no-scan` com push
+    # é recusado de saída -- sem medição não há veredito nenhum a dar.
+    publishing = push or bool(registry)
+    if publishing and not scan:
+        console.print(
+            "[red]Error:[/red] --push com --no-scan publicaria uma imagem que ninguém "
+            "mediu. Uma imagem não medida não é uma imagem segura; é uma imagem "
+            "desconhecida."
+        )
+        raise typer.Exit(EXIT_ERROR)
+    if publishing and fail_on is None:
+        fail_on = "critical"
+        console.print(
+            "[dim]Publicando: portão de segurança em `critical` por padrão "
+            "(use --fail-on para mudar o limiar).[/dim]"
+        )
+
+    # Destino e responsabilidade são resolvidos **antes** do build: descobrir
+    # que o destino está errado depois de validar, construir e escanear
+    # desperdiça o trabalho inteiro, e rotular depois do build significa
+    # reconstruir.
+    quiet = non_interactive or ci_mode
+    identity = BuildIdentity(
+        owner=(owner or "").strip(),
+        security_contact=(security_contact or "").strip(),
+        source=(source_url or "").strip(),
+        version=(tag or "").rpartition(":")[2],
+        extra=labels_dict or {},
+    )
+    target = None
+    try:
+        if push or registry:
+            target = resolve_destination(registry, _tag_part(tag), non_interactive=quiet)
+        # Os rótulos só são exigidos de quem vai publicar: um build local para
+        # experimentar não precisa de dono, e transformar isso em obstáculo
+        # faria as pessoas desligarem a checagem inteira.
+        if target is not None:
+            identity = resolve_identity(identity, non_interactive=quiet)
+    except (InvalidRegistryTargetError, MissingBuildMetadataError) as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise typer.Exit(EXIT_ERROR) from e
+
+    labels_dict = {**identity.to_labels(), **(labels_dict or {})}
+
     # Inicializar use case
     validator = DockerfileValidator()
     use_case = BuildImageUseCase(validator, template_provider)
@@ -131,7 +210,9 @@ def build(
         ci_mode=ci_mode,
         verbose=verbose,
         force=force,
-        push=push,
+        push=push or target is not None,
+        push_reference=target.reference if target else "",
+        provenance_path=(provenance or "").strip(),
         auto_remediate=auto_remediate or zero_vulns,
         max_remediation_rounds=max_iterations,
         target_zero_vulns=zero_vulns,
@@ -398,6 +479,9 @@ def _print_build_output(response: BuildImageResponse, report_file: str | None) -
         _print_report(report)
         _write_report_file(report, report_file)
 
+    if response.provenance is not None:
+        _print_provenance(response.provenance)
+
     if response.recommendations:
         console.print(Panel("[bold yellow]💡 Hardening Suggestions[/bold yellow]", expand=False))
         for i, rec in enumerate(response.recommendations[:3], 1):
@@ -515,6 +599,10 @@ def _print_json_output(response: BuildImageResponse, output_file: str | None = N
     # reprovada, que é justamente quando o CI precisa saber o que falhou.
     if response.report is not None:
         output_data["report"] = _report_dict(response.report)
+    # A procedência entra no JSON sempre que existe: é o que um portão de
+    # supply chain lê para decidir, e ele não lê tabela de terminal.
+    if response.provenance is not None:
+        output_data["provenance"] = response.provenance.to_dict()
     if response.error:
         output_data["error"] = response.error
 
@@ -654,3 +742,56 @@ def _int(value: object) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _tag_part(tag: str | None) -> str:
+    """A tag de `nome:tag`, ou `latest` quando não há uma.
+
+    O destino recebe host e caminho; a tag vem daqui, de um lugar só, para
+    não haver duas fontes discordando sobre qual versão está sendo publicada.
+    """
+    value = (tag or "").strip()
+    if ":" in value:
+        return value.rpartition(":")[2] or "latest"
+    return "latest"
+
+
+def _print_provenance(provenance: BuildProvenance) -> None:
+    """Os hashes de antes e depois, e o que a comparação entre eles diz.
+
+    Impresso mesmo quando tudo bate: o valor de uma cadeia de fornecimento
+    está em ser vista rotineiramente, não só quando quebra -- quem nunca leu
+    o registro íntegro não reconhece o rompido.
+    """
+    status = provenance.status
+    colors = {
+        ProvenanceStatus.VERIFIED: "green",
+        ProvenanceStatus.INCOMPLETE: "yellow",
+        ProvenanceStatus.INPUT_CHANGED: "red",
+    }
+    color = colors.get(status, "white")
+    console.print(Panel(f"[bold {color}]🔗 Supply chain: {status}[/bold {color}]", expand=False))
+    console.print(f"  [dim]{safe(provenance.explain())}[/dim]\n")
+
+    source = provenance.source
+    console.print("[bold]ENTRADA[/bold] [dim](medida antes do build)[/dim]")
+    console.print(f"  Dockerfile  {safe(source.dockerfile) or '[dim]não digerido[/dim]'}")
+    console.print(
+        f"  Contexto    {safe(source.context) or '[dim]não digerido[/dim]'}"
+        f"  [dim]({source.context_files} arquivos)[/dim]"
+    )
+    if source.git_revision:
+        dirty = " [yellow](árvore suja)[/yellow]" if source.git_dirty else ""
+        console.print(f"  Commit      {safe(source.git_revision)}{dirty}")
+    for reference, digest in source.base_images.items():
+        pinned = safe(digest) if digest else "[yellow]tag móvel, sem digest[/yellow]"
+        console.print(f"  Base        {safe(reference)} -> {pinned}")
+
+    artifact = provenance.artifact
+    console.print("\n[bold]SAÍDA[/bold] [dim](medida depois do build)[/dim]")
+    console.print(f"  Imagem      {safe(artifact.image_id) or '[dim]desconhecida[/dim]'}")
+    if artifact.repo_digest:
+        console.print(f"  Manifesto   {safe(artifact.repo_digest)}")
+    if artifact.published_reference:
+        console.print(f"  Publicada   {safe(artifact.published_reference)}")
+    console.print()

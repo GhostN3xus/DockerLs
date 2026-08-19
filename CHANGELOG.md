@@ -5,6 +5,131 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] -- 2026-08-18
+
+Fechamento para produção: três lacunas que só apareceram ao olhar a versão
+como algo que vai ser publicado, não como código em progresso.
+
+### Corrigido
+
+- **Publicar não exigia veredito.** O portão dependia de alguém lembrar de
+  passar `--fail-on`: `--push` sozinho publicava qualquer coisa. Agora `--push`
+  ou `--registry` ligam o portão em `critical` por padrão, e `--fail-on`
+  continua valendo quando o limiar é outro. `--push` com `--no-scan` é recusado
+  de saída — uma imagem não medida não é uma imagem segura, é uma imagem
+  desconhecida. Era a contradição mais direta que restava numa ferramenta cuja
+  tese é que ausência de medição nunca vira afirmação de segurança.
+- **A publicação ignorava a procedência quebrada.** Se o Dockerfile ou o
+  contexto mudaram durante o build, a imagem existe mas não corresponde ao que
+  foi medido — e ela era publicada assim mesmo. Agora o push é recusado com
+  `EXIT_POLICY`, porque distribuir esse artefato seria distribuir algo cuja
+  procedência a própria ferramenta acabou de declarar quebrada.
+- **`--provenance` não existia.** O registro de supply chain era montado e
+  tinha um caminho de arquivamento no caso de uso, mas nenhuma opção de linha
+  de comando chegava até ele: na prática, não dava para guardar o documento em
+  lugar nenhum.
+
+### Documentação
+
+O README passa a documentar o fluxo de publicação (as perguntas antes do build,
+os seis destinos suportados com a regra de cada um, `--non-interactive` para
+pipeline) e o registro de supply chain, com a saída real. As opções
+`--registry`, `--owner`, `--security-contact`, `--source`, `--provenance` e
+`--non-interactive` não estavam documentadas em lugar nenhum fora do CHANGELOG.
+
+## [1.7.0] -- 2026-08-18
+
+### Adicionado — procedência: hash antes, hash depois, e a comparação entre eles
+
+O `build` media o resultado sem registrar nada sobre o que entrou: dois builds
+do mesmo `--tag` produziam relatórios indistinguíveis mesmo partindo de
+Dockerfiles diferentes, e nada ligava o scan ao artefato que ele mediu. Numa
+cadeia de fornecimento, "nós escaneamos essa imagem" sem digest é uma frase
+sobre nada.
+
+Cada build passa a produzir um registro com duas metades:
+
+- **antes** — digest do Dockerfile, digest determinístico do contexto (com o
+  número de arquivos), digest de cada base declarada nos `FROM`, commit e se a
+  árvore estava suja;
+- **depois** — id da imagem, digest do manifesto publicado (que só existe após
+  o push, e é o único identificador que outra máquina consegue usar para puxar
+  exatamente esta imagem), e qual scanner atestou.
+
+**A verificação é o que faz disso controle e não decoração:** a entrada é
+digerida de novo depois do build e comparada com a de antes. Se mudou no meio
+do caminho, o registro sai como `INPUT_CHANGED` — a imagem existe, mas não
+corresponde à entrada que foi medida. Entrada ou saída que não puderam ser
+digeridas dão `INCOMPLETE`, que é ausência de prova e nunca vira prova de
+integridade: o mesmo princípio que rege o scan que não completou.
+
+O digest do contexto é determinístico por construção — caminhos ordenados e
+relativos, e o nome de cada arquivo entrando no digest junto do conteúdo, de
+modo que renomear muda o contexto tanto quanto editar. O `.dockerignore` é
+respeitado porque ele decide o que o daemon realmente recebe: hashear o que
+fica de fora produziria um digest que muda sem a imagem mudar, e um controle
+que dispara à toa é um controle que as pessoas desligam. Um contexto acima de
+50 000 arquivos é recusado em vez de digerido pela metade — quase sempre
+significa `.dockerignore` ausente.
+
+O registro aparece no terminal, entra no `--format json` sob `provenance`, e é
+arquivado em disco quando se pede.
+
+## [1.6.0] -- 2026-08-18
+
+### Adicionado — destino e responsabilidade perguntados antes do build
+
+`dockerls build` passa a resolver, **antes** de validar/construir/escanear:
+para onde a imagem vai, quem responde por ela, e para quem se avisa quando ela
+tiver uma vulnerabilidade. Perguntar depois desperdiça o trabalho inteiro — e é
+exatamente quando alguém publica em qualquer lugar só para não repetir a espera.
+
+Novas opções: `--registry` (também aceita `--acr`), `--owner`,
+`--security-contact`, `--source` e `--non-interactive`. O que faltar é
+perguntado no terminal; com `--non-interactive` ou `--ci-mode` vira erro, porque
+um pipeline não tem quem responda e travar esperando entrada é o pior
+comportamento possível num runner.
+
+**Compatibilidade de registries**, cada um com sua regra real de validação e o
+comando de login que o destrava:
+
+| Provedor | Formato | Login |
+|---|---|---|
+| Azure ACR | `registro.azurecr.io/apps/app` (também `.azurecr.cn` / `.azurecr.us`) | `az acr login --name <registro>` |
+| Google Artifact Registry | `regiao-docker.pkg.dev/projeto/repo/app` | `gcloud auth configure-docker` |
+| Google GCR | `gcr.io/projeto/app` (e espelhos `eu.gcr.io`) | `gcloud auth configure-docker gcr.io` |
+| Docker Hub | `minhaorg/app` | `docker login` / `dockerls login` |
+| GitHub GHCR | `ghcr.io/org/app` | `docker login ghcr.io` |
+| Registry privado | `registry.interna:5000/time/app` | `docker login <host>` |
+| DHI | — | **recusado**: `dhi.io` distribui imagens endurecidas, não aceita push |
+
+As regras não são decorativas: o Artifact Registry exige `projeto/repo/imagem`
+no caminho e o Docker Hub exige um namespace que não seja `library`. As duas
+coisas falhavam só na hora do push, minutos depois do build.
+
+### Corrigido
+
+- **`--push` publicava a tag local como está.** Numa tag sem host —
+  `dockerls:1.5.0`, que é a forma que todo mundo digita — isso vira uma
+  tentativa de publicar em `docker.io/library/dockerls`, recusada com um
+  "denied" que não explica nada. A imagem passa a ser reetiquetada para o
+  destino antes do push: era o passo que faltava entre escolher o registry e
+  publicar nele.
+- **O assistente interativo perguntava o registry e ignorava a resposta.** Ele
+  oferecia `dockerhub`, `ghcr` e `harbor`, e nenhuma das escolhas mudava o
+  destino do push.
+- **O `build` publicava imagens sem `maintainer` nem `security.scanner`** — os
+  dois rótulos que a regra DF007 deste projeto cobra de todo Dockerfile que ele
+  analisa. Cobrava dos outros o que não fazia. Os rótulos agora são derivados
+  das respostas, com as chaves `org.opencontainers.image.*` da especificação
+  OCI, e rótulos vazios são omitidos em vez de gravados em branco: uma chave
+  presente e vazia é pior que ausente, porque um inventário a lê como
+  respondida.
+
+Um build local para experimentar continua não exigindo nada: os rótulos só são
+cobrados de quem vai publicar. Transformar um teste local em formulário faria
+as pessoas desligarem a checagem inteira.
+
 ## [1.5.0] -- 2026-08-18
 
 ### Corrigido — o catálogo endurecido recomendava runtimes mortos

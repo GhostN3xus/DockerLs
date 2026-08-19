@@ -766,7 +766,7 @@ dockerls version
 ```
 
 ```
-DockerLs v1.1.0
+DockerLs v1.7.1
 ```
 
 ### analyze-dockerfile
@@ -934,12 +934,94 @@ dockerls build --suggest-hardening .
 # Build de verdade, reprovando se o scan achar CRITICAL
 dockerls build -t minha-app:1.0 --fail-on critical .
 
-# Build, scan e push para o registry
-dockerls build -t minha-app:1.0 --fail-on high --push .
+# Build, scan e publicação num registry, com responsabilidade declarada
+dockerls build -t minha-app:1.0 \
+  --registry meuregistro.azurecr.io/apps/minha-app \
+  --owner "Time de Plataforma" \
+  --security-contact seguranca@empresa.com \
+  --source https://github.com/org/minha-app \
+  --provenance ./supply-chain.json .
 
 # Templates hardened disponíveis para --base
 dockerls build --list-templates
 ```
+
+#### Publicar exige veredito
+
+`--push` ou `--registry` ligam o portão de segurança automaticamente em
+`critical` — não é preciso lembrar de passar `--fail-on`, e `--fail-on` continua
+valendo quando você quer outro limiar. `--push` junto de `--no-scan` é recusado
+de saída: uma imagem não medida não é uma imagem segura, é uma imagem
+desconhecida.
+
+#### Perguntas antes do build
+
+Publicar sem saber para onde e sem saber quem responde é o que estas perguntas
+impedem. Elas aparecem **antes** de validar, construir e escanear — descobrir
+um destino errado depois disso desperdiça o trabalho inteiro, e rotular depois
+do build significa reconstruir:
+
+```
+Para onde esta imagem vai?
+  Azure ACR        meuregistro.azurecr.io/apps/minha-app
+  Google Artifact  us-central1-docker.pkg.dev/meu-projeto/containers/minha-app
+  Google GCR       gcr.io/meu-projeto/minha-app
+  Docker Hub       minhaorg/minha-app
+  GitHub GHCR      ghcr.io/org/minha-app
+  Registry privado registry.interna:5000/time/minha-app
+
+Quem responde por esta imagem?
+  Time ou pessoa responsável pela imagem:
+  Para quem avisar sobre uma vulnerabilidade nesta imagem:
+  URL do repositório que gera esta imagem:
+```
+
+As respostas viram rótulos `org.opencontainers.image.*` no manifesto, mais
+`maintainer`, `security.contact` e `security.scanner` — os mesmos que a regra
+DF007 desta ferramenta cobra de todo Dockerfile que ela analisa.
+
+Em pipeline, `--non-interactive` (ou `--ci-mode`) troca a pergunta por um erro
+explícito: um runner não tem quem responda, e travar esperando entrada é o pior
+comportamento possível ali. Cada provedor tem sua regra real de validação — o
+Artifact Registry exige `projeto/repositório/imagem` no caminho, o Docker Hub
+exige um namespace que não seja `library` — e a recusa nomeia o comando de
+login que destrava aquele registry, porque o `denied` do Docker não diz qual é.
+`dhi.io` é recusado como destino: ele distribui imagens endurecidas e não
+aceita push.
+
+#### Supply chain: hash antes, hash depois
+
+Cada build produz um registro do que entrou e do que saiu:
+
+```
+🔗 Supply chain: VERIFIED
+  entrada e saída digeridas, e a entrada não mudou durante o build
+
+ENTRADA (medida antes do build)
+  Dockerfile  sha256:4f1c…
+  Contexto    sha256:9ab2…  (137 arquivos)
+  Commit      7888d10…  (árvore suja)
+  Base        python:3.12-alpine@sha256:d09d… -> sha256:d09d…
+
+SAÍDA (medida depois do build)
+  Imagem      sha256:21b0ca852dea…
+  Manifesto   sha256:c7e4…
+  Publicada   meuregistro.azurecr.io/apps/minha-app:1.0
+```
+
+O que faz disso controle e não decoração é a comparação: a entrada é digerida
+de novo **depois** do build. Se o Dockerfile ou o contexto mudaram no meio do
+caminho, o registro sai como `INPUT_CHANGED` e **a publicação é recusada** — a
+imagem existe, mas não corresponde ao que foi medido. Entrada ou saída que não
+puderam ser digeridas dão `INCOMPLETE`, que é ausência de prova e nunca vira
+prova de integridade.
+
+O digest do contexto é determinístico por construção: caminhos ordenados e
+relativos, com o nome de cada arquivo entrando no digest junto do conteúdo, de
+modo que renomear muda o contexto tanto quanto editar. O `.dockerignore` é
+respeitado, porque ele decide o que o daemon realmente recebe. Uma base sem
+digest é registrada como **tag móvel** em vez de omitida. O registro sai no
+terminal, no `--format json` sob `provenance`, e em disco com `--provenance`.
 
 Saída real de `dockerls build demoapp --validate-only` (mesmo Dockerfile da seção
 anterior), com o rodapé que fecha a validação:
