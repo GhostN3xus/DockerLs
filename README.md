@@ -766,7 +766,7 @@ dockerls version
 ```
 
 ```
-DockerLs v1.7.1
+DockerLs v2.0.0
 ```
 
 ### analyze-dockerfile

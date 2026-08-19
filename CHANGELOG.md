@@ -5,6 +5,63 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] -- 2026-08-18
+
+Primeiro release publicado. As versões 1.3.0 a 1.7.1 abaixo documentam o
+caminho até aqui, mas nenhuma delas chegou a virar tag -- este é o corte que
+sai de verdade, e por isso ele consolida todas.
+
+### MUDANÇAS QUE QUEBRAM COMPATIBILIDADE
+
+Três, e as três são deliberadas:
+
+1. **A imagem publicada não embute mais um scanner.** O binário do Trivy
+   respondia por ~330 das 339 vulnerabilidades reportadas contra a imagem, e
+   nenhuma delas era do código deste projeto. Quem rodava `dockerls recommend`
+   *dentro* do container passa a receber `SCANNER_MISSING`, que a política
+   reporta como **não verificado** e nunca como "limpo". Para escanear, rode o
+   `dockerls` num host com trivy ou grype instalado.
+2. **A base virou Alpine, e a libc virou musl.** As seis CRITICAL que sobravam
+   na base Debian não tinham correção publicada -- quatro delas no `perl-base`,
+   um pacote que este projeto nunca invoca e que o Debian marca como
+   `Essential: yes`. Trocar a base resolve; silenciar as CVEs num arquivo de
+   ignore só esconderia.
+3. **`--push` passou a exigir veredito.** Publicar liga o portão em `critical`
+   por padrão, e `--push --no-scan` é recusado. Quem tinha um pipeline
+   publicando sem `--fail-on` vai ver o build reprovar onde antes passava --
+   que é exatamente o ponto: era publicação sem medição.
+
+### O que este release entrega
+
+- **Motor multi-source de decisão**: Docker Hub, Chainguard, Distroless e DHI
+  como *fontes de dados*, com o veredito pertencendo ao DockerLs. Catálogos
+  endurecidos com repositórios verificados contra o registry -- o mapa 1:1
+  anterior respondia `recommend node` com `distroless/nodejs`, cujas tags são
+  10, 12 e 14.
+- **Evidência acima de reputação**: fatos tri-estado (TRUE/FALSE/UNKNOWN),
+  modelo de confiança com piso `UNVERIFIED`, e a política central
+  `ProductionReadiness` com códigos estáveis de bloqueio.
+- **Referências documentais nas regras**: cada achado do `analyze-dockerfile`
+  cita o controle publicado que implementa (CIS, NIST SP 800-190, OWASP, OCI),
+  todos conferidos na fonte primária. Comando `dockerls controls` para ler o
+  catálogo inteiro.
+- **Publicação com responsabilidade**: destino e rótulos perguntados **antes**
+  do build, com suporte a Azure ACR, Google Artifact Registry, Google GCR,
+  Docker Hub, GitHub GHCR e registries privados -- cada um com sua regra real
+  de validação e o comando de login que o destrava.
+- **Supply chain**: hash do Dockerfile, do contexto e das bases antes do build;
+  id da imagem e digest do manifesto depois. A entrada é digerida de novo ao
+  final, e uma entrada que mudou durante o build **barra a publicação**.
+- **Segurança do próprio processo**: política de rede aplicada também ao pull
+  do scanner, redação central de segredos, escape de marcação vinda de
+  terceiros, teto na saída do scanner, e YAML com defesa contra bomba de
+  aliases.
+- **Desempenho medido**: `redact()` de 19 445 ms para 245 ms, e paralelismo
+  derivado da máquina (ciente de cgroup) em vez de um número fixo.
+
+Os detalhes de cada item, com o caminho de código e o motivo, estão nas
+entradas abaixo e em `AUDIT.md`, `DECISIONS.md`.
+
 ## [1.7.1] -- 2026-08-18
 
 Fechamento para produção: três lacunas que só apareceram ao olhar a versão
