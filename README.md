@@ -115,6 +115,7 @@ recebe nível e não entra na recomendação.
 | [`analyze-dockerfile`](#analyze-dockerfile) | Valida um Dockerfile contra regras de hardening | `0` `1` `2` |
 | [`controls`](#controls) | Mostra os controles publicados (CIS, NIST, OWASP) por trás de cada regra | `0` / `1` |
 | [`base`](#base) | Confere as bases do Dockerfile contra o registry e atualiza os digests | `0` `1` `2` |
+| [`base-image`](#base-image) | Gera o Dockerfile de uma imagem base a partir de um menu de pacotes | `0` / `1` |
 | [`build`](#build) | Valida, constrói, escaneia e (opcionalmente) publica | `0` `1` `2` |
 | [`doctor`](#doctor) | Checa as dependências locais (scanners) | `0` / `1` |
 | [`health`](#health) | Checa a conectividade com os serviços externos | `0` / `1` |
@@ -932,6 +933,74 @@ conferiu.
 
 **Exit codes:** `1` para uma regra desconhecida (falha em vez de responder
 vazio), `0` caso contrário.
+
+### base-image
+
+Gera o Dockerfile de uma **imagem base** — sem aplicação nenhuma, feita para
+outros projetos consumirem com `FROM`. Você marca num menu o que entra.
+
+```bash
+dockerls base-image                       # menu interativo
+dockerls base-image --os alpine --runtime java --with ca-certificates,tzdata,tini
+dockerls base-image --os distroless --runtime node --no-pin
+```
+
+O menu mostra, para cada pacote, **o que ele serve e o que ele custa** — porque
+o custo é o que se descobre tarde demais:
+
+```
+Pacotes na imagem base
+Cada um existe em toda aplicação que consumir esta base, e toda CVE dele vira
+triagem para quem nem sabe que ele está lá.
+
+  1. ca-certificates (já presente na maioria das bases)
+       serve para: validar TLS ao falar com qualquer serviço HTTPS
+       custa: praticamente nenhum; sem ele toda conexão TLS falha na verificação
+  3. curl
+       serve para: HEALTHCHECK por HTTP e diagnóstico de rede
+       custa: um cliente HTTP completo dentro do container -- é o que um atacante
+              usa para baixar o segundo estágio
+  6. git
+       serve para: clonar ou inspecionar repositórios em tempo de execução
+       custa: raramente necessário em produção, e traz uma árvore de dependências
+              grande; quase sempre pertence ao estágio de build
+
+Números separados por vírgula (vazio = nenhum pacote): 1,2,9
+Marcados: ca-certificates, tzdata, tini
+Confirma? [s/n] (s):
+```
+
+**A base sai fixada por digest**, resolvido no registry na hora da geração: uma
+imagem base com tag móvel propaga a incerteza para cada projeto que a consome,
+que é o oposto do que ela existe para fazer. Quando o registry não responde, o
+Dockerfile sai sem digest **e diz isso em voz alta** num comentário, em vez de
+fingir que está fixado.
+
+**Três recusas estão codificadas**, e todas vêm da mesma ideia — conveniência
+que se paga em superfície de ataque não é conveniência:
+
+| Recusa | Motivo |
+|---|---|
+| `sudo`, `su-exec`, cliente `docker` | numa imagem que já roda sem privilégio, existem para cruzar a fronteira que ela acabou de estabelecer |
+| pacotes em **distroless** | não há gerenciador de pacotes nem shell ali — é o ponto dela; o comando explica em vez de gerar um Dockerfile que falha |
+| cache do gerenciador em camada separada | removê-lo depois deixa os bytes na camada anterior: a imagem carrega o peso e a superfície mesmo parecendo não carregar |
+
+O resultado **não tem `ENTRYPOINT`, `EXPOSE` nem `HEALTHCHECK`**: uma imagem
+base não sabe em que porta a aplicação escuta nem o que significa "saudável"
+para ela, e declarar isso seria herdado errado por todo consumidor. O
+`analyze-dockerfile` vai avisar de HEALTHCHECK ausente — é WARN, não erro, e
+neste caso a ausência é intencional.
+
+Combinações publicadas: `none`, `java`, `node`, `python` e `go` sobre `alpine`,
+`debian`, `ubuntu` e `distroless` — só as que existem de verdade. Pedir `go`
+sobre `ubuntu` é recusado com a lista do que há para aquela família.
+
+Depois de gerar, construa e escaneie — é o que transforma a receita numa
+afirmação sobre segurança:
+
+```bash
+dockerls build -t base-java:1.0 --fail-on critical .
+```
 
 ### base
 
