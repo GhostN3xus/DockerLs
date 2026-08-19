@@ -509,3 +509,101 @@ class TestPublishFlow:
             use_case.FAIL_ON_THRESHOLDS = ("critical", "high", "medium", "low")
             result = self._run(tmp_path, ["-t", "app:1.0", "--non-interactive"])
         assert result.exit_code != EXIT_ERROR or "owner" not in result.output
+
+
+class TestPublishingRequiresAVerdict:
+    """Publicar sem veredito é a contradição que esta ferramenta existe para
+    não cometer.
+
+    O portão dependia de alguém lembrar de passar `--fail-on`: `--push` sozinho
+    publicava qualquer coisa, inclusive uma imagem que ninguém mediu.
+    """
+
+    def _dockerfile(self, tmp_path):
+        (tmp_path / "Dockerfile").write_text("FROM python:3.12-alpine\nUSER 1001\n")
+        return str(tmp_path)
+
+    def test_push_with_no_scan_is_refused(self, tmp_path):
+        with patch("dockerls.cli.commands.build.BuildImageUseCase") as use_case:
+            result = CliRunner().invoke(
+                app,
+                ["build", self._dockerfile(tmp_path), "-t", "app:1.0", "--push", "--no-scan"],
+            )
+        assert result.exit_code == EXIT_ERROR
+        assert "não medida" in result.output
+        use_case.assert_not_called()
+
+    def test_publishing_defaults_the_gate_to_critical(self, tmp_path):
+        with patch("dockerls.cli.commands.build.BuildImageUseCase") as use_case:
+            use_case.FAIL_ON_THRESHOLDS = ("critical", "high", "medium", "low")
+            CliRunner().invoke(
+                app,
+                [
+                    "build",
+                    self._dockerfile(tmp_path),
+                    "-t",
+                    "app:1.0",
+                    "--registry",
+                    "meuacr.azurecr.io/apps/app",
+                    "--owner",
+                    "Plataforma",
+                    "--security-contact",
+                    "s@e",
+                    "--source",
+                    "https://git/r",
+                    "--non-interactive",
+                ],
+            )
+        request = use_case.return_value.execute.call_args.args[0]
+        assert request.fail_on == "critical"
+
+    def test_an_explicit_threshold_is_respected(self, tmp_path):
+        with patch("dockerls.cli.commands.build.BuildImageUseCase") as use_case:
+            use_case.FAIL_ON_THRESHOLDS = ("critical", "high", "medium", "low")
+            CliRunner().invoke(
+                app,
+                [
+                    "build",
+                    self._dockerfile(tmp_path),
+                    "-t",
+                    "app:1.0",
+                    "--registry",
+                    "meuacr.azurecr.io/apps/app",
+                    "--fail-on",
+                    "high",
+                    "--owner",
+                    "P",
+                    "--security-contact",
+                    "s@e",
+                    "--source",
+                    "https://git/r",
+                    "--non-interactive",
+                ],
+            )
+        assert use_case.return_value.execute.call_args.args[0].fail_on == "high"
+
+    def test_a_local_build_keeps_no_gate_by_default(self, tmp_path):
+        with patch("dockerls.cli.commands.build.BuildImageUseCase") as use_case:
+            use_case.FAIL_ON_THRESHOLDS = ("critical", "high", "medium", "low")
+            CliRunner().invoke(
+                app, ["build", self._dockerfile(tmp_path), "-t", "app:1.0", "--non-interactive"]
+            )
+        assert use_case.return_value.execute.call_args.args[0].fail_on is None
+
+    def test_the_provenance_path_reaches_the_use_case(self, tmp_path):
+        with patch("dockerls.cli.commands.build.BuildImageUseCase") as use_case:
+            use_case.FAIL_ON_THRESHOLDS = ("critical", "high", "medium", "low")
+            CliRunner().invoke(
+                app,
+                [
+                    "build",
+                    self._dockerfile(tmp_path),
+                    "-t",
+                    "app:1.0",
+                    "--provenance",
+                    str(tmp_path / "sc.json"),
+                    "--non-interactive",
+                ],
+            )
+        request = use_case.return_value.execute.call_args.args[0]
+        assert request.provenance_path.endswith("sc.json")

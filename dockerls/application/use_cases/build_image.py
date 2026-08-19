@@ -356,6 +356,24 @@ class BuildImageUseCase:
             # 8. Push, se pedido. Só depois dos portões: publicar uma imagem
             #    que reprovou no scan derrota o propósito de ter o portão.
             if request.push:
+                # A entrada mudou durante o build: a imagem existe, mas não é a
+                # que foi medida. Publicá-la seria distribuir um artefato cuja
+                # procedência esta ferramenta acabou de declarar quebrada --
+                # a mesma substituição que ela recusa em todo lugar.
+                if source_before.dockerfile and source_before != source_after:
+                    return BuildImageResponse(
+                        success=False,
+                        image_tag=request.tag,
+                        image_sha256=build_result.image_sha256,
+                        validation=validation,
+                        analysis=validation_result.analysis,
+                        error=(
+                            "publicação recusada: o Dockerfile ou o contexto mudaram "
+                            "durante o build, então a imagem não corresponde à entrada "
+                            "que foi medida. Reconstrua a partir de uma árvore estável."
+                        ),
+                        exit_code=EXIT_POLICY,
+                    )
                 push_error = self._push_image(request.tag, request.push_reference)
                 if push_error is not None:
                     return BuildImageResponse(

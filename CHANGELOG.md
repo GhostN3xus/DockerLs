@@ -5,6 +5,38 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] -- 2026-08-18
+
+Fechamento para produção: três lacunas que só apareceram ao olhar a versão
+como algo que vai ser publicado, não como código em progresso.
+
+### Corrigido
+
+- **Publicar não exigia veredito.** O portão dependia de alguém lembrar de
+  passar `--fail-on`: `--push` sozinho publicava qualquer coisa. Agora `--push`
+  ou `--registry` ligam o portão em `critical` por padrão, e `--fail-on`
+  continua valendo quando o limiar é outro. `--push` com `--no-scan` é recusado
+  de saída — uma imagem não medida não é uma imagem segura, é uma imagem
+  desconhecida. Era a contradição mais direta que restava numa ferramenta cuja
+  tese é que ausência de medição nunca vira afirmação de segurança.
+- **A publicação ignorava a procedência quebrada.** Se o Dockerfile ou o
+  contexto mudaram durante o build, a imagem existe mas não corresponde ao que
+  foi medido — e ela era publicada assim mesmo. Agora o push é recusado com
+  `EXIT_POLICY`, porque distribuir esse artefato seria distribuir algo cuja
+  procedência a própria ferramenta acabou de declarar quebrada.
+- **`--provenance` não existia.** O registro de supply chain era montado e
+  tinha um caminho de arquivamento no caso de uso, mas nenhuma opção de linha
+  de comando chegava até ele: na prática, não dava para guardar o documento em
+  lugar nenhum.
+
+### Documentação
+
+O README passa a documentar o fluxo de publicação (as perguntas antes do build,
+os seis destinos suportados com a regra de cada um, `--non-interactive` para
+pipeline) e o registro de supply chain, com a saída real. As opções
+`--registry`, `--owner`, `--security-contact`, `--source`, `--provenance` e
+`--non-interactive` não estavam documentadas em lugar nenhum fora do CHANGELOG.
+
 ## [1.7.0] -- 2026-08-18
 
 ### Adicionado — procedência: hash antes, hash depois, e a comparação entre eles

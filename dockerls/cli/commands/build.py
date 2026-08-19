@@ -93,6 +93,11 @@ def build(
     source_url: str | None = typer.Option(
         None, "--source", help="URL do repositório que gera a imagem"
     ),
+    provenance: str | None = typer.Option(
+        None,
+        "--provenance",
+        help="Arquiva o registro de supply chain (hashes de entrada e saída) em JSON",
+    ),
     non_interactive: bool = typer.Option(
         False,
         "--non-interactive",
@@ -137,6 +142,25 @@ def build(
     # Parsear JSON args
     build_args_dict = _parse_json_option(build_args, "--build-args")
     labels_dict = _parse_json_option(labels, "--labels")
+
+    # Publicar sem veredito é a contradição que esta ferramenta existe para
+    # não cometer: o portão passa a ser obrigatório para quem publica, em vez
+    # de depender de alguém lembrar de passar --fail-on. `--no-scan` com push
+    # é recusado de saída -- sem medição não há veredito nenhum a dar.
+    publishing = push or bool(registry)
+    if publishing and not scan:
+        console.print(
+            "[red]Error:[/red] --push com --no-scan publicaria uma imagem que ninguém "
+            "mediu. Uma imagem não medida não é uma imagem segura; é uma imagem "
+            "desconhecida."
+        )
+        raise typer.Exit(EXIT_ERROR)
+    if publishing and fail_on is None:
+        fail_on = "critical"
+        console.print(
+            "[dim]Publicando: portão de segurança em `critical` por padrão "
+            "(use --fail-on para mudar o limiar).[/dim]"
+        )
 
     # Destino e responsabilidade são resolvidos **antes** do build: descobrir
     # que o destino está errado depois de validar, construir e escanear
@@ -188,6 +212,7 @@ def build(
         force=force,
         push=push or target is not None,
         push_reference=target.reference if target else "",
+        provenance_path=(provenance or "").strip(),
         auto_remediate=auto_remediate or zero_vulns,
         max_remediation_rounds=max_iterations,
         target_zero_vulns=zero_vulns,

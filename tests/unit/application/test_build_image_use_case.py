@@ -37,8 +37,9 @@ from dockerls.domain.interfaces.dockerfile_validator import (
     DockerfileValidatorInterface,
     HardeningTemplateProvider,
 )
+from dockerls.domain.value_objects.provenance import SourceDigests
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY
-from dockerls.infrastructure.dockerfile_validator import HardeningTemplates
+from dockerls.infrastructure.dockerfile_validator import DockerfileValidator, HardeningTemplates
 from dockerls.utils.executables import ExecutableNotFoundError
 
 
@@ -903,3 +904,57 @@ class TestGateReportsWhatTrippedIt:
         result = BuildImageUseCase._parse_trivy_scan(self._trivy_payload(criticals=0, lows=500))
         assert len(result.vulnerabilities) == BuildImageUseCase.MAX_RETAINED_VULNERABILITIES
         assert result.low == 500
+
+
+class TestPushRefusesABrokenChain:
+    """A entrada mudou durante o build: a imagem existe, mas não é a medida.
+
+    Publicá-la seria distribuir um artefato cuja procedência esta ferramenta
+    acabou de declarar quebrada -- a mesma substituição que ela recusa em todo
+    lugar.
+    """
+
+    def _use_case(self, tmp_path, digests):
+        (tmp_path / "Dockerfile").write_text("FROM python:3.12-alpine\nUSER 1001\n")
+        use_case = BuildImageUseCase(DockerfileValidator(), HardeningTemplates())
+        use_case._digest_source = MagicMock(side_effect=digests)
+        use_case._build_image = MagicMock(
+            return_value=BuildResult(success=True, image_tag="app:1.0", image_sha256="sha256:cc")
+        )
+        use_case._scan_image = MagicMock(return_value=None)
+        use_case._get_image_info = MagicMock(return_value={})
+        use_case._push_image = MagicMock(return_value=None)
+        return use_case
+
+    def _request(self, tmp_path):
+        return BuildImageRequest(
+            context_path=str(tmp_path),
+            tag="app:1.0",
+            scan=False,
+            push=True,
+            push_reference="meuacr.azurecr.io/apps/app:1.0",
+            force=True,
+        )
+
+    def test_a_changed_input_blocks_the_push(self, tmp_path):
+        changed = [
+            SourceDigests(dockerfile="sha256:aa", context="sha256:bb"),
+            SourceDigests(dockerfile="sha256:OUTRO", context="sha256:bb"),
+        ]
+        use_case = self._use_case(tmp_path, changed)
+        response = use_case.execute(self._request(tmp_path))
+
+        assert response.success is False
+        assert response.exit_code == EXIT_POLICY
+        assert "não corresponde à entrada" in (response.error or "")
+        use_case._push_image.assert_not_called()
+
+    def test_a_stable_input_publishes_normally(self, tmp_path):
+        stable = SourceDigests(dockerfile="sha256:aa", context="sha256:bb")
+        use_case = self._use_case(tmp_path, [stable, stable])
+        response = use_case.execute(self._request(tmp_path))
+
+        assert response.success is True
+        use_case._push_image.assert_called_once()
+        assert response.provenance is not None
+        assert response.provenance.is_verified is True
