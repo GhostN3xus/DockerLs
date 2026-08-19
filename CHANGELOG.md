@@ -5,6 +5,41 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] -- 2026-08-19
+
+### Adicionado — `dockerls base`
+
+A metade que lia o seu projeto não media nada, e a metade que media não lia o
+seu projeto: o `analyze-dockerfile` sugeria base por string fixa (respondia
+`"FROM node:22-alpine"` até para um Dockerfile de Python), e o `recommend` só
+funcionava se alguém digitasse a referência na mão. Este comando é a ponte.
+
+Ele lê cada `FROM`, pergunta ao registry qual digest a tag aponta **agora**, e
+classifica em quatro estados: `PINNED_CURRENT`, `PINNED_STALE` (fixada num
+digest que a tag deixou para trás), `UNPINNED` e `UNRESOLVED`. Por padrão
+aplica a correção; `--dry-run` mostra sem escrever e sai com código `2` quando
+sobra o que corrigir, o que o torna portão de CI.
+
+`PINNED_STALE` é o caso que este comando existe para pegar, e ele não é
+hipotético: a base deste próprio projeto ficou meses fixada num digest de
+meados de 2024, carregando duas CVEs CRITICAL do `libexpat1` que já tinham
+correção publicada. O Dockerfile estava "corretamente" fixado o tempo todo —
+fixar sem nunca reavaliar é trancar a porta e jogar fora o calendário.
+
+Detalhes que a implementação leva a sério:
+
+- quando o digest vem de um `ARG`, a atualização vai para **a linha do `ARG`**,
+  onde o digest realmente mora — escrever no `FROM` quebraria o contrato do
+  arquivo em vez de atualizá-lo, e num Dockerfile com dois `FROM` usando o
+  mesmo `ARG` sai uma substituição, não duas;
+- `--platform`, `AS <estágio>`, comentários e indentação sobrevivem intactos:
+  um upgrade de base que reformata o arquivo transforma uma revisão de uma
+  linha numa revisão de trinta;
+- estágios de build são conferidos junto com o final, porque um `golang` velho
+  compila com toolchain velho;
+- registry que não responde dá `UNRESOLVED` e **nunca** "em dia" — o mesmo
+  princípio que rege o scan que não completou.
+
 ## [2.0.2] -- 2026-08-19
 
 ### Documentação

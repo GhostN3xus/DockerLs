@@ -114,6 +114,7 @@ recebe nível e não entra na recomendação.
 | [`export`](#export) | Exporta o relatório em JSON/CSV/HTML/Markdown/SARIF | `0` / `1` |
 | [`analyze-dockerfile`](#analyze-dockerfile) | Valida um Dockerfile contra regras de hardening | `0` `1` `2` |
 | [`controls`](#controls) | Mostra os controles publicados (CIS, NIST, OWASP) por trás de cada regra | `0` / `1` |
+| [`base`](#base) | Confere as bases do Dockerfile contra o registry e atualiza os digests | `0` `1` `2` |
 | [`build`](#build) | Valida, constrói, escaneia e (opcionalmente) publica | `0` `1` `2` |
 | [`doctor`](#doctor) | Checa as dependências locais (scanners) | `0` / `1` |
 | [`health`](#health) | Checa a conectividade com os serviços externos | `0` / `1` |
@@ -931,6 +932,73 @@ conferiu.
 
 **Exit codes:** `1` para uma regra desconhecida (falha em vez de responder
 vazio), `0` caso contrário.
+
+### base
+
+Confere cada `FROM` do seu Dockerfile contra o registry e diz quais bases
+apodreceram. Por padrão **aplica** a correção; `--dry-run` mostra sem escrever.
+
+```bash
+dockerls base                # confere e atualiza os digests
+dockerls base --dry-run      # só mostra o que mudaria -- é o modo de portão de CI
+dockerls base --format json
+```
+
+Saída real, contra um Dockerfile fixado num digest de 2024:
+
+```console
+$ dockerls base --dry-run
+Dockerfile
+
+  linha 4  PINNED_STALE  (estágio builder)
+    python:3.12-slim-bookworm@sha256:a3e58f93...
+    fixada num digest que a tag não aponta mais: a base foi republicada e esta
+    imagem continua construindo a partir da versão antiga
+    -> python:3.12-slim-bookworm@sha256:a116514e...  (ARG PYTHON_DIGEST)
+
+  linha 7  UNPINNED  (estágio assets)
+    node:22
+    tag móvel, sem digest: o que você testou e o que vai para produção podem ser
+    bytes diferentes sem nenhuma mudança da sua parte
+    -> node:22@sha256:0557ac14...  (linha 7)
+
+2 desatualizada(s), 1 sem digest
+
+Nada foi escrito (--dry-run).
+$ echo $?
+2
+```
+
+**Por que este comando existe.** A base deste próprio projeto ficou meses
+fixada num digest de meados de 2024, carregando duas CVEs CRITICAL do
+`libexpat1` que já tinham correção publicada. O Dockerfile estava
+"corretamente" fixado o tempo todo — e é justamente esse o problema: fixar sem
+nunca reavaliar é trancar a porta e jogar fora o calendário. Nada avisa, nada
+quebra, e a base velha entra em produção build após build.
+
+**Os quatro estados**, porque cada um pede uma ação diferente:
+
+| Estado | O que significa | Ação |
+|---|---|---|
+| `PINNED_CURRENT` | fixada no digest que a tag aponta hoje | nenhuma |
+| `PINNED_STALE` | fixada num digest que a tag deixou para trás | atualizar |
+| `UNPINNED` | só uma tag, sem digest | fixar |
+| `UNRESOLVED` | o registry não respondeu | investigar — **não** é "está em dia" |
+
+**Detalhes que evitam surpresa:** quando o digest vem de um `ARG`
+(`FROM python:3.12@${PYTHON_DIGEST}`), a atualização vai para **a linha do
+`ARG`** — é onde o digest mora, e escrever no `FROM` quebraria o contrato do
+arquivo. `--platform`, `AS <estágio>`, comentários e indentação sobrevivem
+intactos. Estágios de build entram na conferência junto com o final: um
+`golang` velho compila com toolchain velho, e isso é cadeia de fornecimento
+mesmo que a imagem final seja endurecida.
+
+**Exit codes:** `2` quando sobra base a corrigir (é o portão de CI, junto com
+`--dry-run`), `1` quando o Dockerfile não existe ou não tem `FROM`, `0` quando
+está tudo em dia ou a correção foi aplicada.
+
+Depois de aplicar, **reconstrua e escaneie antes de publicar**: trocar o digest
+da base muda a imagem, e nada além de um scan diz se para melhor.
 
 ### build
 
