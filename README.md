@@ -147,9 +147,25 @@ pip install "dockerls[keyring]"
 
 ### Requisitos
 
-- Python 3.11+
-- Trivy (scanner principal) -- instale em https://aquasecurity.github.io/trivy
-- Grype (alternativa opcional) -- instale em https://github.com/anchore/grype
+| Requisito | Necessário para | Sem ele |
+|---|---|---|
+| **Python 3.11+** | tudo | nada roda |
+| **Trivy** ([instalação](https://aquasecurity.github.io/trivy)) | qualquer comando que mede vulnerabilidade: `recommend`, `analyze`, `compare`, `advisor`, `alternatives`, `sbom`, e o scan do `build` | os resultados saem como **não verificados**, nunca como "limpo" |
+| **Grype** ([instalação](https://github.com/anchore/grype)) | alternativa ao Trivy e segundo scanner na validação cruzada | funciona sem, mas a confiança não chega a `HIGH` por falta de corroboração |
+| **daemon do Docker** | **apenas o `build`** — é ele que roda `docker build`, `docker tag` e `docker push` | `build` falha; todo o resto continua funcionando |
+| **git** (opcional) | registro de supply chain: commit e estado da árvore | a procedência sai sem revisão, marcada como incompleta |
+
+Confira tudo de uma vez:
+
+```bash
+dockerls doctor
+```
+
+**Sobre o `build` especificamente:** ele precisa de daemon Docker acessível e de
+um scanner instalado **na máquina onde roda** — a imagem publicada por este
+projeto não embute scanner (ver [Uso com Docker](#uso-com-docker)). Publicar
+(`--push` / `--registry`) exige, além disso, estar autenticado no registry de
+destino; a recusa nomeia o comando de login de cada provedor.
 
 ---
 
@@ -766,7 +782,7 @@ dockerls version
 ```
 
 ```
-DockerLs v1.7.1
+DockerLs v2.0.0
 ```
 
 ### analyze-dockerfile
@@ -945,6 +961,203 @@ dockerls build -t minha-app:1.0 \
 # Templates hardened disponíveis para --base
 dockerls build --list-templates
 ```
+
+#### Todas as opções do `build`
+
+| Opção | O que faz |
+|---|---|
+| `path` | Diretório com o Dockerfile. Padrão: `.` |
+| `-t`, `--tag` | Tag da imagem. Obrigatória, exceto em `--validate-only`, `--suggest-hardening` e `--interactive` |
+| `--base` | Template hardened da base (`alpine`, `maven-alpine`, `go-scratch`, …) |
+| `--hardened` | Gera e usa um Dockerfile hardened a partir do template |
+| `--list-templates` | Lista os 39 templates agrupados por stack, com exemplos, e sai |
+| `-i`, `--interactive` | Assistente passo a passo |
+| `--scan` / `--no-scan` | Escaneia após o build. Padrão: escaneia |
+| `--fail-on` | Limiar que reprova: `critical`, `high`, `medium`, `low` |
+| `--auto-fix` / `--auto-remediate` | Ciclo de remediação automática |
+| `--zero-vulns` | Remedia até zero CVEs |
+| `--max-iterations` | Teto de rodadas de remediação. Padrão: `3` |
+| `-r`, `--report` | Salva o relatório de segurança (JSON ou HTML) |
+| `-o`, `--output` | Arquivo de saída do relatório |
+| `--no-cache` | Desliga o cache do Docker |
+| `--build-args` | Argumentos de build, em JSON |
+| `--labels` | Rótulos extras da equipe, em JSON |
+| `--validate-only` | Só valida o Dockerfile; não constrói nada |
+| `--suggest-hardening` | Só sugere melhorias; não constrói nada |
+| `--push` | Publica após o build passar nos portões |
+| `--registry` / `--acr` | Destino da publicação, **sem tag** |
+| `--owner` | Time ou pessoa responsável → `maintainer` e `vendor` |
+| `--security-contact` | Contato para vulnerabilidades → `security.contact` |
+| `--source` | URL do repositório → `org.opencontainers.image.source` |
+| `--provenance` | Arquiva o registro de supply chain em JSON |
+| `--non-interactive` | Não pergunta nada: o que faltar vira erro |
+| `--ci-mode` | Saída JSON em stdout, sem interação |
+| `--force` | Constrói mesmo com erros de validação |
+| `-v`, `--verbose` | Log detalhado no terminal |
+
+Três dependem umas das outras e vale saber antes: `--push` e `--registry` ligam
+`--fail-on critical` automaticamente; `--push` com `--no-scan` é recusado; e
+publicar exige `--owner`, `--security-contact` e `--source` — perguntados no
+terminal, ou obrigatórios por opção sob `--non-interactive`.
+
+#### Exemplos práticos, com a saída real
+
+**1. Validar sem construir** — é o modo indicado para portão de CI. Contra um
+Dockerfile deliberadamente ruim:
+
+```dockerfile
+FROM node:latest
+RUN apt-get update && apt-get install -y curl
+ENV API_TOKEN=supersecret123
+COPY . /app
+CMD ["node", "/app/index.js"]
+```
+
+```console
+$ dockerls build --validate-only .
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ ❌ Validation Failed                                                         │
+│                                                                              │
+│ Dockerfile validation failed: 3 error(s) -- base_image_pinned: Base image     │
+│ uses 'latest' tag or no tag (implies latest); non_root_user: Container runs   │
+│ as root (no USER directive or USER root); secrets_not_in_env: Potential       │
+│ secrets in ENV: API_TOKEN                                                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+$ echo $?
+2
+```
+
+Nada foi construído. Exit code `2` = política violada.
+
+**2. Build com portão de segurança:**
+
+```console
+$ dockerls build -t minha-app:1.0 --fail-on critical .
+╭─────────────────────╮
+│ ✅ Build Successful │
+│ minha-app:1.0       │
+╰─────────────────────╯
+
+╭────────────────────────╮
+│ Security Score: 81/100 │
+│ Tier: B                │
+╰────────────────────────╯
+
+✅ Validation: 11 passed | ⚠️ 1 warnings | ❌ 0 errors
+
+╭──────────────────────────╮
+│ 🔍 Security Scan Results │
+╰──────────────────────────╯
+  CRITICAL: 0
+  HIGH: 0
+  MEDIUM: 4
+  LOW: 1
+```
+
+Se houvesse CRITICAL, o portão reprovaria **nomeando os CVEs**, com pacote e
+versão de correção — não com uma contagem solta.
+
+**3. Base inexistente falha antes de construir:**
+
+```console
+$ dockerls build -t x:1 --base alpine-qualquer .
+Error: --base inválido: 'alpine-qualquer'.
+Disponíveis: alpine, debian, distroless, go, go-alpine, go-debian, go-distroless,
+go-scratch, gradle, gradle-alpine, java, java-alpine, ... maven, maven-alpine, ...
+$ echo $?
+1
+```
+
+**4. Publicar sem dizer quem responde é recusado:**
+
+```console
+$ dockerls build -t x:1 --registry meuacr.azurecr.io/apps/x --push --non-interactive .
+Destino: meuacr.azurecr.io/apps/x:1  (Azure Container Registry)
+Autenticação: az acr login --name <registro>
+Error: faltam rótulos obrigatórios: owner, security_contact, source. Informe-os nas
+opções do build ou responda às perguntas (use --non-interactive para exigir que
+venham por opção).
+$ echo $?
+1
+```
+
+Note que o destino foi validado e o comando de login foi nomeado **antes** de
+qualquer build começar.
+
+**5. O caminho completo, do jeito que vai para produção:**
+
+```bash
+dockerls build -t minha-api:1.0 \
+  --hardened --base maven-alpine \
+  --registry meuregistro.azurecr.io/apps/minha-api \
+  --owner "Time de Plataforma" \
+  --security-contact seguranca@empresa.com \
+  --source https://github.com/org/minha-api \
+  --provenance ./supply-chain.json \
+  --report ./relatorio.json .
+```
+
+Gera um Dockerfile hardened de Java com Maven sobre Alpine, constrói, escaneia,
+reprova em CRITICAL (ligado sozinho por publicar), publica no ACR, e deixa em
+disco o relatório e o registro de supply chain.
+
+**6. Em pipeline**, com saída JSON e sem nenhuma pergunta:
+
+```bash
+dockerls build -t minha-api:${GITHUB_SHA::7} --ci-mode --non-interactive \
+  --registry ghcr.io/org/minha-api \
+  --owner "$TEAM" --security-contact "$SEC_EMAIL" --source "$REPO_URL" .
+```
+
+O JSON em stdout carrega `status`, `exit_code`, `report` e `provenance` — é o
+que o portão do pipeline lê.
+
+#### Escolhendo a base: SO e stack
+
+**Sem `--base` nem `--hardened`, o build usa o Dockerfile que já está no
+diretório.** Ele não inventa base nenhuma — se o seu Dockerfile é de Python, a
+imagem sai em Python. Os templates só entram quando você pede um:
+
+```bash
+# Node sobre Alpine
+dockerls build --hardened --base node-alpine -t minha-api:1.0 .
+
+# Java com Maven: constrói com a ferramenta, roda só com o JRE
+dockerls build --hardened --base maven-alpine -t minha-api:1.0 --fail-on critical .
+
+# Go estático, sem sistema operacional nenhum embaixo
+dockerls build --hardened --base go-scratch -t minha-api:1.0 .
+
+# Só o sistema operacional, sem runtime de linguagem
+dockerls build --hardened --base ubuntu -t minha-base:1.0 .
+```
+
+São 39 templates, e `--list-templates` mostra todos agrupados por stack, com o
+sistema operacional e o que distingue cada variante:
+
+| Stack | Variantes |
+|---|---|
+| Sistema operacional puro | `alpine` `debian` `ubuntu` `distroless` |
+| Node.js | `node` `node-alpine` `node-debian` `node-ubuntu` `node-distroless` |
+| Python | `python` `python-alpine` `python-debian` `python-ubuntu` `python-distroless` |
+| Java (runtime) | `java` `java-alpine` `java-debian` `java-ubuntu` `java-distroless` |
+| Java com Maven | `maven` `maven-alpine` |
+| Java com Gradle | `gradle` `gradle-alpine` |
+| Go | `go` `go-alpine` `go-debian` `go-distroless` `go-scratch` |
+| Rust | `rust` `rust-alpine` `rust-debian` `rust-scratch` |
+| PHP | `php` `php-alpine` `php-debian` `php-ubuntu` |
+| Ruby | `ruby` `ruby-alpine` `ruby-debian` |
+
+Os de **Maven** e **Gradle** são multi-stage de verdade: a ferramenta de build
+fica no primeiro estágio e o runtime carrega apenas o JRE. Compilador, cache do
+Maven e a árvore de dependências de build não são necessários para *rodar* a
+aplicação, e cada um deles é superfície de ataque e CVE para triar depois.
+
+Ao escolher entre variantes, o que decide costuma ser a libc: `-alpine` é musl,
+o resto é glibc. Módulos nativos de Node (`sharp`, `bcrypt`) e wheels de Python
+precisam de build musllinux para funcionar lá. As `-distroless` não têm shell
+nem gerenciador de pacotes — a menor superfície entre as que ainda carregam um
+runtime; `go-scratch` e `rust-scratch` são o binário estático sozinho.
 
 #### Publicar exige veredito
 

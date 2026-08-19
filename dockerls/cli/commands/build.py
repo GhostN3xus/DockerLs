@@ -34,7 +34,13 @@ def build(
     path: str = typer.Argument(".", help="Diretório com Dockerfile"),
     tag: str | None = typer.Option(None, "--tag", "-t", help="Tag da imagem (obrigatório)"),
     base: str | None = typer.Option(
-        None, "--base", help="Imagem base recomendada (node, python, go, rust, java, php)"
+        None,
+        "--base",
+        help=(
+            "Template hardened da base: alpine, debian, ubuntu, distroless, "
+            "node-alpine, python-alpine, maven-alpine, go-scratch, ... "
+            "(--list-templates mostra os 39)"
+        ),
     ),
     hardened: bool = typer.Option(False, "--hardened", help="Usa templates Dockerfile hardened"),
     list_templates: bool = typer.Option(
@@ -133,9 +139,13 @@ def build(
     # começado -- o mesmo raciocínio do `--fail-on` acima.
     if base is not None:
         known = template_provider.list_templates()
-        if not any(key in base.lower() for key in known):
+        # Nome exato. A comparação anterior perguntava se algum template era
+        # *substring* do que foi digitado, então `--base alpine-inexistente`
+        # passava aqui (por conter "alpine") e explodia lá dentro, na geração.
+        if base.strip().lower() not in known:
             console.print(
-                f"[red]Error:[/red] --base inválido: {base!r}. Use um de: {', '.join(known)}"
+                f"[red]Error:[/red] --base inválido: {base!r}.\n"
+                f"[dim]Disponíveis: {', '.join(known)}[/dim]"
             )
             raise typer.Exit(EXIT_ERROR)
 
@@ -249,10 +259,111 @@ def _print_templates(template_provider: HardeningTemplates, ci_mode: bool = Fals
         typer.echo(json.dumps({"templates": templates}, indent=2))
         return
 
-    console.print(Panel("[bold cyan]Hardened Dockerfile templates[/bold cyan]", expand=False))
+    console.print(Panel("[bold cyan]Templates hardened disponíveis[/bold cyan]", expand=False))
+
+    # Agrupado por stack, com o sistema operacional visível. Uma lista plana de
+    # quase quarenta nomes não responde a pergunta que a pessoa tem, que é
+    # "qual serve para a MINHA aplicação, e sobre qual SO ela vai rodar".
+    grouped: dict[str, list[str]] = {}
     for name in templates:
-        console.print(f"  • [cyan]{name}[/cyan]")
-    console.print("\n[dim]Use with: dockerls build --hardened --base <template> -t <tag>[/dim]")
+        stack = name.split("-", 1)[0] if "-" in name else name
+        if name in _STANDALONE_OS:
+            stack = "so"
+        grouped.setdefault(stack, []).append(name)
+
+    for stack in sorted(grouped, key=lambda s: (s != "so", s)):
+        title = _STACK_TITLES.get(stack, stack.capitalize())
+        console.print(f"\n[bold]{title}[/bold]")
+        for name in grouped[stack]:
+            console.print(f"  [cyan]{name:<18}[/cyan] [dim]{_TEMPLATE_HINTS.get(name, '')}[/dim]")
+
+    console.print("\n[bold]Exemplos[/bold]")
+    for example in _BUILD_EXAMPLES:
+        console.print(f"  [dim]{example}[/dim]")
+    console.print(
+        "\n[dim]Sem --base nem --hardened, o build usa o Dockerfile que já está no "
+        "diretório -- os templates só entram quando você pede um.[/dim]"
+    )
+
+
+#: Templates que são só o sistema operacional, sem runtime de linguagem.
+_STANDALONE_OS = frozenset({"alpine", "debian", "ubuntu", "distroless"})
+
+_STACK_TITLES = {
+    "so": "Sistema operacional puro (sem runtime)",
+    "node": "Node.js",
+    "python": "Python",
+    "java": "Java (runtime)",
+    "maven": "Java com Maven (build + runtime)",
+    "gradle": "Java com Gradle (build + runtime)",
+    "go": "Go",
+    "rust": "Rust",
+    "php": "PHP",
+    "ruby": "Ruby",
+}
+
+#: O que distingue cada variante. Sem isto, escolher entre `node-alpine` e
+#: `node-distroless` é adivinhação.
+_TEMPLATE_HINTS = {
+    "alpine": "musl, ~5 MB, com shell",
+    "debian": "glibc, estável, com shell",
+    "ubuntu": "glibc, mais pacotes disponíveis",
+    "distroless": "sem shell nem gerenciador de pacotes",
+    "node": "Debian slim",
+    "node-alpine": "musl -- atenção a módulos nativos (sharp, bcrypt)",
+    "node-debian": "glibc",
+    "node-ubuntu": "glibc",
+    "node-distroless": "sem shell; só o runtime",
+    "python": "Debian slim",
+    "python-alpine": "musl -- wheels precisam ser musllinux",
+    "python-debian": "glibc",
+    "python-ubuntu": "glibc",
+    "python-distroless": "sem shell; só o interpretador",
+    "java": "Temurin JRE",
+    "java-alpine": "Temurin JRE Alpine",
+    "java-debian": "Temurin JRE Debian",
+    "java-ubuntu": "Temurin JRE Ubuntu",
+    "java-distroless": "sem shell; só a JVM",
+    "maven": "constrói com Maven, roda só com JRE",
+    "maven-alpine": "constrói com Maven, roda só com JRE Alpine",
+    "gradle": "constrói com Gradle, roda só com JRE",
+    "gradle-alpine": "constrói com Gradle, roda só com JRE Alpine",
+    "go": "Debian slim",
+    "go-alpine": "musl estático",
+    "go-debian": "glibc",
+    "go-distroless": "sem shell",
+    "go-scratch": "binário estático sozinho -- a menor superfície possível",
+    "rust": "Debian slim",
+    "rust-alpine": "musl",
+    "rust-debian": "glibc",
+    "rust-scratch": "binário estático sozinho",
+    "php": "Debian slim",
+    "php-alpine": "musl",
+    "php-debian": "glibc",
+    "php-ubuntu": "glibc",
+    "ruby": "Debian slim",
+    "ruby-alpine": "musl",
+    "ruby-debian": "glibc",
+}
+
+#: Exemplos reais, um por forma de uso. A pergunta que eles respondem é "como
+#: eu escrevo isso", que nenhuma lista de nomes responde sozinha.
+_BUILD_EXAMPLES = (
+    "dockerls build -t minha-api:1.0 .",
+    "     ^ usa o Dockerfile que já existe no diretório",
+    "",
+    "dockerls build --hardened --base node-alpine -t minha-api:1.0 .",
+    "     ^ gera um Dockerfile hardened de Node sobre Alpine e constrói com ele",
+    "",
+    "dockerls build --hardened --base maven-alpine -t minha-api:1.0 --fail-on critical .",
+    "     ^ Java com Maven: constrói com a ferramenta, roda só com o JRE",
+    "",
+    "dockerls build --hardened --base go-scratch -t minha-api:1.0 .",
+    "     ^ binário estático sozinho: a menor superfície de ataque possível",
+    "",
+    "dockerls build --hardened --base ubuntu -t minha-base:1.0 .",
+    "     ^ só o sistema operacional, sem runtime de linguagem",
+)
 
 
 def _run_interactive_wizard(use_case: BuildImageUseCase, path: str) -> BuildImageResponse:
