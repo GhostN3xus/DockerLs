@@ -678,8 +678,16 @@ class TestBaseImageCommand:
         result = CliRunner().invoke(
             app,
             [
-                "base-image", "-o", str(tmp_path / "Dockerfile"),
-                "--os", "alpine", "--runtime", "none", "--with", "sudo", "--no-pin",
+                "base-image",
+                "-o",
+                str(tmp_path / "Dockerfile"),
+                "--os",
+                "alpine",
+                "--runtime",
+                "none",
+                "--with",
+                "sudo",
+                "--no-pin",
             ],
         )
         assert result.exit_code == EXIT_ERROR
@@ -691,8 +699,16 @@ class TestBaseImageCommand:
         result = CliRunner().invoke(
             app,
             [
-                "base-image", "-o", str(destination),
-                "--os", "distroless", "--runtime", "java", "--with", "curl", "--no-pin",
+                "base-image",
+                "-o",
+                str(destination),
+                "--os",
+                "distroless",
+                "--runtime",
+                "java",
+                "--with",
+                "curl",
+                "--no-pin",
             ],
         )
         assert result.exit_code == EXIT_ERROR
@@ -703,10 +719,20 @@ class TestBaseImageCommand:
         result = CliRunner().invoke(
             app,
             [
-                "base-image", "-o", str(destination),
-                "--os", "alpine", "--runtime", "java",
-                "--with", "ca-certificates,tzdata",
-                "--owner", "Plataforma", "--source", "https://git/r", "--no-pin",
+                "base-image",
+                "-o",
+                str(destination),
+                "--os",
+                "alpine",
+                "--runtime",
+                "java",
+                "--with",
+                "ca-certificates,tzdata",
+                "--owner",
+                "Plataforma",
+                "--source",
+                "https://git/r",
+                "--no-pin",
             ],
         )
         assert result.exit_code == EXIT_OK
@@ -720,8 +746,18 @@ class TestBaseImageCommand:
         destination.write_text("FROM scratch\n")
         result = CliRunner().invoke(
             app,
-            ["base-image", "-o", str(destination), "--os", "alpine", "--runtime", "none",
-             "--with", "", "--no-pin"],
+            [
+                "base-image",
+                "-o",
+                str(destination),
+                "--os",
+                "alpine",
+                "--runtime",
+                "none",
+                "--with",
+                "",
+                "--no-pin",
+            ],
         )
         assert result.exit_code == EXIT_ERROR
         assert destination.read_text() == "FROM scratch\n"
@@ -729,8 +765,18 @@ class TestBaseImageCommand:
     def test_an_invalid_os_is_refused_with_the_choices(self, tmp_path):
         result = CliRunner().invoke(
             app,
-            ["base-image", "-o", str(tmp_path / "D"), "--os", "arch", "--runtime", "none",
-             "--with", "", "--no-pin"],
+            [
+                "base-image",
+                "-o",
+                str(tmp_path / "D"),
+                "--os",
+                "arch",
+                "--runtime",
+                "none",
+                "--with",
+                "",
+                "--no-pin",
+            ],
         )
         assert result.exit_code == EXIT_ERROR
         assert "alpine" in result.output

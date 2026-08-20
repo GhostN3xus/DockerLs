@@ -26,9 +26,7 @@ _DIGEST = "sha256:" + "a" * 64
 
 class TestRefusals:
     def test_distroless_refuses_packages_and_explains_why(self):
-        recipe = BaseRecipe(
-            family=OsFamily.DISTROLESS, runtime=Runtime.JAVA, packages=("curl",)
-        )
+        recipe = BaseRecipe(family=OsFamily.DISTROLESS, runtime=Runtime.JAVA, packages=("curl",))
         with pytest.raises(UnsupportedCombinationError, match="gerenciador de pacotes"):
             recipe.validate()
 
@@ -120,7 +118,7 @@ class TestRendering:
 
 class TestCatalogIntegrity:
     def test_every_published_combination_renders(self):
-        for (runtime, family) in RUNTIME_BASES:
+        for runtime, family in RUNTIME_BASES:
             render(BaseRecipe(family=family, runtime=runtime, digest=_DIGEST))
 
     def test_every_package_names_a_purpose_and_a_cost(self):
