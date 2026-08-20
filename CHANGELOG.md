@@ -5,6 +5,29 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] -- 2026-08-20
+
+### Corrigido — o npm embutido era quase toda a superfície de uma base Node
+
+Uma `base-node` recém-gerada reprovava no portão com `CVE-2026-59873
+(CRITICAL) em tar 7.5.11`, e o Docker Scout mostrou de onde: a camada
+`node:22-alpine` trazia 1 CRITICAL e 7 HIGH, enquanto **todas as camadas
+geradas por este comando traziam zero**. Os pacotes afetados eram
+`npm/tar`, `npm/brace-expansion`, `npm/ip-address`, `npm/picomatch` e
+`npm/sigstore` — as dependências que o npm carrega dentro de si, em
+`node_modules`, fora do alcance do `apk upgrade` porque não são pacotes da
+distribuição.
+
+`dockerls base-image` passa a remover o gerenciador embutido (npm, npx, yarn)
+por padrão nas bases Node. A pergunta certa numa base de **execução** é o que
+justifica mantê-lo: as dependências da aplicação são instaladas no estágio de
+build de quem consome, e nada na imagem final precisa instalar mais nada. Quem
+tem um `npm start` que resolve pacotes na subida passa `--keep-manager`, e o
+comando diz em voz alta o que isso implica.
+
+A remoção roda como `root` e a imagem volta ao usuário não-root antes de
+terminar — terminar como root anularia o ponto da base.
+
 ## [2.2.0] -- 2026-08-19
 
 ### Adicionado — `dockerls base-image`
