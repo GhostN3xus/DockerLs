@@ -52,6 +52,15 @@ def base_image(
     owner: str | None = typer.Option(None, "--owner", help="Time ou pessoa responsável"),
     source_url: str | None = typer.Option(None, "--source", help="URL do repositório"),
     title: str | None = typer.Option(None, "--title", help="Nome da imagem nos rótulos"),
+    keep_manager: bool = typer.Option(
+        False,
+        "--keep-manager",
+        help=(
+            "Mantém o gerenciador de pacotes que a imagem oficial embute (npm, yarn). "
+            "Por padrão ele é removido: numa base de execução, as dependências que ele "
+            "carrega dentro de si são superfície pura e ficam fora do apk/apt"
+        ),
+    ),
     no_pin: bool = typer.Option(
         False, "--no-pin", help="Não resolver o digest da base (deixa a tag móvel)"
     ),
@@ -66,10 +75,12 @@ def base_image(
         console.print(f"[red]Erro:[/red] {safe(str(e))}")
         raise typer.Exit(EXIT_ERROR) from e
 
+    strip = _resolve_strip(chosen_runtime, family, keep_manager=keep_manager)
     recipe = BaseRecipe(
         family=family,
         runtime=chosen_runtime,
         packages=tuple(packages),
+        strip_bundled_manager=strip,
         title=title or _default_title(family, chosen_runtime),
         description=_default_description(family, chosen_runtime),
         owner=(owner or "").strip(),
@@ -112,6 +123,40 @@ def base_image(
         "afirmação sobre segurança; até lá ela é só uma intenção.[/dim]"
     )
     raise typer.Exit(EXIT_OK)
+
+
+def _resolve_strip(runtime: Runtime, family: OsFamily, *, keep_manager: bool) -> bool:
+    """Se o gerenciador embutido sai da imagem.
+
+    Isto virou opção por um caso medido: uma `node:22-alpine` recém-construída
+    reportava 1 CRITICAL e 7 HIGH, e **todas** vinham das dependências que o
+    npm carrega dentro de `node_modules` -- fora do alcance do `apk upgrade`,
+    porque não são pacotes da distribuição. As camadas geradas por este comando
+    reportavam zero.
+
+    O padrão é remover, porque a pergunta certa numa base de *execução* é o que
+    justifica manter: as dependências da aplicação são instaladas no estágio de
+    build de quem consome, e nada aqui precisa instalar nada. Quem tem um
+    `npm start` que resolve pacotes na subida passa `--keep-manager`.
+    """
+    from dockerls.domain.value_objects.base_recipe import RUNTIME_BASES
+
+    base = RUNTIME_BASES.get((runtime, family))
+    if base is None or not base.bundled_manager:
+        return False
+    if keep_manager:
+        console.print(
+            f"\n[yellow]{base.bundled_manager_note} ficam na imagem.[/yellow]\n"
+            "[dim]As dependências que eles carregam dentro de si costumam ser a "
+            "origem de quase toda CVE desta base, e o upgrade do sistema não as "
+            "alcança.[/dim]"
+        )
+        return False
+    console.print(
+        f"\n[dim]{base.bundled_manager_note} serão removidos da imagem final "
+        "(--keep-manager mantém).[/dim]"
+    )
+    return True
 
 
 def _resolve_family(value: str | None) -> OsFamily:

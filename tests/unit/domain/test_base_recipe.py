@@ -131,3 +131,61 @@ class TestCatalogIntegrity:
         libc_compat = next(c for c in PACKAGE_CATALOG if c.key == "libc6-compat")
         assert libc_compat.package_for(OsFamily.ALPINE) == "libc6-compat"
         assert libc_compat.package_for(OsFamily.DEBIAN) == ""
+
+
+class TestBundledManagerRemoval:
+    """O npm carrega as próprias dependências, fora do alcance do apk.
+
+    Numa `node:22-alpine` recém-construída, 1 CRITICAL e 7 HIGH vinham de
+    `npm/tar`, `npm/brace-expansion`, `npm/ip-address` e companhia -- todas em
+    `node_modules` dentro do próprio npm, que o `apk upgrade` não toca porque
+    não são pacotes da distribuição.
+    """
+
+    def test_node_bases_declare_what_they_bundle(self):
+        from dockerls.domain.value_objects.base_recipe import RUNTIME_BASES
+
+        base = RUNTIME_BASES[(Runtime.NODE, OsFamily.ALPINE)]
+        assert base.bundled_manager
+        assert "/usr/local/lib/node_modules/npm" in base.bundled_manager
+
+    def test_stripping_removes_npm_and_yarn(self):
+        out = render(
+            BaseRecipe(
+                family=OsFamily.ALPINE,
+                runtime=Runtime.NODE,
+                digest=_DIGEST,
+                strip_bundled_manager=True,
+            )
+        )
+        assert "rm -rf" in out
+        assert "/usr/local/lib/node_modules/npm" in out
+        assert "/usr/local/bin/yarn" in out
+
+    def test_the_removal_runs_as_root_and_the_final_user_is_restored(self):
+        # Remover exige privilégio; terminar como root anularia o ponto da base.
+        out = render(
+            BaseRecipe(
+                family=OsFamily.ALPINE,
+                runtime=Runtime.NODE,
+                digest=_DIGEST,
+                strip_bundled_manager=True,
+            )
+        )
+        linhas = [line for line in out.splitlines() if line.startswith("USER ")]
+        assert linhas == ["USER root", "USER node"]
+
+    def test_keeping_the_manager_leaves_the_image_untouched(self):
+        out = render(BaseRecipe(family=OsFamily.ALPINE, runtime=Runtime.NODE, digest=_DIGEST))
+        assert "rm -rf" not in out
+
+    def test_runtimes_without_a_bundled_manager_are_unaffected(self):
+        out = render(
+            BaseRecipe(
+                family=OsFamily.ALPINE,
+                runtime=Runtime.JAVA,
+                digest=_DIGEST,
+                strip_bundled_manager=True,
+            )
+        )
+        assert "rm -rf" not in out

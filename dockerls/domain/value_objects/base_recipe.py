@@ -70,6 +70,13 @@ class RuntimeBase:
 
     image: str
     tag: str
+    #: Caminhos de um gerenciador de pacotes que a imagem oficial embute e que
+    #: uma base de *runtime* não precisa. O npm é o caso que motivou isto: ele
+    #: vem com a própria árvore de dependências em node_modules, fora do
+    #: alcance do apk, e é de onde saem quase todas as CVEs de uma imagem
+    #: `node:*-alpine` recém-construída.
+    bundled_manager: tuple[str, ...] = ()
+    bundled_manager_note: str = ""
     #: Usuário não-root que a imagem oficial já traz, quando traz. Criar outro
     #: por cima seria duplicar o que existe e confundir quem consome.
     builtin_user: str = ""
@@ -102,9 +109,34 @@ RUNTIME_BASES: dict[tuple[Runtime, OsFamily], RuntimeBase] = {
         "gcr.io/distroless/java21-debian12", "nonroot", builtin_user="nonroot"
     ),
     (Runtime.NODE, OsFamily.ALPINE): RuntimeBase(
-        "node", "22-alpine", builtin_user="node", note="a imagem oficial já traz o usuário `node`"
+        "node",
+        "22-alpine",
+        builtin_user="node",
+        note="a imagem oficial já traz o usuário `node`",
+        bundled_manager=(
+            "/usr/local/lib/node_modules/npm",
+            "/usr/local/bin/npm",
+            "/usr/local/bin/npx",
+            "/opt/yarn-*",
+            "/usr/local/bin/yarn",
+            "/usr/local/bin/yarnpkg",
+        ),
+        bundled_manager_note="npm e yarn",
     ),
-    (Runtime.NODE, OsFamily.DEBIAN): RuntimeBase("node", "22-slim", builtin_user="node"),
+    (Runtime.NODE, OsFamily.DEBIAN): RuntimeBase(
+        "node",
+        "22-slim",
+        builtin_user="node",
+        bundled_manager=(
+            "/usr/local/lib/node_modules/npm",
+            "/usr/local/bin/npm",
+            "/usr/local/bin/npx",
+            "/opt/yarn-*",
+            "/usr/local/bin/yarn",
+            "/usr/local/bin/yarnpkg",
+        ),
+        bundled_manager_note="npm e yarn",
+    ),
     (Runtime.NODE, OsFamily.DISTROLESS): RuntimeBase(
         "gcr.io/distroless/nodejs22-debian12", "nonroot", builtin_user="nonroot"
     ),
@@ -266,6 +298,12 @@ class BaseRecipe:
     source: str = ""
     uid: int = 10001
     user_name: str = "appuser"
+    #: Remover o gerenciador de pacotes que a imagem oficial embute. Vale para
+    #: uma base de execução: as dependências que o npm carrega dentro de si
+    #: respondem por quase toda CVE de uma `node:*-alpine`, e nada delas é
+    #: necessário para *rodar* uma aplicação cujas dependências já foram
+    #: instaladas no estágio de build.
+    strip_bundled_manager: bool = False
     extra: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -324,6 +362,10 @@ def render(recipe: BaseRecipe) -> str:
 
     if recipe.family.installs_packages:
         lines += _packages(recipe)
+        lines.append("")
+
+    if recipe.strip_bundled_manager and base.bundled_manager:
+        lines += _strip_manager(base)
         lines.append("")
 
     user = base.builtin_user or recipe.user_name
@@ -437,4 +479,27 @@ def _create_user(recipe: BaseRecipe) -> list[str]:
         f"RUN groupadd -g {recipe.uid} {recipe.user_name} && \\",
         f"    useradd -u {recipe.uid} -g {recipe.user_name} "
         f"-s /usr/sbin/nologin -m {recipe.user_name}",
+    ]
+
+
+def _strip_manager(base: RuntimeBase) -> list[str]:
+    """Remove o gerenciador de pacotes que a imagem oficial embute.
+
+    O `apk upgrade` não alcança essas dependências: elas vivem em
+    `node_modules` dentro do próprio npm, não no banco de pacotes da
+    distribuição. Numa base de execução elas são superfície pura -- as
+    dependências da aplicação já foram instaladas no estágio de build de quem
+    consome, e nada aqui precisa instalar mais nada.
+
+    Quem *precisa* de npm em runtime (um `npm start` que resolve dependências
+    na subida, por exemplo) simplesmente não marca esta opção.
+    """
+    caminhos = " \\\n        ".join(base.bundled_manager)
+    return [
+        f"# Remove {base.bundled_manager_note}: numa base de execução, as dependências",
+        "# que o gerenciador carrega dentro de si são superfície pura -- e ficam fora",
+        "# do alcance do upgrade do sistema, porque não são pacotes da distribuição.",
+        "USER root",
+        "RUN rm -rf \\",
+        f"        {caminhos}",
     ]
