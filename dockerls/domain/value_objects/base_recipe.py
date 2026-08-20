@@ -1,0 +1,440 @@
+"""Montar uma imagem base a partir de escolhas, e dizer o que cada uma custa.
+
+Uma imagem base é o piso de tudo que vem depois: cada pacote instalado aqui
+existe em toda aplicação que a consome, e toda CVE dele vira trabalho de
+triagem para times que nem sabem que ele está lá. É por isso que a escolha
+merece uma tela em vez de um Dockerfile copiado de outro projeto -- e é por
+isso que cada item deste catálogo carrega **para que serve** e **o que custa**,
+lado a lado.
+
+O catálogo não é uma lista de pacotes disponíveis; é a lista curta do que
+aparece de verdade numa imagem base de produção. Oferecer tudo que existe no
+repositório da distribuição transformaria a escolha em paralisia e faria as
+pessoas marcarem tudo "por via das dúvidas", que é exatamente o resultado que
+uma imagem base não pode ter.
+
+Três recusas estão codificadas aqui, e todas vêm da mesma ideia -- conveniência
+que se paga em superfície de ataque não é conveniência:
+
+* **distroless não instala nada.** Não há gerenciador de pacotes nem shell na
+  imagem; pedir pacotes ali é um mal-entendido sobre o que distroless é, e a
+  resposta certa é explicar isso em vez de gerar um Dockerfile que falha.
+* **`sudo` não está no catálogo.** Numa imagem que já roda sem privilégio, ele
+  existe para cruzar a fronteira que a imagem acabou de estabelecer.
+* **o cache do gerenciador sai na mesma camada que o criou**, sempre, sem ser
+  uma opção. Removê-lo depois deixa os bytes na camada anterior e a imagem
+  carrega o peso e a superfície mesmo parecendo não carregar.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import StrEnum
+
+
+class OsFamily(StrEnum):
+    """A distribuição base. Decide libc, gerenciador de pacotes e nomes."""
+
+    ALPINE = "alpine"
+    DEBIAN = "debian"
+    UBUNTU = "ubuntu"
+    DISTROLESS = "distroless"
+
+    @property
+    def uses_apk(self) -> bool:
+        return self is OsFamily.ALPINE
+
+    @property
+    def installs_packages(self) -> bool:
+        """Distroless não tem gerenciador de pacotes -- é o ponto dele."""
+        return self is not OsFamily.DISTROLESS
+
+    @property
+    def libc(self) -> str:
+        return "musl" if self is OsFamily.ALPINE else "glibc"
+
+
+class Runtime(StrEnum):
+    """O runtime de linguagem que a base carrega, se carregar algum."""
+
+    NONE = "none"
+    JAVA = "java"
+    NODE = "node"
+    PYTHON = "python"
+    GO = "go"
+
+
+@dataclass(frozen=True)
+class RuntimeBase:
+    """A imagem oficial que serve de ponto de partida para um runtime."""
+
+    image: str
+    tag: str
+    #: Usuário não-root que a imagem oficial já traz, quando traz. Criar outro
+    #: por cima seria duplicar o que existe e confundir quem consome.
+    builtin_user: str = ""
+    note: str = ""
+
+    @property
+    def reference(self) -> str:
+        return f"{self.image}:{self.tag}"
+
+
+#: (runtime, família) -> imagem base. Só combinações que existem de verdade:
+#: oferecer `go` sobre distroless levaria a `gcr.io/distroless/static`, que não
+#: tem runtime nenhum e é uma resposta diferente da que a pessoa pediu.
+RUNTIME_BASES: dict[tuple[Runtime, OsFamily], RuntimeBase] = {
+    (Runtime.NONE, OsFamily.ALPINE): RuntimeBase("alpine", "3.21"),
+    (Runtime.NONE, OsFamily.DEBIAN): RuntimeBase("debian", "12-slim"),
+    (Runtime.NONE, OsFamily.UBUNTU): RuntimeBase("ubuntu", "24.04"),
+    (Runtime.NONE, OsFamily.DISTROLESS): RuntimeBase(
+        "gcr.io/distroless/base-debian12", "nonroot", builtin_user="nonroot"
+    ),
+    (Runtime.JAVA, OsFamily.ALPINE): RuntimeBase(
+        "eclipse-temurin",
+        "21-jre-alpine",
+        note="JRE, não JDK: compilador e ferramentas de build não são "
+        "necessários para rodar um jar",
+    ),
+    (Runtime.JAVA, OsFamily.DEBIAN): RuntimeBase("eclipse-temurin", "21-jre"),
+    (Runtime.JAVA, OsFamily.UBUNTU): RuntimeBase("eclipse-temurin", "21-jre-noble"),
+    (Runtime.JAVA, OsFamily.DISTROLESS): RuntimeBase(
+        "gcr.io/distroless/java21-debian12", "nonroot", builtin_user="nonroot"
+    ),
+    (Runtime.NODE, OsFamily.ALPINE): RuntimeBase(
+        "node", "22-alpine", builtin_user="node", note="a imagem oficial já traz o usuário `node`"
+    ),
+    (Runtime.NODE, OsFamily.DEBIAN): RuntimeBase("node", "22-slim", builtin_user="node"),
+    (Runtime.NODE, OsFamily.DISTROLESS): RuntimeBase(
+        "gcr.io/distroless/nodejs22-debian12", "nonroot", builtin_user="nonroot"
+    ),
+    (Runtime.PYTHON, OsFamily.ALPINE): RuntimeBase(
+        "python",
+        "3.12-alpine",
+        note="musl: wheels precisam ser musllinux ou o pacote compila no build",
+    ),
+    (Runtime.PYTHON, OsFamily.DEBIAN): RuntimeBase("python", "3.12-slim-bookworm"),
+    (Runtime.PYTHON, OsFamily.DISTROLESS): RuntimeBase(
+        "gcr.io/distroless/python3-debian12", "nonroot", builtin_user="nonroot"
+    ),
+    (Runtime.GO, OsFamily.ALPINE): RuntimeBase("golang", "1.23-alpine"),
+    (Runtime.GO, OsFamily.DEBIAN): RuntimeBase("golang", "1.23-bookworm"),
+}
+
+
+@dataclass(frozen=True)
+class PackageChoice:
+    """Um pacote oferecido no menu, com o que ganha e o que custa."""
+
+    key: str
+    purpose: str
+    #: O preço em superfície de ataque, dito na hora da escolha e não depois.
+    cost: str
+    #: Nome no apk (Alpine) e no apt (Debian/Ubuntu). Divergem com frequência.
+    apk: str = ""
+    apt: str = ""
+    #: Já presente na maioria das bases; marcar não faz mal, mas não faz nada.
+    usually_present: bool = False
+
+    def package_for(self, family: OsFamily) -> str:
+        """O nome nesta família, ou "" quando o pacote não existe nela.
+
+        O fallback para `key` só vale quando *nenhum* nome específico foi
+        declarado. Aplicá-lo a um pacote que existe só numa família --
+        `libc6-compat`, que é do Alpine -- geraria um `apt-get install
+        libc6-compat` que quebra o build: o vazio aqui significa "não se
+        aplica", e é o que faz o menu não oferecê-lo onde não cabe.
+        """
+        if not self.apk and not self.apt:
+            return self.key
+        return self.apk if family.uses_apk else self.apt
+
+
+#: O menu. Curto de propósito: uma lista longa faz as pessoas marcarem tudo
+#: "por via das dúvidas", que é o pior resultado possível numa imagem base.
+PACKAGE_CATALOG: tuple[PackageChoice, ...] = (
+    PackageChoice(
+        key="ca-certificates",
+        purpose="validar TLS ao falar com qualquer serviço HTTPS",
+        cost="praticamente nenhum; sem ele toda conexão TLS falha na verificação",
+        apk="ca-certificates",
+        apt="ca-certificates",
+        usually_present=True,
+    ),
+    PackageChoice(
+        key="tzdata",
+        purpose="fusos horários; sem ele o container fica em UTC e datas locais erram",
+        cost="alguns MB de dados, sem executável novo",
+        apk="tzdata",
+        apt="tzdata",
+    ),
+    PackageChoice(
+        key="curl",
+        purpose="HEALTHCHECK por HTTP e diagnóstico de rede",
+        cost="um cliente HTTP completo dentro do container -- é o que um atacante "
+        "usa para baixar o segundo estágio",
+        apk="curl",
+        apt="curl",
+    ),
+    PackageChoice(
+        key="wget",
+        purpose="alternativa ao curl para baixar arquivos",
+        cost="mesmo custo do curl; ter os dois dobra a superfície sem dobrar a utilidade",
+        apk="wget",
+        apt="wget",
+    ),
+    PackageChoice(
+        key="bash",
+        purpose="scripts que dependem de recursos que o `sh` do Alpine não tem",
+        cost="um shell mais capaz é um shell mais útil para quem invade",
+        apk="bash",
+        apt="bash",
+    ),
+    PackageChoice(
+        key="git",
+        purpose="clonar ou inspecionar repositórios em tempo de execução",
+        cost="raramente necessário em produção, e traz uma árvore de dependências "
+        "grande; quase sempre pertence ao estágio de build",
+        apk="git",
+        apt="git",
+    ),
+    PackageChoice(
+        key="jq",
+        purpose="processar JSON em scripts de entrypoint",
+        cost="pequeno e autocontido",
+        apk="jq",
+        apt="jq",
+    ),
+    PackageChoice(
+        key="openssl",
+        purpose="gerar certificados ou depurar TLS de dentro do container",
+        cost="a biblioteca já está lá; isto adiciona a *ferramenta* de linha de comando",
+        apk="openssl",
+        apt="openssl",
+    ),
+    PackageChoice(
+        key="tini",
+        purpose="init mínimo que repassa sinais e enterra processos órfãos",
+        cost="quase nada, e resolve o pid 1 que ignora SIGTERM",
+        apk="tini",
+        apt="tini",
+    ),
+    PackageChoice(
+        key="libc6-compat",
+        purpose="camada de compatibilidade glibc no Alpine, para binários pré-compilados",
+        cost="só faz sentido no Alpine; num Debian já existe glibc de verdade",
+        apk="libc6-compat",
+        apt="",
+    ),
+)
+
+#: Pacotes que este catálogo recusa a oferecer, com o motivo. São recusas, não
+#: omissões: alguém que procurar por eles merece a explicação.
+REFUSED_PACKAGES: dict[str, str] = {
+    "sudo": (
+        "numa imagem que já roda sem privilégio, `sudo` existe para cruzar a "
+        "fronteira que ela acabou de estabelecer -- e é setuid para isso"
+    ),
+    "su-exec": (
+        "trocar de usuário em runtime desfaz o `USER` da imagem; se o processo "
+        "precisa de outro usuário, declare-o no `USER`"
+    ),
+    "docker": (
+        "o cliente Docker dentro do container implica acesso ao socket do "
+        "daemon, que é equivalente a root no host"
+    ),
+}
+
+
+class UnsupportedCombinationError(ValueError):
+    """A combinação de runtime e sistema operacional não existe."""
+
+
+@dataclass(frozen=True)
+class BaseRecipe:
+    """Tudo que decide o conteúdo do Dockerfile de uma imagem base."""
+
+    family: OsFamily
+    runtime: Runtime = Runtime.NONE
+    packages: tuple[str, ...] = ()
+    #: Digest resolvido da base. Vazio deixa a tag móvel -- e o gerador diz
+    #: isso em voz alta em vez de fingir que está fixado.
+    digest: str = ""
+    title: str = "base"
+    description: str = ""
+    owner: str = ""
+    source: str = ""
+    uid: int = 10001
+    user_name: str = "appuser"
+    extra: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def base(self) -> RuntimeBase:
+        try:
+            return RUNTIME_BASES[(self.runtime, self.family)]
+        except KeyError as e:
+            raise UnsupportedCombinationError(
+                f"não há imagem base publicada para {self.runtime} sobre {self.family}"
+            ) from e
+
+    def validate(self) -> None:
+        base = self.base  # levanta se a combinação não existe
+        if self.packages and not self.family.installs_packages:
+            raise UnsupportedCombinationError(
+                "distroless não tem gerenciador de pacotes nem shell: não é possível "
+                "instalar nada nela. Use alpine ou debian se você precisa de pacotes, "
+                "ou nenhum pacote se o que você quer é a menor superfície possível"
+            )
+        for package in self.packages:
+            if package in REFUSED_PACKAGES:
+                raise UnsupportedCombinationError(
+                    f"{package} não é oferecido: {REFUSED_PACKAGES[package]}"
+                )
+            if package not in {choice.key for choice in PACKAGE_CATALOG}:
+                raise UnsupportedCombinationError(f"pacote desconhecido: {package}")
+        if base.builtin_user and self.user_name != base.builtin_user:
+            # Não é erro -- só não vale a pena criar um usuário quando a
+            # imagem oficial já traz um. O gerador reaproveita o existente.
+            pass
+
+
+def render(recipe: BaseRecipe) -> str:
+    """O Dockerfile da imagem base, pronto para construir."""
+    recipe.validate()
+    base = recipe.base
+    lines: list[str] = ["# syntax=docker/dockerfile:1", ""]
+    lines += _header(recipe, base)
+
+    reference = base.reference
+    if recipe.digest:
+        lines += [
+            f"ARG BASE_DIGEST={recipe.digest}",
+            "",
+            f"FROM {reference}@${{BASE_DIGEST}}",
+        ]
+    else:
+        lines += [
+            "# ATENÇÃO: base não fixada por digest. O que você testar e o que for",
+            "# construído amanhã podem ser bytes diferentes sem nenhuma mudança sua.",
+            f"FROM {reference}",
+        ]
+    lines.append("")
+    lines += _labels(recipe)
+    lines.append("")
+
+    if recipe.family.installs_packages:
+        lines += _packages(recipe)
+        lines.append("")
+
+    user = base.builtin_user or recipe.user_name
+    if not base.builtin_user and recipe.family.installs_packages:
+        lines += _create_user(recipe)
+        lines.append("")
+
+    lines += [
+        "WORKDIR /app",
+        f"USER {user}",
+        "",
+        "# Sem ENTRYPOINT, EXPOSE ou HEALTHCHECK: uma imagem base não sabe em que",
+        "# porta a aplicação escuta nem o que significa 'saudável' para ela.",
+        "# Declarar aqui seria herdado errado por todo consumidor.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _header(recipe: BaseRecipe, base: RuntimeBase) -> list[str]:
+    lines = [
+        f"# Imagem BASE gerada pelo DockerLs: {recipe.family}"
+        + (f" + {recipe.runtime}" if recipe.runtime is not Runtime.NONE else ""),
+        "#",
+        "# Não contém aplicação. Quem consome faz `FROM esta-imagem` e traz o",
+        "# próprio artefato.",
+    ]
+    if base.note:
+        lines += ["#", f"# {base.note}."]
+    lines += ["#", f"# libc: {recipe.family.libc}.", ""]
+    return lines
+
+
+def _labels(recipe: BaseRecipe) -> list[str]:
+    labels = {
+        "maintainer": recipe.owner,
+        "security.scanner": "dockerls",
+        "org.opencontainers.image.title": recipe.title,
+        "org.opencontainers.image.description": recipe.description,
+        "org.opencontainers.image.source": recipe.source,
+        **recipe.extra,
+    }
+    entries = [(key, value) for key, value in labels.items() if value]
+    if not entries:
+        return []
+    rendered = ["LABEL " + f'{entries[0][0]}="{entries[0][1]}"' + (" \\" if entries[1:] else "")]
+    for index, (key, value) in enumerate(entries[1:]):
+        suffix = " \\" if index < len(entries) - 2 else ""
+        rendered.append(f'      {key}="{value}"{suffix}')
+    return rendered
+
+
+def _packages(recipe: BaseRecipe) -> list[str]:
+    chosen = [choice for choice in PACKAGE_CATALOG if choice.key in recipe.packages]
+    names = sorted(
+        {
+            choice.package_for(recipe.family)
+            for choice in chosen
+            if choice.package_for(recipe.family)
+        }
+    )
+
+    comment = [
+        "# O digest congela a base no dia em que foi publicada; sem esta linha, um",
+        "# pacote corrigido depois dessa data continuaria velho aqui.",
+    ]
+    if recipe.family.uses_apk:
+        if not names:
+            return [*comment, "RUN apk upgrade --no-cache"]
+        pacotes = " \\\n    ".join(names)
+        return [
+            *comment,
+            "# `--no-cache` não deixa índice para trás: não há o que limpar numa",
+            "# camada seguinte, e o cache removido depois ficaria na camada anterior.",
+            "RUN apk upgrade --no-cache && \\",
+            "    apk add --no-cache \\",
+            f"    {pacotes}",
+        ]
+
+    if not names:
+        return [
+            *comment,
+            "RUN apt-get update && apt-get upgrade -y --no-install-recommends && \\",
+            "    rm -rf /var/lib/apt/lists/*",
+        ]
+    pacotes = " \\\n    ".join(names)
+    return [
+        *comment,
+        "# A lista de índices sai na mesma camada que a criou: removê-la depois",
+        "# deixaria os bytes na camada anterior.",
+        "RUN apt-get update && apt-get upgrade -y --no-install-recommends && \\",
+        "    apt-get install -y --no-install-recommends \\",
+        f"    {pacotes} && \\",
+        "    rm -rf /var/lib/apt/lists/*",
+    ]
+
+
+def _create_user(recipe: BaseRecipe) -> list[str]:
+    comment = [
+        "# uid alto e fixo: quem consome herda o usuário sem precisar recriá-lo,",
+        "# e um uid alto não colide com usuários do host num bind mount.",
+    ]
+    if recipe.family.uses_apk:
+        return [
+            *comment,
+            f"RUN addgroup -g {recipe.uid} {recipe.user_name} && \\",
+            f"    adduser -u {recipe.uid} -G {recipe.user_name} "
+            f"-h /home/{recipe.user_name} -s /sbin/nologin -D {recipe.user_name}",
+        ]
+    return [
+        *comment,
+        f"RUN groupadd -g {recipe.uid} {recipe.user_name} && \\",
+        f"    useradd -u {recipe.uid} -g {recipe.user_name} "
+        f"-s /usr/sbin/nologin -m {recipe.user_name}",
+    ]

@@ -655,3 +655,128 @@ class TestTemplateDiscovery:
         payload = json.loads(result.output)
         assert "maven" in payload["templates"]
         assert len(payload["templates"]) >= 39
+
+
+class TestBaseImageCommand:
+    """O menu que monta a imagem base.
+
+    Marcar um pacote aqui o coloca em toda aplicação que consumir a base, então
+    o menu mostra o custo junto do propósito -- e recusa o que não deveria
+    estar numa imagem base, com o motivo.
+    """
+
+    def test_the_menu_shows_purpose_and_cost_of_each_package(self, tmp_path):
+        result = CliRunner().invoke(
+            app,
+            ["base-image", "-o", str(tmp_path / "Dockerfile"), "--no-pin"],
+            input="1\n1\n1,2\ns\n",
+        )
+        assert "serve para:" in result.output
+        assert "custa:" in result.output
+
+    def test_a_refused_package_names_the_reason(self, tmp_path):
+        result = CliRunner().invoke(
+            app,
+            [
+                "base-image",
+                "-o",
+                str(tmp_path / "Dockerfile"),
+                "--os",
+                "alpine",
+                "--runtime",
+                "none",
+                "--with",
+                "sudo",
+                "--no-pin",
+            ],
+        )
+        assert result.exit_code == EXIT_ERROR
+        assert "sudo" in result.output
+        assert "privilégio" in result.output
+
+    def test_distroless_refuses_packages_instead_of_generating_a_broken_file(self, tmp_path):
+        destination = tmp_path / "Dockerfile"
+        result = CliRunner().invoke(
+            app,
+            [
+                "base-image",
+                "-o",
+                str(destination),
+                "--os",
+                "distroless",
+                "--runtime",
+                "java",
+                "--with",
+                "curl",
+                "--no-pin",
+            ],
+        )
+        assert result.exit_code == EXIT_ERROR
+        assert not destination.exists()
+
+    def test_non_interactive_generation_writes_the_file(self, tmp_path):
+        destination = tmp_path / "Dockerfile"
+        result = CliRunner().invoke(
+            app,
+            [
+                "base-image",
+                "-o",
+                str(destination),
+                "--os",
+                "alpine",
+                "--runtime",
+                "java",
+                "--with",
+                "ca-certificates,tzdata",
+                "--owner",
+                "Plataforma",
+                "--source",
+                "https://git/r",
+                "--no-pin",
+            ],
+        )
+        assert result.exit_code == EXIT_OK
+        content = destination.read_text()
+        assert "FROM eclipse-temurin:21-jre-alpine" in content
+        assert "ca-certificates" in content
+        assert 'maintainer="Plataforma"' in content
+
+    def test_an_existing_file_is_not_overwritten_without_force(self, tmp_path):
+        destination = tmp_path / "Dockerfile"
+        destination.write_text("FROM scratch\n")
+        result = CliRunner().invoke(
+            app,
+            [
+                "base-image",
+                "-o",
+                str(destination),
+                "--os",
+                "alpine",
+                "--runtime",
+                "none",
+                "--with",
+                "",
+                "--no-pin",
+            ],
+        )
+        assert result.exit_code == EXIT_ERROR
+        assert destination.read_text() == "FROM scratch\n"
+
+    def test_an_invalid_os_is_refused_with_the_choices(self, tmp_path):
+        result = CliRunner().invoke(
+            app,
+            [
+                "base-image",
+                "-o",
+                str(tmp_path / "D"),
+                "--os",
+                "arch",
+                "--runtime",
+                "none",
+                "--with",
+                "",
+                "--no-pin",
+            ],
+        )
+        assert result.exit_code == EXIT_ERROR
+        assert "alpine" in result.output

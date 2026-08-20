@@ -6,6 +6,8 @@ from dockerls.cli.commands.advisor import advisor
 from dockerls.cli.commands.alternatives import alternatives
 from dockerls.cli.commands.analyze import analyze as analyze_image
 from dockerls.cli.commands.analyze_dockerfile import analyze as analyze_dockerfile_cmd
+from dockerls.cli.commands.base_cmd import base
+from dockerls.cli.commands.base_image import base_image
 from dockerls.cli.commands.build import build
 from dockerls.cli.commands.cache_cmd import cache_app
 from dockerls.cli.commands.compare import compare
@@ -42,6 +44,8 @@ app.command()(advisor)
 app.command()(alternatives)
 app.command(name="analyze")(analyze_image)
 app.command(name="analyze-dockerfile")(analyze_dockerfile_cmd)
+app.command()(base)
+app.command(name="base-image")(base_image)
 app.command()(build)
 app.command()(compare)
 app.command()(controls)

@@ -5,6 +5,77 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] -- 2026-08-19
+
+### Adicionado — `dockerls base-image`
+
+Gera o Dockerfile de uma imagem base a partir de um menu: você escolhe o
+sistema operacional, o runtime, e marca os pacotes. O resultado não tem
+aplicação nenhuma — é feito para outros projetos consumirem com `FROM`.
+
+O menu mostra, para cada pacote, **o que ele serve e o que ele custa**. Numa
+imagem base essa segunda metade é a que importa: cada pacote marcado existe em
+toda aplicação que a consome, e toda CVE dele vira triagem para times que nem
+sabem que ele está lá. O catálogo é curto de propósito — uma lista com tudo que
+a distribuição publica faria as pessoas marcarem tudo "por via das dúvidas".
+
+A base sai fixada por digest resolvido no registry na hora da geração; quando o
+registry não responde, o Dockerfile sai sem digest e **diz isso num comentário**
+em vez de fingir que está fixado.
+
+Três recusas estão codificadas: `sudo`, `su-exec` e o cliente `docker` não são
+oferecidos (numa imagem que roda sem privilégio, existem para cruzar a fronteira
+que ela acabou de estabelecer); pacotes em distroless são recusados com a
+explicação em vez de gerarem um Dockerfile que falha; e o cache do gerenciador
+sai sempre na mesma camada que o criou, sem ser opção.
+
+O resultado não tem `ENTRYPOINT`, `EXPOSE` nem `HEALTHCHECK` — uma imagem base
+não sabe em que porta a aplicação escuta, e declarar isso seria herdado errado
+por todo consumidor.
+
+### Corrigido
+
+- **`libc6-compat` seria instalado no Debian.** O nome do pacote por família
+  caía num fallback para a chave quando a família não tinha nome declarado, e
+  `libc6-compat` só existe no Alpine — o `apt-get install` quebraria o build. O
+  vazio passa a significar "não se aplica", e o menu não oferece o pacote onde
+  ele não cabe.
+
+## [2.1.0] -- 2026-08-19
+
+### Adicionado — `dockerls base`
+
+A metade que lia o seu projeto não media nada, e a metade que media não lia o
+seu projeto: o `analyze-dockerfile` sugeria base por string fixa (respondia
+`"FROM node:22-alpine"` até para um Dockerfile de Python), e o `recommend` só
+funcionava se alguém digitasse a referência na mão. Este comando é a ponte.
+
+Ele lê cada `FROM`, pergunta ao registry qual digest a tag aponta **agora**, e
+classifica em quatro estados: `PINNED_CURRENT`, `PINNED_STALE` (fixada num
+digest que a tag deixou para trás), `UNPINNED` e `UNRESOLVED`. Por padrão
+aplica a correção; `--dry-run` mostra sem escrever e sai com código `2` quando
+sobra o que corrigir, o que o torna portão de CI.
+
+`PINNED_STALE` é o caso que este comando existe para pegar, e ele não é
+hipotético: a base deste próprio projeto ficou meses fixada num digest de
+meados de 2024, carregando duas CVEs CRITICAL do `libexpat1` que já tinham
+correção publicada. O Dockerfile estava "corretamente" fixado o tempo todo —
+fixar sem nunca reavaliar é trancar a porta e jogar fora o calendário.
+
+Detalhes que a implementação leva a sério:
+
+- quando o digest vem de um `ARG`, a atualização vai para **a linha do `ARG`**,
+  onde o digest realmente mora — escrever no `FROM` quebraria o contrato do
+  arquivo em vez de atualizá-lo, e num Dockerfile com dois `FROM` usando o
+  mesmo `ARG` sai uma substituição, não duas;
+- `--platform`, `AS <estágio>`, comentários e indentação sobrevivem intactos:
+  um upgrade de base que reformata o arquivo transforma uma revisão de uma
+  linha numa revisão de trinta;
+- estágios de build são conferidos junto com o final, porque um `golang` velho
+  compila com toolchain velho;
+- registry que não responde dá `UNRESOLVED` e **nunca** "em dia" — o mesmo
+  princípio que rege o scan que não completou.
+
 ## [2.0.2] -- 2026-08-19
 
 ### Documentação
