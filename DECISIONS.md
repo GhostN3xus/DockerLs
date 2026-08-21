@@ -469,3 +469,65 @@ regra estava em duas cópias e as duas erravam em `localhost`. Agora
 `DockerImage.registry_host` delega para o domínio. Duas cópias de uma regra de
 segurança não divergem em teoria — elas divergem exatamente no caso que
 importa.
+
+## D-020 — Um documento de procedência não se auto-aprova
+
+**Contexto.** O `build --provenance` grava um JSON com os digests de entrada e
+saída do build, e um campo `status` calculado na hora. O passo seguinte natural
+— um workflow que decide se assina o artefato — leria esse campo.
+
+**Decisão.** `dockerls provenance` **recalcula** o status a partir dos digests
+e ignora o que está gravado. O campo `"status": "VERIFIED"` num arquivo JSON é
+editável por qualquer pessoa com um editor de texto; a comparação entre
+`source` e `source_after_build` não é.
+
+**Consequência.** O `from_dict` precisa reconstruir o documento inteiro em vez
+de ler um resumo, e qualquer campo ilegível leva a `INCOMPLETE` — nunca a
+`VERIFIED` por omissão. É o mesmo princípio que governa o resto da ferramenta:
+o que não pôde ser verificado não é apresentado como verificado.
+
+**Alternativa recusada.** Assinar o documento junto do artefato e verificar a
+assinatura. Resolve a adulteração, mas não a pergunta que importa — um
+documento íntegro pode descrever um build cuja entrada mudou no meio do
+caminho, e é esse caso que o recálculo pega.
+
+## D-021 — O sujeito da atestação sai do documento, nunca do YAML
+
+**Contexto.** `actions/attest-build-provenance` precisa de `subject-name` e
+`subject-digest`. O caminho óbvio é escrevê-los no workflow.
+
+**Decisão.** `--github-output` extrai os dois do documento de procedência e os
+publica em `$GITHUB_OUTPUT`. O workflow referencia a saída do passo, não uma
+string literal.
+
+**Consequência.** A atestação fala necessariamente da mesma imagem que o scan
+mediu. Um digest redigitado à mão é onde a cadeia arrebenta em silêncio: a
+assinatura continua criptograficamente válida enquanto cobre bytes que ninguém
+escaneou, e nada no processo acusa.
+
+## D-022 — Podar o histórico nunca faz uma tag parecer mais estável
+
+**Contexto.** O histórico de digests por tag tem teto (`MAX_OBSERVATIONS`). A
+poda óbvia — descartar as observações mais antigas — faria a contagem de
+movimentos regredir.
+
+**Decisão.** A primeira observação é preservada (ela ancora o "desde quando") e
+o que cai vira contagem em `dropped`, que soma em `moves`.
+
+**Consequência.** Um campo a mais no formato serializado. Em troca, a tag que
+mais muda — justamente a que estoura o teto e a que mais importa — não aparece
+como a mais estável de todas no instante em que passa do limite.
+
+## D-023 — Comparar duas receitas descreve trocas, não elege vencedora
+
+**Contexto.** `base-image --compare` mostra a diferença entre duas receitas de
+imagem base. Seria fácil (e vendável) coroar a de menor superfície.
+
+**Decisão.** O diff descreve o que entra, o que sai e o que cada troca custa, e
+termina mandando escanear as duas.
+
+**Consequência.** A pessoa ainda precisa construir e medir para decidir. É o
+custo de não mentir: contar pacotes não mede vulnerabilidade — uma base com
+menos pacotes e um deles desatualizado é pior que uma com mais pacotes e todos
+corrigidos, e um número que ignora isso seria apresentado como medida sem ser
+uma.

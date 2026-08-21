@@ -19,6 +19,7 @@ import json
 from typing import TYPE_CHECKING
 
 import typer
+from loguru import logger
 from rich.console import Console
 
 from dockerls.cli.dependencies import build_host_guard
@@ -62,12 +63,21 @@ def base(
 async def _base(path: str, *, apply: bool, output_format: OutputFormat) -> None:
     # Import tardio: montar o inspector puxa configuração e cliente HTTP, e o
     # `--help` deste comando não precisa de nada disso.
+    from dockerls.application.services.tag_history_store import TagHistoryStore
     from dockerls.application.use_cases.upgrade_base import UpgradeBaseUseCase
+    from dockerls.cli.dependencies import build_cache
     from dockerls.integrations.registry.inspector import RegistryInspector
 
     inspector = RegistryInspector(guard=build_host_guard())
+    # O histórico é um extra sobre o diagnóstico: se o cache não abrir, o
+    # comando continua sem ele em vez de falhar por causa de um enfeite.
     try:
-        result = await UpgradeBaseUseCase(inspector).execute(path, apply=apply)
+        history = TagHistoryStore(build_cache())
+    except Exception as e:  # pragma: no cover - abrir o cache é o caminho instável
+        logger.debug(f"Histórico de tags indisponível: {e}")
+        history = TagHistoryStore(None)
+    try:
+        result = await UpgradeBaseUseCase(inspector, history).execute(path, apply=apply)
     finally:
         await inspector.close()
 
@@ -97,6 +107,9 @@ def _render(result: UpgradeBaseResult, *, apply: bool) -> None:
             f"    {safe(finding.base.reference)}"
         )
         console.print(f"    [dim]{safe(finding.explain())}[/dim]")
+        historico = result.history_for(finding.base)
+        if historico is not None and historico.moves:
+            console.print(f"    [dim]histórico: {safe(historico.explain())}[/dim]")
         if finding.proposed_reference:
             alvo = (
                 f"ARG {safe(finding.base.digest_arg)}"

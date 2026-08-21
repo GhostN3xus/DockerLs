@@ -5,6 +5,40 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] -- 2026-08-21
+
+Segundo lote da lista de melhorias: fecha a cadeia entre o documento de
+procedência e a assinatura, e transforma duas mensagens vagas em medidas.
+
+### Adicionado
+
+- **`dockerls provenance`.** O `build --provenance` arquivava um JSON que
+  ninguém lia — e um documento que ninguém confere descreve com precisão uma
+  imagem que ninguém sabe se deveria ter sido publicada. O comando recalcula o
+  veredito a partir dos digests em vez de acreditar no campo `status` gravado
+  (que é editável por qualquer um com um editor de texto) e **reprova por
+  código de saída** quando a cadeia não fecha, o que o torna portão de CI.
+- **`--github-output` e o workflow de exemplo.** `subject-name` e
+  `subject-digest` saem do próprio documento para o
+  `actions/attest-build-provenance`. Redigitar o digest no YAML é onde a
+  cadeia arrebenta sem ninguém perceber: uma assinatura perfeitamente válida
+  apontando para bytes que ninguém escaneou. O workflow completo está em
+  `examples/github/image-release.yml`.
+- **Histórico de digests por tag no `dockerls base`.** "Esta base mudou" e
+  "esta base muda toda semana" pedem decisões opostas, e as duas produziam
+  exatamente o mesmo `PINNED_STALE`. Cada digest observado é guardado com a
+  data (TTL de um ano — um histórico é o passado, não fica obsoleto), e a linha
+  passa a dizer quantas vezes a tag mudou e desde quando. O histórico começa na
+  primeira vez que a ferramenta olhou, e a mensagem diz isso em vez de fingir
+  que o silêncio anterior era estabilidade. Se o cache falhar, o diagnóstico
+  segue sem a linha: um extra não pode derrubar o principal.
+- **`dockerls base-image --compare <família>`.** Responder "alpine ou debian
+  para isto?" exigia gerar os dois Dockerfiles e contar pacotes na mão. O diff
+  mostra o que entra, o que sai e o que cada troca custa — com destaque para a
+  mudança de libc, a única que quebra binário compilado. Não escreve arquivo
+  nenhum e **não elege vencedora**: contar pacotes não mede CVE, e a resposta
+  vem de escanear as duas.
+
 ## [2.3.0] -- 2026-08-20
 
 Primeiro lote da lista de melhorias: três itens de baixo esforço, todos

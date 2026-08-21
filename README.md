@@ -117,6 +117,7 @@ recebe nível e não entra na recomendação.
 | [`base`](#base) | Confere as bases do Dockerfile contra o registry e atualiza os digests | `0` `1` `2` |
 | [`base-image`](#base-image) | Gera o Dockerfile de uma imagem base a partir de um menu de pacotes | `0` / `1` |
 | [`build`](#build) | Valida, constrói, escaneia e (opcionalmente) publica | `0` `1` `2` |
+| [`provenance`](#provenance) | Confere um documento de procedência e prepara a atestação | `0` `1` `2` |
 | [`doctor`](#doctor) | Checa as dependências locais (scanners) | `0` / `1` |
 | [`health`](#health) | Checa a conectividade com os serviços externos | `0` / `1` |
 | [`cache`](#cache) | Inspeciona e limpa o cache de análises | `0` / `1` |
@@ -1002,6 +1003,43 @@ afirmação sobre segurança:
 dockerls build -t base-java:1.0 --fail-on critical .
 ```
 
+#### `--compare`: alpine ou debian para isto?
+
+O menu diz o custo de cada pacote uma linha por vez, o que não ajuda na
+pergunta que de fato se faz. `--compare` monta a mesma receita sobre outra
+família e mostra **a diferença de superfície** — sem escrever arquivo nenhum,
+porque responder uma pergunta sobrescrevendo um Dockerfile seria um efeito
+colateral que ninguém pediu.
+
+```console
+$ dockerls base-image --os alpine --runtime node --with ca-certificates,tzdata --compare distroless
+
+npm e yarn serão removidos da imagem final (--keep-manager mantém).
+
+node:22-alpine  ->  gcr.io/distroless/nodejs22-debian12:nonroot
+
+  - ca-certificates  validar TLS ao falar com qualquer serviço HTTPS
+  - tzdata  fusos horários; sem ele o container fica em UTC e datas locais erram
+
+  ! libc muda de musl para glibc: dependências compiladas precisam de roda para a
+    nova, ou serão compiladas do zero no build -- e algumas simplesmente não compilam
+  ! distroless não tem gerenciador de pacotes nem shell: nada pode ser instalado
+    nela depois, e nenhum `docker exec` vai funcionar
+
+este é um diff de conteúdo, não de vulnerabilidade: contar pacotes não mede CVE,
+e a única resposta para qual das duas é mais segura vem de escanear as duas.
+Construa e rode `dockerls scan` em cada uma
+```
+
+`--compare-with pkg,pkg` troca os pacotes do lado comparado; sem ele, os mesmos
+são carregados (e os que não existem naquela família aparecem como removidos).
+
+**O diff deliberadamente não elege uma vencedora.** Contar pacotes não mede
+vulnerabilidade: uma base com menos pacotes e um deles desatualizado é pior do
+que uma com mais pacotes e todos corrigidos. A troca de libc ganha destaque
+próprio porque é a única que muda o contrato binário — descobrir isso no diff
+custa segundos, e no build de produção custa a janela de deploy.
+
 ### base
 
 Confere cada `FROM` do seu Dockerfile contra o registry e diz quais bases
@@ -1065,6 +1103,25 @@ mesmo que a imagem final seja endurecida.
 **Exit codes:** `2` quando sobra base a corrigir (é o portão de CI, junto com
 `--dry-run`), `1` quando o Dockerfile não existe ou não tem `FROM`, `0` quando
 está tudo em dia ou a correção foi aplicada.
+
+**Histórico da tag.** Cada digest observado é guardado no cache local, com a
+data. "Esta base mudou" e "esta base muda toda semana" pedem decisões
+diferentes, e antes disso as duas produziam a mesma linha:
+
+```console
+  linha 4  PINNED_STALE
+    python:3.12-slim-bookworm@sha256:a3e58f93...
+    fixada num digest que a tag não aponta mais: a base foi republicada e esta
+    imagem continua construindo a partir da versão antiga
+    histórico: mudou de digest 6 vezes desde 2026-01-08T09:14:00+00:00, a última
+    em 2026-08-19T02:31:00+00:00
+```
+
+O histórico **começa na primeira vez que esta ferramenta olhou** — o que
+aconteceu antes disso é desconhecido, não ausente, e a mensagem diz isso em vez
+de esconder. Ele é um extra sobre o diagnóstico: se o cache estiver
+indisponível, o comando continua sem a linha em vez de falhar por causa de um
+enfeite.
 
 Depois de aplicar, **reconstrua e escaneie antes de publicar**: trocar o digest
 da base muda a imagem, e nada além de um scan diz se para melhor.
@@ -1448,6 +1505,78 @@ não é publicada.
 `--hardened`/`--base` escrevem `Dockerfile.hardened` no diretório de contexto.
 Combinado com `--validate-only`, **nada é escrito em disco**: um dry-run não tem
 efeito colateral. Para gerar o arquivo, rode o build sem `--validate-only`.
+
+### provenance
+
+Confere um documento escrito por `build --provenance` e prepara a atestação.
+Arquivar é metade do controle; a outra metade é alguém conferir antes de o
+artefato seguir adiante — e era essa metade que faltava. Um documento que
+ninguém lê descreve com precisão uma imagem que ninguém sabe se deveria ter
+sido publicada.
+
+```bash
+dockerls provenance ./supply-chain.json                  # confere e mostra a cadeia
+dockerls provenance ./supply-chain.json --format json    # para o pipeline consumir
+dockerls provenance ./supply-chain.json --github-output  # dentro do GitHub Actions
+```
+
+```console
+$ dockerls provenance ./supply-chain.json
+
+minha-app:1.0
+  VERIFIED  entrada e saída digeridas, e a entrada não mudou durante o build
+
+  entrada
+    Dockerfile  sha256:9f2c...
+    contexto    sha256:41ae...  (128 arquivo(s))
+    revisão     4b1c9d2  (com alterações não commitadas)
+    base        python:3.12-alpine -> sha256:d09d15e6...
+
+  saída
+    sujeito     ghcr.io/org/minha-app:1.0
+    digest      sha256:7c3b...  (manifesto no registry)
+    scanner     trivy 0.58.0
+
+$ echo $?
+0
+```
+
+**O veredito é recalculado, não lido.** O campo `"status": "VERIFIED"` de um
+arquivo JSON é editável por qualquer pessoa com um editor de texto; a
+comparação entre os digests de antes e depois do build não é. Ler o status
+gravado seria pedir ao documento que se auto-aprovasse.
+
+**Exit codes:** `2` quando a procedência não fecha — `INPUT_CHANGED` (o
+Dockerfile ou o contexto mudaram durante o build), `INCOMPLETE` (parte da
+entrada ou da saída não pôde ser digerida) ou sem digest do artefato (uma
+assinatura aponta para bytes, e "a imagem com esta tag" não são bytes). `1`
+quando o arquivo não existe ou não é JSON válido. `0` só quando a cadeia fecha.
+
+#### Fechando a cadeia no GitHub Actions
+
+`--github-output` escreve `subject-name`, `subject-digest` e
+`provenance-status` em `$GITHUB_OUTPUT`, para que
+`actions/attest-build-provenance` ateste **exatamente a imagem que o scan
+mediu**. Tirar o digest do documento em vez de redigitá-lo no YAML é o que
+impede o caso silencioso: uma assinatura perfeitamente válida apontando para
+bytes que ninguém escaneou.
+
+```yaml
+- name: Conferir a procedência
+  id: provenance
+  run: dockerls provenance provenance.json --github-output
+
+- name: Atestar a imagem publicada
+  uses: actions/attest-build-provenance@v2
+  with:
+    subject-name: ${{ steps.provenance.outputs.subject-name }}
+    subject-digest: ${{ steps.provenance.outputs.subject-digest }}
+    push-to-registry: true
+```
+
+O passo de assinar simplesmente não roda sobre um build cuja entrada mudou no
+meio do caminho: o comando anterior falha o job. O workflow completo está em
+[`examples/github/image-release.yml`](examples/github/image-release.yml).
 
 ### Exit codes
 

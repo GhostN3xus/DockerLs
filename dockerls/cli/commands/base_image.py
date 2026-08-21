@@ -31,11 +31,14 @@ from dockerls.domain.value_objects.base_recipe import (
     REFUSED_PACKAGES,
     BaseRecipe,
     OsFamily,
+    PackageChoice,
     Runtime,
     UnsupportedCombinationError,
     render,
 )
 from dockerls.domain.value_objects.build_labels import BuildIdentity
+from dockerls.domain.value_objects.recipe_diff import RecipeDiff
+from dockerls.domain.value_objects.recipe_diff import compare as compare_recipes
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK
 
 console = Console()
@@ -74,6 +77,19 @@ def base_image(
     tag: str | None = typer.Option(
         None, "--tag", "-t", help="Tag da imagem quando --build é usado (padrão: <titulo>:latest)"
     ),
+    compare: str | None = typer.Option(
+        None,
+        "--compare",
+        help=(
+            "Compara esta receita com a mesma sobre outra família (alpine, debian, "
+            "ubuntu, distroless) e mostra a diferença de superfície. Não escreve nada"
+        ),
+    ),
+    compare_with: str | None = typer.Option(
+        None,
+        "--compare-with",
+        help="Pacotes do lado comparado, separados por vírgula (padrão: os mesmos)",
+    ),
 ) -> None:
     """Gera o Dockerfile de uma imagem base a partir de um menu de escolhas."""
     try:
@@ -95,6 +111,10 @@ def base_image(
         owner=(owner or "").strip(),
         source=(source_url or "").strip(),
     )
+
+    if compare is not None:
+        _compare_recipes(recipe, compare, compare_with)
+        raise typer.Exit(EXIT_OK)
 
     if not no_pin:
         digest = asyncio.run(_resolve_digest(recipe))
@@ -136,6 +156,97 @@ def base_image(
         raise typer.Exit(EXIT_OK)
 
     _build_now(recipe, destination, tag=tag, owner=owner, source_url=source_url)
+
+
+def _compare_recipes(left: BaseRecipe, family_name: str, packages: str | None) -> None:
+    """Mostra a diferença de superfície entre a receita montada e uma alternativa.
+
+    Comparar não escreve arquivo nenhum: é uma pergunta ("alpine ou debian
+    para isto?"), e responder uma pergunta sobrescrevendo um Dockerfile seria
+    um efeito colateral que ninguém pediu.
+    """
+    try:
+        outra = _resolve_family(family_name)
+    except UnsupportedCombinationError as e:
+        console.print(f"[red]Erro:[/red] {safe(str(e))}")
+        raise typer.Exit(EXIT_ERROR) from e
+
+    if packages is not None:
+        try:
+            escolhidos = tuple(_resolve_packages(packages, outra))
+        except UnsupportedCombinationError as e:
+            console.print(f"[red]Erro:[/red] {safe(str(e))}")
+            raise typer.Exit(EXIT_ERROR) from e
+    elif outra.installs_packages:
+        # Sem gerenciador de pacotes não há o que carregar: os pacotes viram
+        # `removed` no diff, que é exatamente o que a troca significa.
+        escolhidos = tuple(p for p in left.packages if _catalog_entry(p).package_for(outra))
+    else:
+        escolhidos = ()
+
+    try:
+        right = BaseRecipe(
+            **{
+                **left.__dict__,
+                "family": outra,
+                "packages": escolhidos,
+                # A intenção da pessoa é carregada para o outro lado: se ela
+                # mandou remover o gerenciador, o lado comparado também remove
+                # -- comparar duas políticas diferentes mediria a política, e
+                # não a família, que é o que ela perguntou.
+                "strip_bundled_manager": _resolve_strip(
+                    left.runtime,
+                    outra,
+                    keep_manager=not left.strip_bundled_manager,
+                    quiet=True,
+                ),
+            }
+        )
+        right.validate()
+        left.validate()
+    except UnsupportedCombinationError as e:
+        console.print(f"[red]Erro:[/red] {safe(str(e))}")
+        raise typer.Exit(EXIT_ERROR) from e
+
+    _render_diff(compare_recipes(left, right))
+
+
+def _catalog_entry(key: str) -> PackageChoice:
+    for choice in PACKAGE_CATALOG:
+        if choice.key == key:
+            return choice
+    return PackageChoice(key=key, purpose="", cost="")
+
+
+def _render_diff(diff: RecipeDiff) -> None:
+    esquerda = _side_label(diff.left)
+    direita = _side_label(diff.right)
+    console.print(f"\n[bold]{safe(esquerda)}[/bold]  ->  [bold]{safe(direita)}[/bold]\n")
+
+    if not diff.has_changes:
+        console.print("[dim]As duas receitas produzem a mesma superfície.[/dim]")
+        return
+
+    for delta in diff.added:
+        console.print(f"  [green]+ {safe(delta.key)}[/green]  [dim]{safe(delta.purpose)}[/dim]")
+        console.print(f"      [dim]custo: {safe(delta.cost)}[/dim]")
+    for delta in diff.removed:
+        console.print(f"  [red]- {safe(delta.key)}[/red]  [dim]{safe(delta.purpose)}[/dim]")
+
+    notas = diff.notes()
+    if notas:
+        console.print()
+        for nota in notas:
+            console.print(f"  [yellow]![/yellow] {safe(nota)}")
+
+    console.print(f"\n[dim]{safe(diff.verdict())}[/dim]")
+
+
+def _side_label(recipe: BaseRecipe) -> str:
+    try:
+        return recipe.base.reference
+    except UnsupportedCombinationError:
+        return f"{recipe.runtime} sobre {recipe.family}"
 
 
 def _build_now(
@@ -192,7 +303,9 @@ def _build_now(
     raise typer.Exit(response.exit_code)
 
 
-def _resolve_strip(runtime: Runtime, family: OsFamily, *, keep_manager: bool) -> bool:
+def _resolve_strip(
+    runtime: Runtime, family: OsFamily, *, keep_manager: bool, quiet: bool = False
+) -> bool:
     """Se o gerenciador embutido sai da imagem.
 
     Isto virou opção por um caso medido: uma `node:22-alpine` recém-construída
@@ -212,6 +325,8 @@ def _resolve_strip(runtime: Runtime, family: OsFamily, *, keep_manager: bool) ->
     if base is None or not base.bundled_manager:
         return False
     if keep_manager:
+        if quiet:
+            return False
         console.print(
             f"\n[yellow]{base.bundled_manager_note} ficam na imagem.[/yellow]\n"
             "[dim]As dependências que eles carregam dentro de si costumam ser a "
@@ -219,10 +334,11 @@ def _resolve_strip(runtime: Runtime, family: OsFamily, *, keep_manager: bool) ->
             "alcança.[/dim]"
         )
         return False
-    console.print(
-        f"\n[dim]{base.bundled_manager_note} serão removidos da imagem final "
-        "(--keep-manager mantém).[/dim]"
-    )
+    if not quiet:
+        console.print(
+            f"\n[dim]{base.bundled_manager_note} serão removidos da imagem final "
+            "(--keep-manager mantém).[/dim]"
+        )
     return True
 
 
