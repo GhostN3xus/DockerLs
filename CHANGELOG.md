@@ -5,6 +5,33 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] -- 2026-08-20
+
+Primeiro lote da lista de melhorias: três itens de baixo esforço, todos
+fechando inconsistências reais.
+
+### Corrigido
+
+- **O relatório do `build` perdia as citações.** O terminal cita o controle
+  publicado atrás de cada regra (CIS 4.1, NIST 4.1.2, OWASP RULE #2) e o
+  relatório serializava só `check`, `status`, `message`, `severity` e `line` —
+  exatamente onde a citação vale mais, que é o arquivo que vai para auditoria.
+  Passa a carregar `rule_id`, `references` e `rationale`.
+- **Core dumps do scanner ficavam ligados.** Um scanner que falha um pull
+  autenticado tem o token na memória; um SIGSEGV com core dump gravaria esse
+  token em disco, num arquivo que ninguém redige. `RLIMIT_CORE` vai a zero
+  antes do `exec`. `RLIMIT_AS` continua deliberadamente de fora, e há teste
+  fixando isso: o Trivy é um binário Go, e o runtime do Go reserva um espaço
+  de endereçamento virtual enorme na largada — limitar mataria o processo na
+  inicialização, virando falha de scan em vez de defesa.
+
+### Adicionado
+
+- **`dockerls base-image --build`.** Gerar e construir em dois comandos deixava
+  um vão onde a receita existe e ninguém a mediu — e receita não medida é
+  intenção, não afirmação sobre segurança. O portão entra em `critical`, e os
+  rótulos da receita seguem para a imagem.
+
 ## [2.2.1] -- 2026-08-20
 
 ### Corrigido — o npm embutido era quase toda a superfície de uma base Node

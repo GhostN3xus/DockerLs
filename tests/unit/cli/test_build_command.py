@@ -780,3 +780,55 @@ class TestBaseImageCommand:
         )
         assert result.exit_code == EXIT_ERROR
         assert "alpine" in result.output
+
+
+class TestBaseImageBuildsInOneStep:
+    def test_the_build_flag_reaches_the_use_case_with_the_gate_on(self, tmp_path):
+        # Gerar e construir em dois comandos deixava um vão onde a receita
+        # existe e ninguém a mediu.
+        with patch("dockerls.application.use_cases.build_image.BuildImageUseCase") as use_case:
+            use_case.return_value.execute.return_value.success = True
+            CliRunner().invoke(
+                app,
+                [
+                    "base-image",
+                    "-o",
+                    str(tmp_path / "Dockerfile"),
+                    "--os",
+                    "alpine",
+                    "--runtime",
+                    "none",
+                    "--with",
+                    "",
+                    "--no-pin",
+                    "--build",
+                    "-t",
+                    "base:1.0",
+                    "--owner",
+                    "Plataforma",
+                ],
+            )
+        request = use_case.return_value.execute.call_args.args[0]
+        assert request.tag == "base:1.0"
+        assert request.fail_on == "critical"
+        assert request.labels["maintainer"] == "Plataforma"
+
+    def test_without_the_flag_nothing_is_built(self, tmp_path):
+        with patch("dockerls.application.use_cases.build_image.BuildImageUseCase") as use_case:
+            result = CliRunner().invoke(
+                app,
+                [
+                    "base-image",
+                    "-o",
+                    str(tmp_path / "Dockerfile"),
+                    "--os",
+                    "alpine",
+                    "--runtime",
+                    "none",
+                    "--with",
+                    "",
+                    "--no-pin",
+                ],
+            )
+        assert result.exit_code == EXIT_OK
+        use_case.assert_not_called()

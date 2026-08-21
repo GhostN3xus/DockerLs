@@ -958,3 +958,31 @@ class TestPushRefusesABrokenChain:
         use_case._push_image.assert_called_once()
         assert response.provenance is not None
         assert response.provenance.is_verified is True
+
+
+class TestReportCarriesTheCitations:
+    """O relatório é o arquivo que vai para auditoria.
+
+    O terminal citava o controle publicado (CIS 4.1, NIST 4.1.2) e o relatório
+    perdia a citação -- exatamente onde ela vale mais, diante de quem precisa
+    mapear achado para programa de conformidade.
+    """
+
+    def _validation(self, tmp_path):
+        (tmp_path / "Dockerfile").write_text("FROM python:3.12-alpine\n")
+        return DockerfileValidator().validate(tmp_path)
+
+    def test_checks_carry_rule_id_references_and_rationale(self, tmp_path):
+        document = BuildImageUseCase._validation_dict(self._validation(tmp_path))
+        checks = document["checks"]
+        assert checks
+        for check in checks:
+            assert "rule_id" in check
+            assert "references" in check
+            assert "rationale" in check
+
+    def test_a_documented_rule_names_its_control(self, tmp_path):
+        document = BuildImageUseCase._validation_dict(self._validation(tmp_path))
+        non_root = next(c for c in document["checks"] if c["rule_id"] == "DF002")
+        assert any("CIS Docker Benchmark 4.1" in ref for ref in non_root["references"])
+        assert non_root["rationale"]

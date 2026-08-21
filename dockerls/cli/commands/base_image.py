@@ -35,6 +35,7 @@ from dockerls.domain.value_objects.base_recipe import (
     UnsupportedCombinationError,
     render,
 )
+from dockerls.domain.value_objects.build_labels import BuildIdentity
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK
 
 console = Console()
@@ -65,6 +66,14 @@ def base_image(
         False, "--no-pin", help="Não resolver o digest da base (deixa a tag móvel)"
     ),
     force: bool = typer.Option(False, "--force", help="Sobrescreve o arquivo de saída"),
+    build: bool = typer.Option(
+        False,
+        "--build",
+        help="Constrói e escaneia a imagem logo após gerar, com o portão em critical",
+    ),
+    tag: str | None = typer.Option(
+        None, "--tag", "-t", help="Tag da imagem quando --build é usado (padrão: <titulo>:latest)"
+    ),
 ) -> None:
     """Gera o Dockerfile de uma imagem base a partir de um menu de escolhas."""
     try:
@@ -115,14 +124,72 @@ def base_image(
 
     destination.write_text(content, encoding="utf-8")
     console.print(f"\n[green]Dockerfile escrito em {safe(str(destination))}.[/green]")
-    console.print(
-        "\n[bold]Próximo passo[/bold]\n"
-        f"  [dim]dockerls build -t {safe(recipe.title)}:1.0 --fail-on critical "
-        f"{safe(str(destination.parent))}[/dim]\n"
-        "  [dim]Construir e escanear é o que transforma esta receita numa "
-        "afirmação sobre segurança; até lá ela é só uma intenção.[/dim]"
+
+    if not build:
+        console.print(
+            "\n[bold]Próximo passo[/bold]\n"
+            f"  [dim]dockerls build -t {safe(recipe.title)}:1.0 --fail-on critical "
+            f"{safe(str(destination.parent))}[/dim]\n"
+            "  [dim]Construir e escanear é o que transforma esta receita numa "
+            "afirmação sobre segurança; até lá ela é só uma intenção.[/dim]"
+        )
+        raise typer.Exit(EXIT_OK)
+
+    _build_now(recipe, destination, tag=tag, owner=owner, source_url=source_url)
+
+
+def _build_now(
+    recipe: BaseRecipe,
+    destination: Path,
+    *,
+    tag: str | None,
+    owner: str | None,
+    source_url: str | None,
+) -> None:
+    """Constrói a receita recém-gerada, com o portão em `critical`.
+
+    Gerar e construir em dois comandos deixava um vão onde a receita existe e
+    ninguém a mediu -- e uma receita não medida é uma intenção, não uma
+    afirmação sobre segurança. O portão entra em `critical` porque este
+    caminho existe para quem vai usar a imagem, não para quem está brincando.
+    """
+    from dockerls.application.use_cases.build_image import (
+        BuildImageRequest,
+        BuildImageUseCase,
     )
-    raise typer.Exit(EXIT_OK)
+    from dockerls.infrastructure.dockerfile_validator import (
+        DockerfileValidator,
+        HardeningTemplates,
+    )
+
+    image_tag = (tag or f"{recipe.title}:latest").strip()
+    console.print(f"\n[bold]Construindo {safe(image_tag)}[/bold]  [dim]portão: critical[/dim]\n")
+
+    identity = BuildIdentity(
+        owner=(owner or "").strip(),
+        source=(source_url or "").strip(),
+        title=recipe.title,
+        description=recipe.description,
+    )
+    use_case = BuildImageUseCase(DockerfileValidator(), HardeningTemplates())
+    response = use_case.execute(
+        BuildImageRequest(
+            context_path=str(destination.parent),
+            dockerfile_path=destination.name,
+            tag=image_tag,
+            fail_on="critical",
+            # Os rótulos da receita seguem para a imagem: gerar com dono
+            # declarado e construir sem ele perderia metade do ponto.
+            labels=identity.to_labels(),
+        )
+    )
+
+    if response.success:
+        console.print(f"[green]Imagem {safe(image_tag)} construída e escaneada.[/green]")
+        raise typer.Exit(EXIT_OK)
+
+    console.print(f"[red]{safe(response.error or 'build falhou')}[/red]")
+    raise typer.Exit(response.exit_code)
 
 
 def _resolve_strip(runtime: Runtime, family: OsFamily, *, keep_manager: bool) -> bool:

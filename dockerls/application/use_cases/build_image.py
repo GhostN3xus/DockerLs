@@ -551,13 +551,21 @@ class BuildImageUseCase:
             "passed": validation.passed,
             "warnings": validation.warnings,
             "errors": validation.errors,
+            # `rule_id`, `references` e `rationale` entram aqui porque este é o
+            # arquivo que vai para auditoria. O terminal citava o controle
+            # publicado (CIS 4.1, NIST 4.1.2) e o relatório perdia a citação --
+            # exatamente onde ela vale mais, que é diante de quem precisa
+            # mapear achado para programa de conformidade.
             "checks": [
                 {
                     "check": check.check,
+                    "rule_id": check.rule_id,
                     "status": check.status.value,
                     "message": check.message,
                     "severity": check.severity.value,
                     "line": check.line,
+                    "references": check.references,
+                    "rationale": check.rationale,
                 }
                 for check in validation.checks
             ],
