@@ -531,3 +531,45 @@ custo de não mentir: contar pacotes não mede vulnerabilidade — uma base com
 menos pacotes e um deles desatualizado é pior que uma com mais pacotes e todos
 corrigidos, e um número que ignora isso seria apresentado como medida sem ser
 uma.
+
+## D-024 — Política malformada é erro; regra de ignore malformada é silêncio
+
+**Contexto.** `.dockerls-ignore.yaml` degrada para "nenhuma regra" quando não
+carrega. O `.dockerls-policy.yaml` poderia seguir a mesma convenção.
+
+**Decisão.** Não segue. Chave desconhecida, tipo errado, severidade inexistente
+e arquivo vazio **encerram o comando**.
+
+**Consequência.** A direção da falha é o que decide. Uma regra de ignore que
+não carrega deixa de esconder uma CVE: o resultado é mais alarme, e alarme a
+mais é seguro. Uma regra de política que não carrega deixa de exigir alguma
+coisa, e o build passa parecendo ter sido conferido. `require_non_root` no
+lugar de `require_nonroot` seria um portão aberto com cara de fechado, e
+ninguém descobre isso olhando uma saída verde.
+
+**Alternativa recusada.** Avisar e seguir. O aviso vira ruído no log de CI em
+duas semanas, e o portão continua desligado.
+
+## D-025 — Entre a política e a linha de comando, vence a mais estrita
+
+**Contexto.** `fail_on` pode vir do `.dockerls-policy.yaml` e do `--fail-on`.
+Alguma das duas precisa ganhar.
+
+**Decisão.** Vence a mais estrita, venha de onde vier.
+
+**Consequência.** Um arquivo no repositório não desliga um portão que o
+pipeline pediu — senão bastaria commitar um YAML para publicar o que não
+passaria. E um pipeline não afrouxa a política da organização passando uma
+flag. Nenhum dos dois lados pode relaxar o outro; ambos podem apertar.
+
+## D-026 — A política só contém regras mensuráveis
+
+**Contexto.** Uma política de segurança "completa" naturalmente incluiria
+coisas como "não use pacotes inseguros" ou "mantenha a imagem enxuta".
+
+**Decisão.** Só entra regra decidível a partir do que este build mediu.
+
+**Consequência.** A lista é curta e cada regra aponta para uma medição
+específica. Uma regra que não pode ser avaliada é uma regra que reprova por
+engano ou aprova por omissão, e as duas corroem a confiança no portão até
+alguém desligá-lo inteiro.

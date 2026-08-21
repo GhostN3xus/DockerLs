@@ -986,3 +986,206 @@ class TestReportCarriesTheCitations:
         non_root = next(c for c in document["checks"] if c["rule_id"] == "DF002")
         assert any("CIS Docker Benchmark 4.1" in ref for ref in non_root["references"])
         assert non_root["rationale"]
+
+
+class TestPolicyGate:
+    """A política de `.dockerls-policy.yaml`, conferida contra o que o build mediu.
+
+    Ela existe porque `--fail-on` mora na linha de comando, e uma regra que
+    mora na linha de comando é uma regra que cada pipeline reescreve à mão.
+    """
+
+    @pytest.fixture
+    def context(self, tmp_path):
+        (tmp_path / "Dockerfile").write_text("FROM node:22-alpine\nUSER node\n")
+        return tmp_path
+
+    @pytest.fixture
+    def use_case(self, tmp_path):
+        validation = _validation()
+        validator = MagicMock(spec=DockerfileValidatorInterface)
+        validator.validate.return_value = validation
+        validator.analyze.return_value = _analysis(validation)
+        return BuildImageUseCase(validator, MagicMock())
+
+    def test_base_sem_digest_reprova_o_build(self, use_case, context):
+        from dockerls.domain.value_objects.build_policy import BuildPolicy
+
+        with patch.object(use_case, "_build_image") as mock_build:
+            mock_build.return_value = BuildResult(
+                success=True, image_tag="test:latest", image_sha256="sha256:abc"
+            )
+            response = use_case.execute(
+                BuildImageRequest(
+                    context_path=str(context),
+                    tag="test:latest",
+                    scan=False,
+                    policy=BuildPolicy(require_pinned_bases=True),
+                )
+            )
+
+        assert response.exit_code == EXIT_POLICY
+        assert response.policy_violations
+        assert "node:22-alpine" in response.policy_violations[0].message
+
+    def test_a_politica_nao_afrouxa_o_que_a_linha_de_comando_apertou(self, use_case, context):
+        """Senão bastaria commitar um YAML para publicar o que não passaria."""
+        from dockerls.domain.value_objects.build_policy import BuildPolicy
+
+        with (
+            patch.object(use_case, "_scan_image") as mock_scan,
+            patch.object(use_case, "_build_image") as mock_build,
+        ):
+            mock_scan.return_value = ScanResult(critical=3, high=0, medium=0, low=0)
+            mock_build.return_value = BuildResult(
+                success=True, image_tag="test:latest", image_sha256="sha256:abc"
+            )
+            response = use_case.execute(
+                BuildImageRequest(
+                    context_path=str(context),
+                    tag="test:latest",
+                    scan=True,
+                    fail_on="critical",
+                    policy=BuildPolicy(fail_on="low"),
+                )
+            )
+
+        assert response.exit_code == EXIT_POLICY
+        assert "Vulnerabilities exceed threshold" in response.error
+
+    def test_a_politica_aperta_o_que_a_linha_de_comando_nao_pediu(self, use_case, context):
+        from dockerls.domain.value_objects.build_policy import BuildPolicy
+
+        with (
+            patch.object(use_case, "_scan_image") as mock_scan,
+            patch.object(use_case, "_build_image") as mock_build,
+        ):
+            mock_scan.return_value = ScanResult(critical=0, high=1, medium=0, low=0)
+            mock_build.return_value = BuildResult(
+                success=True, image_tag="test:latest", image_sha256="sha256:abc"
+            )
+            response = use_case.execute(
+                BuildImageRequest(
+                    context_path=str(context),
+                    tag="test:latest",
+                    scan=True,
+                    policy=BuildPolicy(fail_on="high"),
+                )
+            )
+
+        assert response.exit_code == EXIT_POLICY
+
+    def test_imagem_que_viola_a_politica_nao_e_publicada(self, use_case, context):
+        """O portão vem antes do push pelo mesmo motivo do portão de scan."""
+        from dockerls.domain.value_objects.build_policy import BuildPolicy
+
+        with (
+            patch.object(use_case, "_build_image") as mock_build,
+            patch.object(use_case, "_push_image") as mock_push,
+        ):
+            mock_build.return_value = BuildResult(
+                success=True, image_tag="test:latest", image_sha256="sha256:abc"
+            )
+            response = use_case.execute(
+                BuildImageRequest(
+                    context_path=str(context),
+                    tag="test:latest",
+                    scan=False,
+                    push=True,
+                    policy=BuildPolicy(required_labels=("owner",)),
+                )
+            )
+
+        assert response.exit_code == EXIT_POLICY
+        mock_push.assert_not_called()
+
+    def test_politica_cumprida_deixa_o_build_passar(self, use_case, context):
+        from dockerls.domain.value_objects.build_policy import BuildPolicy
+
+        with patch.object(use_case, "_build_image") as mock_build:
+            mock_build.return_value = BuildResult(
+                success=True, image_tag="test:latest", image_sha256="sha256:abc"
+            )
+            response = use_case.execute(
+                BuildImageRequest(
+                    context_path=str(context),
+                    tag="test:latest",
+                    scan=False,
+                    labels={"owner": "Plataforma"},
+                    policy=BuildPolicy(required_labels=("owner",)),
+                )
+            )
+
+        assert response.exit_code == EXIT_OK
+        assert not response.policy_violations
+
+    def test_sem_politica_nada_muda(self, use_case, context):
+        with patch.object(use_case, "_build_image") as mock_build:
+            mock_build.return_value = BuildResult(
+                success=True, image_tag="test:latest", image_sha256="sha256:abc"
+            )
+            response = use_case.execute(
+                BuildImageRequest(context_path=str(context), tag="test:latest", scan=False)
+            )
+
+        assert response.exit_code == EXIT_OK
+        assert not response.policy_violations
+
+    def _use_case_with(self, checks):
+        validation = _validation(checks=checks)
+        validator = MagicMock(spec=DockerfileValidatorInterface)
+        validator.validate.return_value = validation
+        validator.analyze.return_value = _analysis(validation)
+        return BuildImageUseCase(validator, MagicMock())
+
+    def _df002(self, status: ValidationStatus) -> ValidationCheck:
+        return ValidationCheck(
+            check="non_root_user",
+            status=status,
+            message="",
+            severity=SeverityLevel.HIGH,
+            rule_id="DF002",
+        )
+
+    def _run(self, use_case, context, policy):
+        with patch.object(use_case, "_build_image") as mock_build:
+            mock_build.return_value = BuildResult(
+                success=True, image_tag="test:latest", image_sha256="sha256:abc"
+            )
+            return use_case.execute(
+                BuildImageRequest(
+                    context_path=str(context), tag="test:latest", scan=False, policy=policy
+                )
+            )
+
+    def test_require_nonroot_le_o_veredito_do_df002(self, context):
+        """A regra reaproveita o DF002, que já sabe que `USER 0` é root tanto
+        quanto `USER root`."""
+        from dockerls.domain.value_objects.build_policy import BuildPolicy
+
+        use_case = self._use_case_with([self._df002(ValidationStatus.PASS)])
+
+        response = self._run(use_case, context, BuildPolicy(require_nonroot=True))
+
+        assert response.exit_code == EXIT_OK
+
+    def test_require_nonroot_reprova_quando_o_df002_reprovou(self, context):
+        from dockerls.domain.value_objects.build_policy import BuildPolicy
+
+        use_case = self._use_case_with([self._df002(ValidationStatus.FAIL)])
+
+        response = self._run(use_case, context, BuildPolicy(require_nonroot=True))
+
+        assert response.exit_code == EXIT_POLICY
+        assert "roda como root" in response.policy_violations[0].message
+
+    def test_sem_a_checagem_a_regra_reprova_por_ausencia_de_medida(self, context):
+        """Não determinar não é o mesmo que estar em ordem."""
+        from dockerls.domain.value_objects.build_policy import BuildPolicy
+
+        use_case = self._use_case_with([])
+
+        response = self._run(use_case, context, BuildPolicy(require_nonroot=True))
+
+        assert response.exit_code == EXIT_POLICY
+        assert "não foi possível determinar" in response.policy_violations[0].message

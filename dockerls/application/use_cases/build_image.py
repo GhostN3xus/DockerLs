@@ -22,11 +22,20 @@ from dockerls.domain.entities.dockerfile_analysis import (
     HardeningRule,
     ValidationStatus,
 )
+from dockerls.domain.value_objects.build_policy import (
+    BaseFact,
+    BuildPolicy,
+    PolicyFacts,
+    PolicyViolation,
+    evaluate,
+)
+from dockerls.domain.value_objects.image_reference import registry_host_of
 from dockerls.domain.value_objects.provenance import (
     ArtifactDigests,
     BuildProvenance,
     SourceDigests,
 )
+from dockerls.domain.value_objects.tristate import Tristate
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY
 from dockerls.infrastructure.hashing import ContextTooLargeError, hash_context, hash_file
 from dockerls.utils.executables import ExecutableNotFoundError, resolve_executable
@@ -141,6 +150,9 @@ class BuildImageRequest:
     #: já nomeia um registry -- e era o comportamento anterior, que falhava com
     #: "denied" para toda tag sem host.
     push_reference: str = ""
+    #: A política declarada em `.dockerls-policy.yaml`, já carregada pela
+    #: camada CLI. O caso de uso confere; ler o arquivo é trabalho da borda.
+    policy: BuildPolicy | None = None
 
 
 @dataclass
@@ -162,6 +174,8 @@ class BuildImageResponse:
     #: A cadeia entre o que entrou no build e o que saiu dele. Presente em
     #: todo build que chegou a produzir imagem.
     provenance: BuildProvenance | None = None
+    #: Regras de `.dockerls-policy.yaml` que este build não cumpriu.
+    policy_violations: list[PolicyViolation] = field(default_factory=list)
     error: str | None = None
     exit_code: int = EXIT_OK
 
@@ -324,8 +338,15 @@ class BuildImageUseCase:
                             )
                             break
 
-            # 7. Verificar thresholds de falha
-            if request.fail_on:
+            # 7. Verificar thresholds de falha. Entre o limiar da política e o
+            #    da linha de comando vence o mais estrito: um arquivo no
+            #    repositório não pode desligar um portão que o pipeline pediu.
+            threshold = (
+                request.policy.effective_fail_on(request.fail_on or "")
+                if request.policy
+                else (request.fail_on or "")
+            )
+            if threshold:
                 # Um portão que não pôde ser avaliado não é um portão
                 # aprovado. Sem scan, `--fail-on` deixava passar em silêncio
                 # qualquer imagem numa máquina sem scanner instalado.
@@ -337,19 +358,48 @@ class BuildImageUseCase:
                         validation=validation,
                         analysis=validation_result.analysis,
                         error=(
-                            f"--fail-on {request.fail_on} requires a vulnerability scan, "
+                            f"--fail-on {threshold} requires a vulnerability scan, "
                             "and no scanner (trivy, grype) could be run"
                         ),
                         exit_code=EXIT_ERROR,
                     )
-                if self._should_fail(scan_result, request.fail_on):
+                if self._should_fail(scan_result, threshold):
                     return BuildImageResponse(
                         success=False,
                         image_tag=request.tag,
                         image_sha256=build_result.image_sha256,
                         validation=validation,
                         analysis=validation_result.analysis,
-                        error=self._gate_failure_summary(scan_result, request.fail_on),
+                        error=self._gate_failure_summary(scan_result, threshold),
+                        exit_code=EXIT_POLICY,
+                    )
+
+            # 7b. Conferir a política declarada. Antes do push, pelo mesmo
+            #     motivo do portão de scan: uma imagem que viola a política da
+            #     organização não é publicada por ter sido construída.
+            if request.policy is not None:
+                violations = evaluate(
+                    request.policy,
+                    self._policy_facts(
+                        request=request,
+                        analysis=validation_result.analysis,
+                        scan_result=scan_result,
+                        source_before=source_before,
+                        source_after=source_after,
+                        image_id=build_result.image_sha256 or "",
+                    ),
+                )
+                if violations:
+                    return BuildImageResponse(
+                        success=False,
+                        image_tag=request.tag,
+                        image_sha256=build_result.image_sha256,
+                        validation=validation,
+                        analysis=validation_result.analysis,
+                        policy_violations=violations,
+                        error=(
+                            f"{len(violations)} regra(s) de .dockerls-policy.yaml não cumprida(s)"
+                        ),
                         exit_code=EXIT_POLICY,
                     )
 
@@ -1108,6 +1158,76 @@ class BuildImageUseCase:
             )
         cutoff = self.FAIL_ON_THRESHOLDS.index(normalized)
         return any(counts[level] > 0 for level in self.FAIL_ON_THRESHOLDS[: cutoff + 1])
+
+    def _policy_facts(
+        self,
+        *,
+        request: BuildImageRequest,
+        analysis: DockerfileAnalysis | None,
+        scan_result: ScanResult | None,
+        source_before: SourceDigests,
+        source_after: SourceDigests,
+        image_id: str,
+    ) -> PolicyFacts:
+        """Os fatos medidos neste build, no formato que a política avalia.
+
+        Nada aqui infere: cada campo ou vem de uma medição que aconteceu ou
+        fica no valor que significa "não medido". É o que faz a política
+        reprovar por ausência de prova em vez de aprovar por falta de sinal.
+        """
+        counts: dict[str, int] = {}
+        if scan_result is not None:
+            counts = {
+                "critical": scan_result.critical,
+                "high": scan_result.high,
+                "medium": scan_result.medium,
+                "low": scan_result.low,
+            }
+
+        bases = tuple(
+            BaseFact(
+                reference=reference,
+                registry=registry_host_of(reference),
+                pinned=bool(digest) or "@sha256:" in reference,
+            )
+            for reference, digest in source_before.base_images.items()
+        )
+
+        # A procedência é recalculada aqui e não lida do documento: o registro
+        # final só existe depois do push, e a política precisa decidir antes.
+        parcial = BuildProvenance(
+            tag=request.tag,
+            source=source_before,
+            source_after=source_after,
+            artifact=ArtifactDigests(image_id=image_id),
+        )
+
+        return PolicyFacts(
+            scan_ran=scan_result is not None,
+            severity_counts=counts,
+            bases=bases,
+            labels=dict(request.labels or {}),
+            nonroot=self._nonroot_state(analysis),
+            provenance_status=str(parcial.status),
+        )
+
+    @staticmethod
+    def _nonroot_state(analysis: DockerfileAnalysis | None) -> Tristate:
+        """Se a imagem roda sem privilégio, segundo o que a validação mediu.
+
+        A ausência da checagem é `UNKNOWN`, e não `FALSE`: não ter medido não
+        é ter medido e reprovado, e a política distingue os dois na mensagem.
+        O veredito vem do DF002, que já sabe que `USER 0` e `USER 0:0` são root
+        tanto quanto `USER root` -- reimplementar a leitura aqui seria manter
+        duas definições de "sem privilégio" que divergiriam na primeira
+        correção.
+        """
+        if analysis is None:
+            return Tristate.UNKNOWN
+        for check in analysis.validation.checks:
+            if check.rule_id == "DF002":
+                return Tristate.of(check.status is ValidationStatus.PASS)
+        return Tristate.UNKNOWN
 
     def _digest_source(self, context_path: str, dockerfile_path: str) -> SourceDigests:
         """Digere a entrada do build: Dockerfile, contexto, bases e revisão.

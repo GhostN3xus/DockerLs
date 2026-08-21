@@ -5,6 +5,42 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] -- 2026-08-21
+
+### Adicionado -- política como código
+
+- **`.dockerls-policy.yaml`.** `--fail-on critical` é um portão que mora na
+  linha de comando, e uma regra que mora na linha de comando é uma regra que
+  cada pipeline reescreve à mão: bastava um `--fail-on high` esquecido num
+  repositório para a política da organização deixar de valer ali, sem que nada
+  acusasse. Agora ela é dado versionado junto do código, conferido em todo
+  `dockerls build` do contexto. Oito regras, todas mensuráveis a partir do que
+  o build mediu: `fail_on`, `max_vulnerabilities`, `require_scan`,
+  `require_pinned_bases`, `require_nonroot`, `required_labels`,
+  `allowed_base_registries` e `require_provenance`.
+- **`dockerls policy`** mostra e valida o arquivo sem precisar de um build.
+  Descobrir uma chave errada no meio de um build de dez minutos é caro;
+  descobrir aqui custa um segundo.
+- **`--policy` e `--no-policy` no `build`.** O segundo registra na saída que a
+  política foi ignorada -- desligar um portão em silêncio seria o mesmo
+  problema que ele existe para resolver.
+
+### Decidido
+
+- **Arquivo de política malformado é erro, não ausência de política.** É a
+  única diferença de comportamento em relação ao `.dockerls-ignore.yaml`, e ela
+  vem da direção da falha: uma regra de ignore que não carrega deixa de esconder
+  uma CVE (mais alarme, e alarme a mais é seguro); uma regra de política que não
+  carrega deixa de exigir alguma coisa, e o build passa parecendo ter sido
+  conferido. `require_non_root` no lugar de `require_nonroot` viraria um portão
+  aberto com cara de fechado.
+- **A política nunca afrouxa o que a linha de comando apertou.** Entre os dois
+  `fail_on` vence o mais estrito: senão bastaria commitar um YAML para publicar
+  o que não passaria.
+- **Não medir nunca aprova.** Teto de severidade sem scan é violação, não
+  silêncio; `require_nonroot` sem a checagem é violação, e a mensagem distingue
+  "roda como root" de "não foi possível determinar".
+
 ## [2.4.0] -- 2026-08-21
 
 Segundo lote da lista de melhorias: fecha a cadeia entre o documento de

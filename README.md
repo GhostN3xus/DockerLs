@@ -117,6 +117,7 @@ recebe nível e não entra na recomendação.
 | [`base`](#base) | Confere as bases do Dockerfile contra o registry e atualiza os digests | `0` `1` `2` |
 | [`base-image`](#base-image) | Gera o Dockerfile de uma imagem base a partir de um menu de pacotes | `0` / `1` |
 | [`build`](#build) | Valida, constrói, escaneia e (opcionalmente) publica | `0` `1` `2` |
+| [`policy`](#policy) | Mostra e valida a política declarada em `.dockerls-policy.yaml` | `0` / `1` |
 | [`provenance`](#provenance) | Confere um documento de procedência e prepara a atestação | `0` `1` `2` |
 | [`doctor`](#doctor) | Checa as dependências locais (scanners) | `0` / `1` |
 | [`health`](#health) | Checa a conectividade com os serviços externos | `0` / `1` |
@@ -1505,6 +1506,92 @@ não é publicada.
 `--hardened`/`--base` escrevem `Dockerfile.hardened` no diretório de contexto.
 Combinado com `--validate-only`, **nada é escrito em disco**: um dry-run não tem
 efeito colateral. Para gerar o arquivo, rode o build sem `--validate-only`.
+
+### policy
+
+Mostra e valida a política declarada em `.dockerls-policy.yaml` — a política da
+organização escrita **uma vez, versionada junto do código**, e conferida em
+todo `dockerls build` naquele contexto.
+
+`--fail-on critical` é um portão, mas é um portão que mora na linha de comando,
+e uma regra que mora na linha de comando é uma regra que cada pipeline
+reescreve à mão. Bastava um `--fail-on high` esquecido num repositório para que
+a política deixasse de valer ali, sem que nada acusasse.
+
+```yaml
+# .dockerls-policy.yaml
+fail_on: high
+require_scan: true
+require_pinned_bases: true
+require_nonroot: true
+require_provenance: true
+required_labels:
+  - org.opencontainers.image.source
+  - org.opencontainers.image.vendor
+allowed_base_registries:
+  - docker.io
+  - cgr.dev
+max_vulnerabilities:
+  critical: 0
+  high: 5
+```
+
+| Regra | O que exige | Como é medida |
+|---|---|---|
+| `fail_on` | severidade a partir da qual o build reprova | contagem do scan |
+| `max_vulnerabilities` | teto por severidade | contagem do scan |
+| `require_scan` | que um scanner tenha rodado | presença do resultado |
+| `require_pinned_bases` | todo `FROM` fixado por digest | os `FROM` lidos do Dockerfile, estágios intermediários incluídos |
+| `require_nonroot` | execução sem privilégio | veredito do DF002 |
+| `required_labels` | rótulos que a imagem carrega | os `LABEL` aplicados no build |
+| `allowed_base_registries` | de onde as bases podem vir | host de cada `FROM` (sem host = `docker.io`) |
+| `require_provenance` | procedência `VERIFIED` | comparação entre entrada e saída do build |
+
+```bash
+dockerls policy                  # mostra as regras do contexto atual
+dockerls policy --format json    # para o pipeline consumir
+dockerls build -t app:1.0 .      # confere automaticamente, se o arquivo existir
+dockerls build --policy ../org-policy.yaml -t app:1.0 .
+dockerls build --no-policy -t app:1.0 .   # ignora, e diz isso na saída
+```
+
+**Só entra o que é mensurável.** Não há regra de "não use pacotes inseguros" ou
+"mantenha a imagem pequena": não há como decidir isso a partir de um build, e
+uma regra que não pode ser avaliada é uma regra que reprova por engano ou
+aprova por omissão.
+
+**Não medir nunca aprova.** `max_vulnerabilities` sem scan é violação, não
+silêncio — "contagem ausente" não é "contagem dentro do teto". `require_nonroot`
+com a checagem ausente é violação, e a mensagem distingue "roda como root" de
+"não foi possível determinar".
+
+**A política nunca afrouxa o que a linha de comando apertou.** Quando as duas
+declaram `fail_on`, vale a mais estrita: senão bastaria commitar um YAML para
+publicar o que não passaria.
+
+**Um arquivo malformado é erro, não ausência de política.** É a única diferença
+importante de comportamento em relação ao `.dockerls-ignore.yaml`, e ela vem da
+direção da falha: uma regra de ignore que não carrega deixa de esconder uma CVE
+(mais alarme, e alarme a mais é seguro); uma regra de política que não carrega
+deixa de exigir alguma coisa, e o build passa parecendo ter sido conferido.
+`require_non_root` no lugar de `require_nonroot` viraria um portão aberto com
+cara de fechado — então chave desconhecida, tipo errado e severidade
+inexistente **falham o comando**:
+
+```console
+$ dockerls policy
+Erro: .dockerls-policy.yaml: regra(s) desconhecida(s): require_non_root. As
+aceitas são: allowed_base_registries, fail_on, max_vulnerabilities,
+require_nonroot, require_pinned_bases, require_provenance, require_scan,
+required_labels. Uma chave digitada errado seria um portão aberto com cara de
+fechado.
+$ echo $?
+1
+```
+
+**Exit codes:** `1` quando o arquivo existe e não pôde ser entendido, `0`
+quando carrega ou quando não há arquivo nenhum. No `build`, uma regra violada é
+`2` (violação de política), e a imagem **não é publicada**.
 
 ### provenance
 

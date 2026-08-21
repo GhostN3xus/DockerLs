@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from html import escape as html_escape
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import typer
 from rich.console import Console
@@ -25,7 +25,15 @@ from dockerls.domain.value_objects.build_labels import BuildIdentity, MissingBui
 from dockerls.domain.value_objects.provenance import BuildProvenance, ProvenanceStatus
 from dockerls.domain.value_objects.registry_target import InvalidRegistryTargetError
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK
+from dockerls.infrastructure.config.policy_file import (
+    PolicyFileError,
+    find_policy_file,
+    load_policy,
+)
 from dockerls.infrastructure.dockerfile_validator import DockerfileValidator, HardeningTemplates
+
+if TYPE_CHECKING:
+    from dockerls.domain.value_objects.build_policy import BuildPolicy, PolicyViolation
 
 console = Console()
 
@@ -104,6 +112,19 @@ def build(
         "--provenance",
         help="Arquiva o registro de supply chain (hashes de entrada e saída) em JSON",
     ),
+    policy: str | None = typer.Option(
+        None,
+        "--policy",
+        help=(
+            "Arquivo de política a conferir (padrão: .dockerls-policy.yaml no "
+            "contexto, quando existir)"
+        ),
+    ),
+    no_policy: bool = typer.Option(
+        False,
+        "--no-policy",
+        help="Ignora o .dockerls-policy.yaml do contexto. Fica registrado na saída",
+    ),
     non_interactive: bool = typer.Option(
         False,
         "--non-interactive",
@@ -148,6 +169,8 @@ def build(
                 f"[dim]Disponíveis: {', '.join(known)}[/dim]"
             )
             raise typer.Exit(EXIT_ERROR)
+
+    declared_policy = _load_policy(path, policy, no_policy=no_policy)
 
     # Parsear JSON args
     build_args_dict = _parse_json_option(build_args, "--build-args")
@@ -226,6 +249,7 @@ def build(
         auto_remediate=auto_remediate or zero_vulns,
         max_remediation_rounds=max_iterations,
         target_zero_vulns=zero_vulns,
+        policy=declared_policy,
     )
 
     # Executar
@@ -238,6 +262,52 @@ def build(
         _print_table_output(response, report)
 
     raise typer.Exit(response.exit_code)
+
+
+def _load_policy(context: str, explicit: str | None, *, no_policy: bool) -> BuildPolicy | None:
+    """A política a conferir neste build, ou `None` quando não há nenhuma.
+
+    Um arquivo de política ilegível **encerra o comando**, em vez de virar
+    "sem política". A direção da falha é o que decide: uma regra que não
+    carrega deixa de exigir alguma coisa, e o build passaria parecendo ter
+    sido conferido. Uma chave digitada errado seria um portão aberto com cara
+    de fechado, e ninguém descobre isso olhando a saída verde.
+    """
+    if no_policy:
+        console.print(
+            "[yellow]--no-policy: o .dockerls-policy.yaml do contexto não será "
+            "conferido neste build.[/yellow]"
+        )
+        return None
+
+    target = Path(explicit) if explicit else find_policy_file(Path(context))
+    if target is None:
+        return None
+    if explicit and not target.is_file():
+        console.print(f"[red]Error:[/red] arquivo de política não encontrado: {safe(explicit)}")
+        raise typer.Exit(EXIT_ERROR)
+
+    try:
+        declared = load_policy(target)
+    except PolicyFileError as e:
+        console.print(f"[red]Error:[/red] {safe(str(e))}")
+        raise typer.Exit(EXIT_ERROR) from e
+
+    console.print(f"[dim]Política declarada em {safe(str(target))} será conferida.[/dim]")
+    return declared
+
+
+def _print_policy_violations(violations: list[PolicyViolation]) -> None:
+    if not violations:
+        return
+    console.print("\n[bold red]Política não cumprida[/bold red]")
+    for violation in violations:
+        console.print(f"  [red]x[/red] [bold]{violation.rule}[/bold]  {safe(violation.message)}")
+    console.print(
+        "\n[dim]Estas regras vêm de .dockerls-policy.yaml, versionado junto do "
+        "código. Mudar o arquivo é uma alteração revisável; passar uma flag "
+        "diferente na linha de comando não é.[/dim]"
+    )
 
 
 def _parse_json_option(raw: str | None, flag: str) -> dict[str, str] | None:
@@ -574,6 +644,7 @@ def _print_build_output(response: BuildImageResponse, report_file: str | None) -
                 expand=False,
             )
         )
+        _print_policy_violations(response.policy_violations)
         _write_report_file(response.report, report_file)
         return
 
@@ -714,6 +785,8 @@ def _print_json_output(response: BuildImageResponse, output_file: str | None = N
     # supply chain lê para decidir, e ele não lê tabela de terminal.
     if response.provenance is not None:
         output_data["provenance"] = response.provenance.to_dict()
+    if response.policy_violations:
+        output_data["policy_violations"] = [v.to_dict() for v in response.policy_violations]
     if response.error:
         output_data["error"] = response.error
 
