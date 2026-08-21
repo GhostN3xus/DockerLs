@@ -120,6 +120,7 @@ recebe nível e não entra na recomendação.
 | [`fleet`](#fleet) | Varre uma árvore de repositórios e resume o estado dos Dockerfiles | `0` `1` `2` |
 | [`policy`](#policy) | Mostra e valida a política declarada em `.dockerls-policy.yaml` | `0` / `1` |
 | [`provenance`](#provenance) | Confere um documento de procedência e prepara a atestação | `0` `1` `2` |
+| [`verify`](#verify) | Confere a assinatura de uma imagem com cosign | `0` `1` `2` |
 | [`doctor`](#doctor) | Checa as dependências locais (scanners) | `0` / `1` |
 | [`health`](#health) | Checa a conectividade com os serviços externos | `0` / `1` |
 | [`cache`](#cache) | Inspeciona e limpa o cache de análises | `0` / `1` |
@@ -1125,6 +1126,43 @@ de esconder. Ele é um extra sobre o diagnóstico: se o cache estiver
 indisponível, o comando continua sem a linha em vez de falhar por causa de um
 enfeite.
 
+#### `--alternatives`: e se a base certa fosse outra?
+
+`base` atualiza o digest — o que resolve a data e não resolve a escolha.
+Trocar `node:22` por `node:22` de ontem continua sendo `node:22`. Com
+`--alternatives`, cada `FROM` distinto é **escaneado junto das candidatas**, e
+a melhor medida aparece com o custo da troca ao lado:
+
+```console
+$ dockerls base --dry-run --alternatives
+
+Alternativas medidas
+
+  node:22
+    -> cgr.dev/chainguard/node@sha256:4b91...
+      CRITICAL -4, HIGH -9, score +31.0
+      ! não há shell: `docker exec` e scripts de entrypoint deixam de funcionar
+      ! usuário não-root por padrão: volumes montados podem precisar de ajuste
+
+  golang:1.23
+    ? golang:1.23 não pôde ser escaneada, então nenhuma melhora sobre ela pode
+      ser medida. Isso é falha técnica, não veredito sobre a imagem
+
+Nada aqui é aplicado: trocar a família da base é decisão de arquitetura, não
+atualização de digest. O `base` escreve digest; a troca de imagem é sua.
+```
+
+Exige scanner instalado e **leva minutos** — por isso é opt-in. Três coisas
+não acontecem aqui, de propósito:
+
+- **Nada é aplicado.** O `base` reescreve digest; trocar a família da imagem
+  muda libc, shell e usuário, e isso é revisão de arquitetura.
+- **"Não medimos" nunca vira "não há nada melhor".** A saída marca os dois de
+  formas diferentes porque levam a decisões diferentes.
+- **Uma candidata pior não é escondida.** Se a melhor colocada não melhora o
+  que foi medido, ela aparece com os números — filtrar silenciosamente o que
+  ficou pior transformaria a lista num argumento em vez de uma medição.
+
 Depois de aplicar, **reconstrua e escaneie antes de publicar**: trocar o digest
 da base muda a imagem, e nada além de um scan diz se para melhor.
 
@@ -1746,6 +1784,62 @@ bytes que ninguém escaneou.
 O passo de assinar simplesmente não roda sobre um build cuja entrada mudou no
 meio do caminho: o comando anterior falha o job. O workflow completo está em
 [`examples/github/image-release.yml`](examples/github/image-release.yml).
+
+### verify
+
+Confere a assinatura de uma imagem com [cosign](https://github.com/sigstore/cosign).
+
+O `scan` diz o que há dentro de uma imagem e o `provenance` diz de onde ela
+veio. Nenhum dos dois impede alguém com acesso de escrita ao registry de
+sobrescrever a tag com outra coisa: os dois falam sobre o artefato que
+mediram, e a tag deixou de apontar para ele. A assinatura é o elo que fecha
+isso — ela responde *quem publicou estes bytes*.
+
+```bash
+dockerls verify ghcr.io/org/app@sha256:4b91...
+dockerls verify ghcr.io/org/app@sha256:4b91... \
+  --identity 'https://github.com/org/.*' \
+  --issuer https://token.actions.githubusercontent.com
+```
+
+**`cosign` ausente nunca vira "não assinado".** Confundir os dois acusaria
+alguém por causa de uma ferramenta que faltava na máquina; na direção oposta,
+uma verificação que falha em silêncio produz confiança sem base, que é pior do
+que desconfiança. Por isso há **três saídas distintas**, e um pipeline precisa
+delas:
+
+| Exit | Estado | O que aconteceu |
+|---|---|---|
+| `0` | `VERIFIED` | o cosign conferiu e a assinatura vale |
+| `2` | `UNSIGNED` | o cosign rodou e respondeu: não há assinatura. **Veredito** |
+| `1` | `SIGNER_MISSING` / `FAILED` | o cosign não rodou, ou falhou. **Falha do medidor** |
+
+**Verificar sem `--identity` e `--issuer` responde "alguém assinou"**, não
+"quem você espera assinou" — e a saída diz isso em vez de deixar passar como
+se fosse a mesma coisa.
+
+#### `dockerls build --sign`
+
+Assina a imagem **depois** do push, e só quando é legítimo assinar:
+
+```bash
+dockerls build -t app:1.0 --registry ghcr.io/org/app --push --sign \
+  --provenance ./supply-chain.json .
+```
+
+Duas recusas moram aí, e as duas são sobre o mesmo erro — uma assinatura aponta
+para bytes e diz "eu publiquei isto":
+
+- **Procedência não verificada recusa a assinatura.** Assinar sobre um artefato
+  cuja entrada não fecha seria carimbar o desconhecido.
+- **Sem digest do manifesto, recusa também.** Assinar a tag assinaria o que ela
+  aponta agora, e ela pode mover no instante seguinte: a assinatura seguiria
+  válida cobrindo outros bytes. A referência assinada é sempre
+  `repositório@sha256:...`, com a tag removida.
+
+O modo é keyless (OIDC) por padrão, porque é o que funciona em CI sem segredo
+de longa duração no repositório — e um segredo de longa duração num
+repositório é exatamente o que a assinatura deveria estar protegendo.
 
 ### Exit codes
 

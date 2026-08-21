@@ -5,6 +5,33 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] -- 2026-08-21
+
+### Adicionado -- assinatura e alternativas medidas
+
+- **`dockerls verify` e `dockerls build --sign`.** O scan diz o que há dentro
+  de uma imagem e a procedência diz de onde ela veio; nenhum dos dois impede
+  alguém com acesso de escrita ao registry de sobrescrever a tag. A assinatura
+  responde a pergunta que faltava: quem publicou estes bytes.
+- **`dockerls base --alternatives`.** O `base` atualizava o digest, o que
+  resolve a data e não resolve a escolha: trocar `node:22` por `node:22` de
+  ontem continua sendo `node:22`. Agora cada `FROM` distinto é escaneado junto
+  das candidatas, e a melhor medida aparece com o custo da troca ao lado. Nada
+  é aplicado -- trocar a família da base muda libc, shell e usuário, e isso é
+  revisão de arquitetura, não atualização de digest.
+
+### Decidido
+
+- **`cosign` ausente nunca vira "não assinado".** Três estados e três exit
+  codes: `VERIFIED` (0), `UNSIGNED` (2, veredito sobre a imagem) e
+  `SIGNER_MISSING`/`FAILED` (1, falha do medidor). Sem essa distinção um
+  pipeline trataria "não deu para conferir" como "não está assinada".
+- **Só se assina por digest, e só com procedência verificada.** Assinar uma tag
+  assinaria o que ela aponta agora, e ela pode mover no instante seguinte -- a
+  assinatura seguiria válida cobrindo outros bytes.
+- **Uma alternativa pior é reportada, não filtrada.** Esconder o que ficou pior
+  transformaria a lista num argumento em vez de uma medição.
+
 ## [2.6.0] -- 2026-08-21
 
 ### Adicionado -- `dockerls fleet`

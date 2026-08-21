@@ -22,6 +22,7 @@ from dockerls.cli.commands.provenance_cmd import provenance
 from dockerls.cli.commands.recommend import recommend
 from dockerls.cli.commands.sbom import sbom
 from dockerls.cli.commands.search import search
+from dockerls.cli.commands.verify import verify
 from dockerls.cli.commands.version import version
 from dockerls.cli.dependencies import configure_logging
 
@@ -55,6 +56,7 @@ app.command()(controls)
 app.command()(fleet)
 app.command()(policy)
 app.command()(provenance)
+app.command()(verify)
 app.command()(export)
 app.command()(login)
 app.command()(logout)

@@ -611,3 +611,43 @@ numa varredura da máquina inteira, e um retrato parcial nunca se apresenta como
 completo. Em troca, um repositório que usa symlink para compartilhar
 Dockerfiles entre pastas terá o arquivo contado uma vez só — o que é o
 comportamento correto, e não uma limitação.
+
+## D-030 — Assinante ausente não é imagem não assinada
+
+**Contexto.** `cosign` pode não estar instalado, pode falhar por rede, ou pode
+responder que não há assinatura. Um booleano colapsaria os três.
+
+**Decisão.** `SignatureStatus` tem cinco valores e `is_conclusive` separa
+veredito de falha do medidor. `dockerls verify` sai `0`, `2` e `1`
+respectivamente.
+
+**Consequência.** Um pipeline consegue tratar "esta imagem não está assinada"
+de forma diferente de "não deu para conferir". Sem isso, uma máquina sem cosign
+reprovaria toda imagem da organização — e a resposta previsível seria desligar
+a checagem.
+
+## D-031 — Só se assina por digest, e só com procedência verificada
+
+**Contexto.** `--sign` roda depois do push, e a tag está ali à mão.
+
+**Decisão.** A referência assinada é sempre `repositório@sha256:...`, com a tag
+removida; e a assinatura é recusada quando a procedência não é `VERIFIED`.
+
+**Consequência.** Uma assinatura aponta para bytes e diz "eu publiquei isto".
+Assinar uma tag assinaria o que ela aponta naquele instante, e a assinatura
+seguiria válida depois que a tag mudasse. Assinar sem procedência seria
+carimbar um artefato cuja entrada ninguém conseguiu fechar — o carimbo é
+exatamente o que uma assinatura não pode ser.
+
+## D-032 — `base --alternatives` mede e propõe; não aplica
+
+**Contexto.** O `base` já reescreve o Dockerfile para atualizar digests. Seria
+coerente reescrever também para trocar a base por uma melhor.
+
+**Decisão.** Não reescreve. As alternativas são impressas com os deltas
+medidos e os trade-offs; a troca é do humano.
+
+**Consequência.** Uma pessoa ainda precisa editar o arquivo. É o correto:
+atualizar um digest preserva libc, shell, usuário e gerenciador de pacotes,
+enquanto trocar a família muda todos os quatro. As duas coisas cabem no mesmo
+comando; não cabem na mesma automação.

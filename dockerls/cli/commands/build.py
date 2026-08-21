@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from html import escape as html_escape
 from pathlib import Path
@@ -31,6 +32,11 @@ from dockerls.infrastructure.config.policy_file import (
     load_policy,
 )
 from dockerls.infrastructure.dockerfile_validator import DockerfileValidator, HardeningTemplates
+from dockerls.integrations.signing.cosign import (
+    CosignClient,
+    SignatureResult,
+    SignatureStatus,
+)
 
 if TYPE_CHECKING:
     from dockerls.domain.value_objects.build_policy import BuildPolicy, PolicyViolation
@@ -111,6 +117,14 @@ def build(
         None,
         "--provenance",
         help="Arquiva o registro de supply chain (hashes de entrada e saída) em JSON",
+    ),
+    sign: bool = typer.Option(
+        False,
+        "--sign",
+        help=(
+            "Assina a imagem publicada com cosign (keyless/OIDC). Exige --push e "
+            "procedência verificada"
+        ),
     ),
     policy: str | None = typer.Option(
         None,
@@ -255,13 +269,96 @@ def build(
     # Executar
     response = _run_interactive_wizard(use_case, path) if interactive else use_case.execute(request)
 
+    signature = _sign_if_requested(response, sign=sign, publishing=publishing)
+
     # Output
     if ci_mode or output:
-        _print_json_output(response, output)
+        _print_json_output(response, output, signature=signature)
     else:
         _print_table_output(response, report)
+        if signature is not None:
+            _print_signature(signature)
 
+    # Assinar e falhar deixaria o pipeline verde com uma imagem publicada que
+    # ninguém atestou -- e o próximo `dockerls verify` seria a primeira notícia
+    # disso, tarde demais.
+    if signature is not None and not signature.trustworthy:
+        raise typer.Exit(EXIT_ERROR)
     raise typer.Exit(response.exit_code)
+
+
+def _sign_if_requested(
+    response: BuildImageResponse, *, sign: bool, publishing: bool
+) -> SignatureResult | None:
+    """Assina a imagem publicada, quando pedido e quando é legítimo assinar.
+
+    Duas recusas moram aqui, e as duas são sobre o mesmo erro: uma assinatura
+    aponta para bytes específicos e diz "eu publiquei isto". Emiti-la sobre um
+    artefato que não se sabe de onde veio transforma a assinatura em carimbo.
+    """
+    if not sign:
+        return None
+    if not publishing or not response.success:
+        console.print(
+            "[yellow]--sign ignorado: só se assina o que foi publicado, e este build "
+            "não chegou a publicar.[/yellow]"
+        )
+        return None
+
+    record = response.provenance
+    if record is None or not record.is_verified:
+        motivo = record.explain() if record else "não houve registro de procedência"
+        console.print(
+            f"[red]Assinatura recusada:[/red] {safe(motivo)}.\n"
+            "[dim]Assinar é afirmar que você publicou estes bytes; fazê-lo sobre um "
+            "artefato cuja entrada não fecha seria carimbar o desconhecido.[/dim]"
+        )
+        return SignatureResult(
+            reference=response.image_tag or "",
+            status=SignatureStatus.FAILED,
+            detail="procedência não verificada",
+        )
+
+    digest = record.artifact.repo_digest
+    reference = record.artifact.published_reference or response.image_tag or ""
+    if not digest:
+        console.print(
+            "[red]Assinatura recusada:[/red] o registry não devolveu o digest do "
+            "manifesto.\n[dim]Assinar a tag assinaria o que ela aponta agora, e ela "
+            "pode mover no instante seguinte -- a assinatura seguiria válida cobrindo "
+            "outros bytes.[/dim]"
+        )
+        return SignatureResult(
+            reference=reference,
+            status=SignatureStatus.FAILED,
+            detail="sem digest do manifesto",
+        )
+
+    alvo = _digest_reference(reference, digest)
+    console.print(f"[dim]Assinando {safe(alvo)} com cosign (keyless).[/dim]")
+    return asyncio.run(CosignClient().sign(alvo))
+
+
+def _digest_reference(reference: str, digest: str) -> str:
+    """`reg.io/app:1.0` + digest -> `reg.io/app@sha256:...`.
+
+    A tag sai fora. `nome:tag@digest` é válido e o digest é quem manda, mas
+    manter os dois convida quem lê a achar que a tag importa -- e a assinatura
+    existe justamente porque ela não importa.
+    """
+    head = reference.split("@", 1)[0]
+    repositorio, separador, cauda = head.rpartition(":")
+    # `registry:5000/app` tem `:` no host, não na tag.
+    if separador and "/" not in cauda:
+        head = repositorio
+    return f"{head}@{digest}"
+
+
+def _print_signature(signature: SignatureResult) -> None:
+    cor = "green" if signature.trustworthy or signature.status is SignatureStatus.SIGNED else "red"
+    console.print(f"\n[{cor}]{signature.status}[/{cor}]  [dim]{safe(signature.explain())}[/dim]")
+    if signature.detail and not signature.trustworthy:
+        console.print(f"[dim]{safe(signature.detail)}[/dim]")
 
 
 def _load_policy(context: str, explicit: str | None, *, no_policy: bool) -> BuildPolicy | None:
@@ -765,7 +862,12 @@ def _report_dict(report: BuildReport) -> dict[str, Any]:
     }
 
 
-def _print_json_output(response: BuildImageResponse, output_file: str | None = None) -> None:
+def _print_json_output(
+    response: BuildImageResponse,
+    output_file: str | None = None,
+    *,
+    signature: SignatureResult | None = None,
+) -> None:
     """Imprime saída JSON (CI mode).
 
     Vai para stdout via `typer.echo`, não pelo console do Rich: em CI o
@@ -785,6 +887,8 @@ def _print_json_output(response: BuildImageResponse, output_file: str | None = N
     # supply chain lê para decidir, e ele não lê tabela de terminal.
     if response.provenance is not None:
         output_data["provenance"] = response.provenance.to_dict()
+    if signature is not None:
+        output_data["signature"] = signature.to_dict()
     if response.policy_violations:
         output_data["policy_violations"] = [v.to_dict() for v in response.policy_violations]
     if response.error:
