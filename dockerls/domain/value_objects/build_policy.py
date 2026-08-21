@@ -134,6 +134,24 @@ class BuildPolicy:
             return requested or self.fail_on
         return min(candidates, key=SEVERITY_ORDER.index)
 
+    def static_subset(self) -> BuildPolicy:
+        """A política reduzida ao que se decide sem construir nem escanear.
+
+        Uma varredura de frota lê Dockerfiles; ela não constrói imagem nem
+        chama scanner. Aplicar as regras que dependem de scan ali produziria
+        uma violação por arquivo, todas dizendo a mesma coisa ("não houve
+        scan") -- e uma lista em que tudo está vermelho não distingue nada.
+
+        As regras removidas não são consideradas cumpridas: elas continuam
+        valendo no `build`, que é onde há medição para conferi-las.
+        """
+        return BuildPolicy(
+            require_pinned_bases=self.require_pinned_bases,
+            require_nonroot=self.require_nonroot,
+            required_labels=self.required_labels,
+            allowed_base_registries=self.allowed_base_registries,
+        )
+
     def to_dict(self) -> dict[str, object]:
         return {
             "fail_on": self.fail_on,

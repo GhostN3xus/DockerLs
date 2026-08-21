@@ -5,6 +5,34 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] -- 2026-08-21
+
+### Adicionado -- `dockerls fleet`
+
+- **O retrato de todos os Dockerfiles de uma vez.** Cada comando desta
+  ferramenta olhava para um artefato, o que resolve a pergunta de quem está com
+  o arquivo aberto e nenhuma das perguntas de quem responde por trinta
+  repositórios. A saída é uma fila de trabalho ordenada por violações, com o
+  empate resolvido pelo caminho para que duas varreduras sejam comparáveis.
+- **A política estática é aplicada por arquivo.** Só as regras decidíveis sem
+  build (`require_pinned_bases`, `require_nonroot`, `required_labels`,
+  `allowed_base_registries`); as que dependem de scan continuam no `build`,
+  porque uma violação idêntica por arquivo não distingue nada.
+- **"root" e "usuário indeterminado" são colunas separadas.** Juntá-los
+  transformaria ausência de medida em acusação, e a fila de trabalho de cada um
+  é diferente.
+
+### Notas
+
+- A varredura **não segue symlink** (um link para `/` transformaria a varredura
+  de um repositório numa varredura da máquina), pula diretórios de dependência,
+  e **diz quando foi truncada** -- um retrato parcial que se apresenta como
+  completo é pior do que nenhum retrato.
+- As bases são lidas com expansão de `ARG`: `FROM python:3.12@${PY}` conta como
+  fixado, porque é a forma correta de fixar e uma varredura que reprova quem fez
+  certo ensina a fazer errado.
+- A saída diz, ela mesma, que leu Dockerfiles e não escaneou imagem nenhuma.
+
 ## [2.5.0] -- 2026-08-21
 
 ### Adicionado -- política como código

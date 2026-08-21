@@ -14,6 +14,7 @@ from dockerls.cli.commands.compare import compare
 from dockerls.cli.commands.controls import controls
 from dockerls.cli.commands.doctor import doctor
 from dockerls.cli.commands.export import export
+from dockerls.cli.commands.fleet import fleet
 from dockerls.cli.commands.health import health
 from dockerls.cli.commands.login import login, logout
 from dockerls.cli.commands.policy_cmd import policy
@@ -51,6 +52,7 @@ app.command(name="base-image")(base_image)
 app.command()(build)
 app.command()(compare)
 app.command()(controls)
+app.command()(fleet)
 app.command()(policy)
 app.command()(provenance)
 app.command()(export)

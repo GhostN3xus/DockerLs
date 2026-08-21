@@ -117,6 +117,7 @@ recebe nível e não entra na recomendação.
 | [`base`](#base) | Confere as bases do Dockerfile contra o registry e atualiza os digests | `0` `1` `2` |
 | [`base-image`](#base-image) | Gera o Dockerfile de uma imagem base a partir de um menu de pacotes | `0` / `1` |
 | [`build`](#build) | Valida, constrói, escaneia e (opcionalmente) publica | `0` `1` `2` |
+| [`fleet`](#fleet) | Varre uma árvore de repositórios e resume o estado dos Dockerfiles | `0` `1` `2` |
 | [`policy`](#policy) | Mostra e valida a política declarada em `.dockerls-policy.yaml` | `0` / `1` |
 | [`provenance`](#provenance) | Confere um documento de procedência e prepara a atestação | `0` `1` `2` |
 | [`doctor`](#doctor) | Checa as dependências locais (scanners) | `0` / `1` |
@@ -1506,6 +1507,87 @@ não é publicada.
 `--hardened`/`--base` escrevem `Dockerfile.hardened` no diretório de contexto.
 Combinado com `--validate-only`, **nada é escrito em disco**: um dry-run não tem
 efeito colateral. Para gerar o arquivo, rode o build sem `--validate-only`.
+
+### fleet
+
+Varre uma árvore de repositórios e resume o estado de **todos** os Dockerfiles
+de uma vez.
+
+Cada outro comando desta ferramenta olha para um artefato. Isso resolve a
+pergunta de quem está com o arquivo aberto e não resolve nenhuma das perguntas
+de quem responde por trinta repositórios: "quantos ainda rodam como root?",
+"quantos fixam a base?", "por onde eu começo?". Sem resposta, a resposta na
+prática vira "por onde alguém reclamar".
+
+```bash
+dockerls fleet                       # varre o diretório atual
+dockerls fleet ~/repos --limit 10    # só os dez primeiros da fila
+dockerls fleet ~/repos --format json
+dockerls fleet ~/repos --policy ./org-policy.yaml
+```
+
+```console
+$ dockerls fleet ~/repos
+
+/home/ana/repos
+12 Dockerfile(s), 4 com todas as bases fixadas, 5 rodando como root, 1 com usuário indeterminado
+
+  pagamentos/Dockerfile
+    0/1 fixada(s)  root  1 estágio(s)
+    x require_pinned_bases  node:22 não está fixada por digest: o que foi testado
+      e o que vai para produção podem ser bytes diferentes sem nenhuma mudança sua
+    x require_nonroot  a política exige execução sem privilégio: a imagem roda como root
+  faturamento/Dockerfile.prod
+    1/2 fixada(s)  sem privilégio  2 estágio(s)
+    x require_pinned_bases  golang:1.23 não está fixada por digest: ...
+  catalogo/Dockerfile
+    2/2 fixada(s)  sem privilégio  2 estágio(s)
+
+6 arquivo(s) com violação, 9 no total.
+Só as regras decidíveis sem build foram aplicadas; as que dependem de scan
+continuam valendo no `dockerls build`.
+esta varredura lê Dockerfiles: não constrói imagem nem chama scanner. Ela diz o
+que os arquivos declaram, e nada sobre as vulnerabilidades das imagens que eles
+produzem
+$ echo $?
+2
+```
+
+**A fila é ordenada por violações, e o empate é resolvido pelo caminho.** O
+desempate não é detalhe: sem ele a mesma frota sairia em ordem diferente a cada
+varredura, e nenhum relatório seria comparável com o anterior.
+
+**"root" e "indeterminado" são contados separados.** Juntá-los transformaria
+ausência de medida em acusação, e a fila de trabalho de cada um é diferente.
+
+**Só as regras decidíveis sem build são aplicadas** — `require_pinned_bases`,
+`require_nonroot`, `required_labels` e `allowed_base_registries`. As que
+dependem de scan (`fail_on`, `max_vulnerabilities`, `require_scan`,
+`require_provenance`) continuam valendo no `build`, onde há medição para
+conferi-las: aplicá-las aqui produziria uma violação idêntica por arquivo, e
+uma lista toda vermelha não distingue nada.
+
+**Um `FROM python:3.12@${PY}` conta como fixado.** As bases são lidas com
+expansão de `ARG` — é a forma correta de fixar, e uma varredura que reprova
+quem fez certo é uma varredura que ensina a fazer errado.
+
+**Limites da varredura**, porque andar no disco é onde este comando pode se
+machucar: symlinks nunca são seguidos (um link para `/` transformaria a
+varredura de um repositório numa varredura da máquina), diretórios de
+dependência (`node_modules`, `.venv`, `vendor`, `.git`, …) ficam de fora, e há
+teto de arquivos e de profundidade. **Quando o teto é atingido, o relatório diz
+que foi truncado** — um retrato parcial que se apresenta como completo é pior
+do que nenhum retrato. Um arquivo ilegível vira uma linha de erro e nunca
+desaparece: sumir com ele faria a frota parecer menor e mais em ordem do que é.
+
+**O que este comando não faz está dito na própria saída.** Ele lê Dockerfiles;
+não constrói imagem nem chama scanner. Chamar isso de "auditoria de segurança
+da frota" seria exatamente a promessa que o resto desta ferramenta existe para
+não fazer.
+
+**Exit codes:** `2` quando há violação de política (é o portão de um repositório
+guarda-chuva), `1` quando a raiz não é um diretório ou a política não carrega,
+`0` caso contrário.
 
 ### policy
 

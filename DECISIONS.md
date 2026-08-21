@@ -573,3 +573,41 @@ coisas como "não use pacotes inseguros" ou "mantenha a imagem enxuta".
 específica. Uma regra que não pode ser avaliada é uma regra que reprova por
 engano ou aprova por omissão, e as duas corroem a confiança no portão até
 alguém desligá-lo inteiro.
+
+## D-027 — A varredura de frota nunca fala sobre vulnerabilidade
+
+**Contexto.** `dockerls fleet` percorre uma árvore e resume o estado dos
+Dockerfiles. A palavra "frota" convida a chamar isso de auditoria de segurança.
+
+**Decisão.** Não é. O relatório diz, na própria saída, que leu Dockerfiles e não
+construiu imagem nem chamou scanner, e nenhuma métrica dele fala de CVE.
+
+**Consequência.** Quem quiser o número de vulnerabilidades ainda precisa
+construir e escanear cada imagem. É o custo de não converter "li o arquivo" em
+"medi a imagem" — a mesma substituição que esta ferramenta recusa em todo lugar.
+
+## D-028 — Na frota, a política aplicada é o subconjunto estático
+
+**Contexto.** A varredura não constrói nem escaneia, então `require_scan` e
+`max_vulnerabilities` violariam em todo arquivo.
+
+**Decisão.** `BuildPolicy.static_subset()` remove as regras que dependem de
+medição, e a saída diz que fez isso.
+
+**Consequência.** As regras removidas **não** são consideradas cumpridas — elas
+continuam valendo no `build`, que é onde há medição. Uma lista em que tudo está
+vermelho pela mesma razão não distingue nada, e a fila de trabalho deixaria de
+ser fila.
+
+## D-029 — Symlink não é seguido, e o truncamento é dito em voz alta
+
+**Contexto.** Percorrer uma árvore arbitrária no disco de outra pessoa.
+
+**Decisão.** Symlinks são ignorados; há teto de arquivos e de profundidade; e o
+relatório carrega `truncated` quando qualquer um deles é atingido.
+
+**Consequência.** Um link para `/` num repositório não transforma a varredura
+numa varredura da máquina inteira, e um retrato parcial nunca se apresenta como
+completo. Em troca, um repositório que usa symlink para compartilhar
+Dockerfiles entre pastas terá o arquivo contado uma vez só — o que é o
+comportamento correto, e não uma limitação.
