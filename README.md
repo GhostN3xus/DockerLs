@@ -121,6 +121,7 @@ recebe nível e não entra na recomendação.
 | [`policy`](#policy) | Mostra e valida a política declarada em `.dockerls-policy.yaml` | `0` / `1` |
 | [`provenance`](#provenance) | Confere um documento de procedência e prepara a atestação | `0` `1` `2` |
 | [`verify`](#verify) | Confere a assinatura de uma imagem com cosign | `0` `1` `2` |
+| [`registry-audit`](#registry-audit) | O que o registry conta sobre uma imagem publicada | `0` `1` `2` |
 | [`doctor`](#doctor) | Checa as dependências locais (scanners) | `0` / `1` |
 | [`health`](#health) | Checa a conectividade com os serviços externos | `0` / `1` |
 | [`cache`](#cache) | Inspeciona e limpa o cache de análises | `0` / `1` |
@@ -1840,6 +1841,70 @@ para bytes e diz "eu publiquei isto":
 O modo é keyless (OIDC) por padrão, porque é o que funciona em CI sem segredo
 de longa duração no repositório — e um segredo de longa duração num
 repositório é exatamente o que a assinatura deveria estar protegendo.
+
+### registry-audit
+
+Apura, **só pelo protocolo OCI e sem credencial de nuvem**, o que o registry
+conta sobre uma imagem publicada.
+
+Auditar a configuração de um registry — retenção, IAM, content trust — exige
+credencial de nuvem e uma API diferente para cada provedor. Este comando não
+faz isso, e a saída diz que não faz. A troca é deliberada: um relatório que
+precisa de acesso administrativo para existir é um relatório que ninguém roda,
+e o que dá para medir sem credencial é menos do que parece e mais do que se
+costuma olhar.
+
+```console
+$ dockerls registry-audit cgr.dev/chainguard/static:latest
+
+cgr.dev/chainguard/static:latest
+sha256:14e00fd...
+
+  v RESOLVABLE
+      o registry respondeu qual digest esta referência aponta
+  x PINNED_REFERENCE
+      a referência é uma tag: o que foi testado e o que roda podem ser bytes
+      diferentes sem nenhuma mudança sua
+  i PUBLICLY_READABLE
+      o registry respondeu sem nenhuma credencial: qualquer pessoa da internet
+      consegue baixar esta imagem e inspecionar o que há dentro dela. Se isso é
+      problema depende de para que ela existe, e essa parte só você sabe
+  ? TAG_STABLE
+      não há histórico desta tag: o que aconteceu antes da primeira observação
+      é desconhecido, não ausente
+  v SIGNATURE_PRESENT
+      há assinatura cosign publicada para este digest
+  v ATTESTATION_PRESENT
+      há atestação cosign publicada para este digest
+
+1 achado(s) que pedem atenção, 1 não medido(s)
+esta auditoria usa só o protocolo OCI, sem credencial de nuvem: ela não lê
+políticas de retenção, IAM nem configuração de imutabilidade do provedor. O que
+ela mede, mede de verdade; o que não mede, diz que não mediu
+```
+
+**Cada achado é tri-estado, e o `?` não é enfeite.** Sem ele, "o registry não
+respondeu sobre a assinatura" viraria "não há assinatura", e as duas frases
+levam a decisões opostas. `UNKNOWN` nunca alerta e nunca aprova.
+
+**`TAG_STABLE` é a única evidência *medida* de mutabilidade.** A configuração
+de imutabilidade do registry é uma declaração; o histórico de digests (ver
+[`base`](#base)) é uma observação. Quando as duas discordam, é a observação que
+descreve o que aconteceu de fato.
+
+**`PUBLICLY_READABLE` é relatado e nunca alerta.** "Público" é o estado correto
+de uma imagem base oficial e o estado errado de um artefato interno — e a
+diferença entre os dois é a intenção de quem publicou, que esta ferramenta não
+tem como medir. Transformar o fato em alerta seria afirmar uma intenção;
+relatá-lo entrega o fato a quem sabe qual era.
+
+**Assinatura e atestação são procuradas onde o cosign as publica**, nas tags
+derivadas do digest (`sha256-<hex>.sig` e `.att`). É convenção do sigstore, não
+do OCI — então a ausência significa "não está assinado com cosign nesse
+esquema", e não "ninguém assinou nada".
+
+**Exit codes:** `2` quando há achado que pede atenção, `1` quando a referência
+não permite apurar nada, `0` caso contrário.
 
 ### Exit codes
 

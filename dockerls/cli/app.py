@@ -20,6 +20,7 @@ from dockerls.cli.commands.login import login, logout
 from dockerls.cli.commands.policy_cmd import policy
 from dockerls.cli.commands.provenance_cmd import provenance
 from dockerls.cli.commands.recommend import recommend
+from dockerls.cli.commands.registry_audit_cmd import registry_audit
 from dockerls.cli.commands.sbom import sbom
 from dockerls.cli.commands.search import search
 from dockerls.cli.commands.verify import verify
@@ -56,6 +57,7 @@ app.command()(controls)
 app.command()(fleet)
 app.command()(policy)
 app.command()(provenance)
+app.command(name="registry-audit")(registry_audit)
 app.command()(verify)
 app.command()(export)
 app.command()(login)

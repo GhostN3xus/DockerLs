@@ -5,6 +5,30 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] -- 2026-08-21
+
+### Adicionado -- `dockerls registry-audit`
+
+- **O que o registry conta sobre uma imagem publicada, sem credencial de
+  nuvem.** Auditar retenção, IAM e content trust exige acesso administrativo e
+  uma API por provedor -- e um relatório que precisa disso para existir é um
+  relatório que ninguém roda. Este usa só o protocolo OCI: resolve a
+  referência, diz se ela é digest ou tag, procura assinatura e atestação cosign
+  nas tags derivadas do digest, e mede se o registry respondeu sem credencial.
+- **`TAG_STABLE` mede mutabilidade em vez de ler configuração.** A
+  imutabilidade declarada no registry é uma declaração; o histórico de digests
+  é uma observação, e quando as duas discordam é a observação que descreve o
+  que aconteceu.
+
+### Decidido
+
+- **`PUBLICLY_READABLE` é relatado e nunca alerta.** "Público" é o estado
+  correto de uma imagem base oficial e o estado errado de um artefato interno,
+  e a diferença é a intenção de quem publicou -- que a ferramenta não mede.
+  Transformar o fato em alerta seria afirmar uma intenção.
+- **Todo achado é tri-estado.** "O registry não respondeu sobre a assinatura"
+  nunca vira "não há assinatura".
+
 ## [2.7.0] -- 2026-08-21
 
 ### Adicionado -- assinatura e alternativas medidas

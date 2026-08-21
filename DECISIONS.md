@@ -651,3 +651,30 @@ medidos e os trade-offs; a troca é do humano.
 atualizar um digest preserva libc, shell, usuário e gerenciador de pacotes,
 enquanto trocar a família muda todos os quatro. As duas coisas cabem no mesmo
 comando; não cabem na mesma automação.
+
+## D-033 — A auditoria de registry para no que o OCI revela
+
+**Contexto.** Uma "auditoria de endurecimento de registry" completa leria
+políticas de retenção, IAM e content trust de ACR, GAR e GHCR — cada um com
+sua API e sua credencial.
+
+**Decisão.** O comando usa só o protocolo OCI, sem credencial de nuvem, e a
+saída declara o que não leu.
+
+**Consequência.** O relatório é menor e roda em qualquer lugar, inclusive
+contra um registry de terceiro. A parte que depende de credencial continua sem
+resposta — e dizer isso é melhor do que uma checagem por provedor que ninguém
+consegue exercitar e que apodrece na primeira mudança de API.
+
+## D-034 — Acesso público é relatado, nunca alertado
+
+**Contexto.** O comando descobre, como efeito de conseguir resposta anônima,
+que uma imagem é legível por qualquer pessoa.
+
+**Decisão.** O achado entra no relatório marcado como informativo, e não conta
+como alerta nem afeta o exit code.
+
+**Consequência.** "Público" é o estado correto de uma imagem base oficial e o
+estado errado de um artefato interno. A diferença é a intenção de quem
+publicou, e essa esta ferramenta não tem como medir. Alertar seria afirmar uma
+intenção; relatar entrega o fato a quem sabe qual era.
