@@ -222,7 +222,8 @@ class TrivyScanner(ScannerInterface):
         for attempt in range(1, self.DB_DOWNLOAD_ATTEMPTS + 1):
             if on_attempt is not None:
                 on_attempt(attempt, self.DB_DOWNLOAD_ATTEMPTS)
-            ok, detail, retryable = await self._download_db(base)
+            async with self._cache_pool.db_refresh_lease():
+                ok, detail, retryable = await self._download_db(base)
             if ok:
                 break
             if not retryable:
@@ -248,9 +249,14 @@ class TrivyScanner(ScannerInterface):
 
         self._skip_db_update = True
         isolated = await self._cache_pool.prepare()
+        stats = self._cache_pool.stats
         logger.info(
-            f"Trivy DB ready at {base}; "
-            f"cache isolation {'enabled' if isolated else 'unavailable (scans serialized)'}"
+            f"Trivy DB ready at {base}; cache isolation "
+            + (
+                f"enabled ({stats.leased} slots)"
+                if isolated
+                else f"unavailable, scans serialized ({stats.reason})"
+            )
         )
         return True
 
