@@ -66,6 +66,10 @@ class TestYamlBombs:
         assert bomb.count("*") < 100
         assert MAX_EXPANDED_NODES > 100
 
+    def test_a_recursive_alias_is_refused_instead_of_recursing_forever(self):
+        with pytest.raises(UnsafeYAMLError, match="alias-expansion bomb"):
+            safe_load_yaml("loop: &loop [*loop]", origin="recursive.yaml")
+
     def test_an_oversized_document_is_refused_before_parsing(self):
         with pytest.raises(UnsafeYAMLError, match="over the"):
             safe_load_yaml("a: " + "x" * (MAX_DOCUMENT_BYTES + 1))

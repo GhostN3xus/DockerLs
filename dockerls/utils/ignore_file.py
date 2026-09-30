@@ -4,11 +4,11 @@ import re
 from datetime import date
 from pathlib import Path
 
-import yaml
 from loguru import logger
 from pydantic import BaseModel, field_validator
 
 from dockerls.domain.value_objects.vex import VexJustification, parse_justification
+from dockerls.utils.safe_yaml import MAX_DOCUMENT_BYTES, UnsafeYAMLError, safe_load_yaml
 
 DEFAULT_IGNORE_FILENAME = ".dockerls-ignore.yaml"
 
@@ -97,9 +97,14 @@ def load_ignore_rules(path: Path | None = None) -> list[IgnoreRule]:
         return []
 
     try:
-        raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError as e:
-        logger.warning(f"Could not parse {target}: {e}")
+        # Read at most one byte beyond the parser's limit. ``read_text``
+        # would allocate an attacker-controlled file in full before
+        # ``safe_load_yaml`` had a chance to enforce its resource budget.
+        with target.open("rb") as stream:
+            document = stream.read(MAX_DOCUMENT_BYTES + 1)
+        raw = safe_load_yaml(document, origin=str(target)) or {}
+    except (OSError, UnsafeYAMLError) as e:
+        logger.warning(f"Could not read {target}: {e}")
         return []
 
     entries = raw.get("ignores", []) if isinstance(raw, dict) else []
