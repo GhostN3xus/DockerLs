@@ -272,3 +272,76 @@ class TestEvidence:
         await scanner.batch.scan_batch([("node:22", "sha256:a")])
 
         assert json.loads(received.read_text(encoding="utf-8"))["raw_dir"] != ""
+
+
+DIGEST = "sha256:" + "a" * 64
+
+
+class TestThePolicyHoldsForPinnedReferencesAndPlatforms:
+    """`name@digest` and `--platform` are new ways to name a target; neither
+    may be a way around the network policy, on the Python path or the Go one."""
+
+    @pytest.mark.asyncio
+    async def test_the_batch_path_refuses_a_pinned_reference_to_a_blocked_host(
+        self, tmp_path, monkeypatch
+    ):
+        received = tmp_path / "request.json"
+        install_fake_engine(tmp_path, monkeypatch, record_to=received)
+        guard = HostGuard(NetworkPolicy(allow_loopback=False, allow_link_local=False))
+        scanner = TrivyScanner(cache_dir=tmp_path / "cache", workers=2, guard=guard)
+
+        outcome = await scanner.batch.scan_batch(
+            [
+                (f"node@{DIGEST}", DIGEST),
+                (f"169.254.169.254/latest@{DIGEST}", "sha256:" + "b" * 64),
+                (f"127.0.0.1:5000/evil@{DIGEST}", "sha256:" + "c" * 64),
+            ],
+            platform="linux/arm64",
+        )
+
+        assert outcome is not None
+        request = json.loads(received.read_text(encoding="utf-8"))
+        assert [t["reference"] for t in request["targets"]] == [f"node@{DIGEST}"]
+        assert request["platform"] == "linux/arm64"
+        kinds = [r.error_kind for r in outcome.results]
+        assert kinds[1:] == [ScanErrorKind.BLOCKED_BY_POLICY] * 2
+
+    @pytest.mark.asyncio
+    async def test_the_python_path_refuses_it_too_and_never_starts_trivy(self, tmp_path):
+        from unittest.mock import AsyncMock, patch
+
+        guard = HostGuard(NetworkPolicy(allow_loopback=False, allow_link_local=False))
+        scanner = TrivyScanner(cache_dir=tmp_path / "cache", workers=1, guard=guard)
+        spawn = AsyncMock()
+        with patch("asyncio.create_subprocess_exec", spawn):
+            result = await scanner.scan(f"169.254.169.254/latest@{DIGEST}", platform="linux/arm64")
+
+        assert result.error_kind is ScanErrorKind.BLOCKED_BY_POLICY
+        spawn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_hostile_platform_never_reaches_a_process(self, tmp_path):
+        from unittest.mock import AsyncMock, patch
+
+        scanner = TrivyScanner(cache_dir=tmp_path / "cache", workers=1)
+        spawn = AsyncMock()
+        with patch("asyncio.create_subprocess_exec", spawn):
+            result = await scanner.scan("node:22", platform="linux/amd64; rm -rf /")
+
+        assert result.status is ScanStatus.ERROR
+        spawn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_grype_python_path_honours_the_guard_as_well(self, tmp_path):
+        from unittest.mock import AsyncMock, patch
+
+        from dockerls.integrations.grype.scanner import GrypeScanner
+
+        guard = HostGuard(NetworkPolicy(allow_loopback=False, allow_link_local=False))
+        scanner = GrypeScanner(guard=guard)
+        spawn = AsyncMock()
+        with patch("asyncio.create_subprocess_exec", spawn):
+            result = await scanner.scan(f"127.0.0.1:5000/x@{DIGEST}", platform="linux/arm64")
+
+        assert result.error_kind is ScanErrorKind.BLOCKED_BY_POLICY
+        spawn.assert_not_called()
