@@ -155,6 +155,11 @@ class ImageAnalysis(BaseModel):
     provenance: MeasurementProvenance = Field(default_factory=MeasurementProvenance)
     #: The same, for the second scanner's measurement, when there was one.
     secondary_provenance: MeasurementProvenance | None = None
+    #: `COMPLETE`, `PARTIAL` (the time budget cut a step short) or `NO_RESULT`.
+    #: Only `analyze` sets anything else; `recommend` reports it on the result.
+    completeness: str = "COMPLETE"
+    #: Steps this analysis did not finish, so their absence is stated.
+    pending_checks: list[str] = Field(default_factory=list)
 
     @property
     def pinned_reference(self) -> str:

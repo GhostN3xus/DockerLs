@@ -219,6 +219,7 @@ class MeasurementService:
         # moved to `_finished`.
         self._prefetched: dict[tuple[str, ...], Measurement] = {}
         self._fingerprint: ScannerFingerprint | None = None
+        self._prepared: bool | None = None
         self._accepts_platform = _accepts_platform(scanner)
         self.stats = MeasurementStats()
 
@@ -249,7 +250,14 @@ class MeasurementService:
         refreshed by one of them. The fingerprint is read *after* the refresh,
         because the refresh is what changes the database revision.
         """
+        if self._prepared is not None:
+            return self._prepared
         ready, _ = await self._prepare_flight.run("prepare", lambda: self._prepare(on_attempt))
+        # Remembered either way: a refresh that failed is not retried by every
+        # image that follows (three attempts with backoff, per image, would turn
+        # one broken download into minutes of waiting), and one that succeeded
+        # is not repeated.
+        self._prepared = ready
         return ready
 
     async def _prepare(self, on_attempt: Callable[[int, int], None] | None) -> bool:
@@ -340,7 +348,9 @@ class MeasurementService:
             # From here on `digest` is *the platform manifest*, which is what
             # was measured. It replaces whatever the discovery source hinted.
             image.digest = identity.manifest_digest
-        elif digest and not image.digest:
+        elif digest:
+            # A digest the user wrote *is* the bytes they asked about, and it
+            # replaces whatever a discovery source hinted for the tag.
             image.digest = digest
 
     # ---- measuring ---------------------------------------------------------
@@ -413,6 +423,24 @@ class MeasurementService:
     async def _measure_once(
         self, image: DockerImage, identity: ResolvedIdentity, refs: ImageRefs, measured: str
     ) -> Measurement:
+        # The database is refreshed (once, shared) *before* the scanner is
+        # fingerprinted: the refresh is what changes the database revision, and
+        # a result filed under the revision from before it would claim an
+        # older database than the one that produced it. Every entry path --
+        # analyze, compare, recommend -- gets this, not only the ones that
+        # remembered to call `prepare`.
+        try:
+            await run_within(self._deadline, self.prepare)
+        except DeadlineExceededError:
+            self.stats.not_started_deadline += 1
+            return self._failed(
+                image,
+                identity,
+                refs,
+                ScanErrorKind.DEADLINE_EXCEEDED,
+                "the time budget ended while the vulnerability database was being prepared",
+                status=ScanStatus.TIMEOUT,
+            )
         fingerprint = await self.fingerprint()
         strict = identity.identity
         note = ""

@@ -2,22 +2,42 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import typer
+from loguru import logger
 from rich.console import Console
 from rich.measure import Measurement
 from rich.table import Table
 
+from dockerls import __version__
+from dockerls import cli as cli_package
 from dockerls.application.dto.analysis import AnalysisResult, UnverifiedImage
+from dockerls.application.services.ci_summary import build_ci_summary
+from dockerls.application.services.decision_summary import (
+    DecisionSummary,
+    summarize_analysis,
+)
+from dockerls.application.services.events import (
+    RUN_FINISHED,
+    RUN_STARTED,
+    EventStream,
+    NdjsonSink,
+)
+from dockerls.application.services.instrumentation import RunInstrumentation
 from dockerls.application.services.remediation import (
     build_remediation_plan,
     render_dockerfile_patch,
 )
-from dockerls.cli.dependencies import build_analyze_use_case
+from dockerls.application.services.run_diff import RunDiff, diff_runs
+from dockerls.cli.decision_view import render_decision
+from dockerls.cli.dependencies import build_analyze_use_case, build_run_store
 from dockerls.cli.progress import scan_status
+from dockerls.cli.run_diff_view import print_run_diff
+from dockerls.cli.run_options import RunOptions, parse_run_options
 from dockerls.cli.scan_failure import describe_scan_failure
 from dockerls.cli.text import safe
 from dockerls.cli.vulnerability_view import (
@@ -30,8 +50,10 @@ from dockerls.cli.vulnerability_view import (
     threat_style,
 )
 from dockerls.domain.entities.vulnerability import PackageOrigin, Vulnerability
-from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY
+from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY, exit_code_for_completeness
 from dockerls.exporters.factory import ExporterFactory
+from dockerls.infrastructure.run_store import RunStore, scope_of
+from dockerls.utils.deadline import Deadline
 
 if TYPE_CHECKING:
     from dockerls.application.dto.analysis import ImageAnalysis
@@ -41,7 +63,7 @@ if TYPE_CHECKING:
 console = Console()
 
 
-_FORMATS = ("table", "json", "sarif")
+_FORMATS = ("table", "json", "sarif", "ndjson", "summary")
 
 #: Limiares de `--fail-on`, do mais severo para o mais brando. Cada um reprova
 #: também tudo que for pior que ele -- mesma semântica de `build --fail-on`,
@@ -74,6 +96,22 @@ def analyze(
     wide: bool = typer.Option(
         False, "--wide", help="Render the table without truncating any column"
     ),
+    platform: str | None = typer.Option(
+        None,
+        "--platform",
+        help="os/architecture, with an optional /variant, e.g. linux/arm64 (default: linux/amd64)",
+    ),
+    time_budget: float | None = typer.Option(
+        None,
+        "--time-budget",
+        help=(
+            "Total seconds for the whole run; when it ends first the result is PARTIAL "
+            "(exit 5), or there is none (exit 4)"
+        ),
+    ),
+    diff: bool = typer.Option(
+        False, "--diff", help="Show findings new or gone since the previous compatible run"
+    ),
 ) -> None:
     """Deep-analyze a specific Docker image tag."""
     if no_color or ci_mode:
@@ -86,6 +124,7 @@ def analyze(
             f"Use one of: {', '.join(_FORMATS)}"
         )
         raise typer.Exit(EXIT_ERROR)
+    options = parse_run_options(platform=platform, time_budget=time_budget)
     # `--fix` produz um Dockerfile; `json`/`sarif` produzem um relatório. Um
     # `--output` só pode receber um dos dois, e adivinhar qual seria pior que
     # recusar.
@@ -112,6 +151,8 @@ def analyze(
             fail_on=fail_on,
             fix=fix,
             ci_mode=ci_mode,
+            options=options,
+            diff=diff,
         )
     )
 
@@ -135,24 +176,56 @@ async def _analyze(
     fail_on: str | None = None,
     fix: bool = False,
     ci_mode: bool = False,
+    options: RunOptions | None = None,
+    diff: bool = False,
 ) -> None:
-    use_case = await build_analyze_use_case()
+    options = options or parse_run_options()
+    # The clock starts before anything is built, so the budget covers the whole
+    # run, not just the scan.
+    deadline = Deadline(options.time_budget) if options.time_budget else Deadline.unbounded()
+    instrumentation = RunInstrumentation()
+    instrumentation.add("startup", cli_package.startup_seconds())
+    run_id = RunStore.new_run_id()
+    machine = ci_mode or output_format in ("json", "sarif", "ndjson", "summary")
+    events = EventStream(
+        [NdjsonSink(sys.stdout)] if output_format == "ndjson" else [],
+        command="analyze",
+        run_id=run_id,
+    )
+    events.emit(
+        RUN_STARTED,
+        query=image,
+        platform=str(options.platform),
+        time_budget_seconds=deadline.total,
+    )
+    use_case = await build_analyze_use_case(
+        platform=options.platform, deadline=deadline, instrumentation=instrumentation
+    )
     try:
         status_msg = (
             f"Scanning {image}... (first run may take a few minutes: the "
             "vulnerability database is downloaded once)"
         )
-        progress = contextlib.nullcontext() if ci_mode else scan_status(status_msg)
+        progress = contextlib.nullcontext() if machine else scan_status(status_msg)
         with progress:
             result = await use_case.execute(image)
     except ValueError as e:
         console.print(f"[red]Scan failed: {e}[/red]")
+        events.emit(RUN_FINISHED, final=True, status="ERROR", error=str(e))
         raise typer.Exit(EXIT_ERROR) from e
+    except asyncio.CancelledError:
+        events.emit(RUN_FINISHED, final=True, status="CANCELLED")
+        raise
     finally:
         # The scanner and the repository's connection pool are held for the
         # length of the run; releasing them is the caller's job. Rendering
         # below needs only `result`, so this is the right moment.
         await use_case.close()
+
+    summary = summarize_analysis(
+        result, completeness=result.completeness, pending_checks=result.pending_checks
+    )
+    instrumentation.mark_first_result()
 
     if not result.scan.is_verified:
         # Sem scan não há veredito. Sair 0 aqui deixaria um portão de CI
@@ -162,25 +235,118 @@ async def _analyze(
         # inexistente ocupa várias linhas e menciona o socket do Docker,
         # que este modo de scan nem usa. O texto completo continua no
         # arquivo de log e em `--format json`.
-        if ci_mode or output_format in ("json", "sarif"):
+        out_of_time = result.completeness == "NO_RESULT"
+        code = exit_code_for_completeness(EXIT_ERROR, result.completeness)
+        if output_format == "ndjson":
+            events.emit(
+                RUN_FINISHED,
+                final=True,
+                status=result.completeness,
+                exit_code=code,
+                pending=result.pending_checks,
+                summary=summary.model_dump(mode="json"),
+            )
+        elif output_format == "summary":
+            _emit_summary(summary, code, run_id)
+        elif ci_mode or output_format in ("json", "sarif"):
             _emit_machine_readable(result, output_format, output)
         else:
             console.print(
                 f"[red]Scan did not complete for {safe(result.image.full_reference)}:[/red] "
                 f"{safe(describe_scan_failure(result.scan.error_kind, result.scan.error_message))}"
             )
-        raise typer.Exit(EXIT_ERROR)
+            if out_of_time:
+                console.print("[yellow]The time budget ended before the scan finished.[/yellow]")
+        raise typer.Exit(code)
+
+    fail_code = _fail_on_exit_code(
+        result, fail_on, machine_readable=machine, quiet=output_format in ("ndjson", "summary")
+    )
+    code = exit_code_for_completeness(
+        fail_code, result.completeness, violation=fail_code == EXIT_POLICY
+    )
+    saved = _save_analysis_run(result, summary, options, run_id)
+    previous_diff = _diff_against_previous(saved, diff)
+
+    if output_format == "ndjson":
+        events.emit(
+            RUN_FINISHED,
+            final=True,
+            status=result.completeness,
+            exit_code=code,
+            pending=result.pending_checks,
+            summary=summary.model_dump(mode="json"),
+            result=result.model_dump(mode="json"),
+        )
+        raise typer.Exit(code)
+
+    if output_format == "summary":
+        _emit_summary(summary, code, saved.get("run_id", "") if saved else "")
+        raise typer.Exit(code)
 
     if output_format in ("json", "sarif"):
         _emit_machine_readable(result, output_format, output)
-        raise typer.Exit(_fail_on_exit_code(result, fail_on, machine_readable=True))
+        raise typer.Exit(code)
 
     if fix:
         _emit_fix(result, output)
-        raise typer.Exit(_fail_on_exit_code(result, fail_on))
+        raise typer.Exit(code)
 
+    render_decision(console, summary)
     _render_table(result, wide)
-    raise typer.Exit(_fail_on_exit_code(result, fail_on))
+    if previous_diff is not None:
+        print_run_diff(console, previous_diff)
+    if saved:
+        console.print(f"[dim]Run id: {saved['run_id']}[/dim]")
+    raise typer.Exit(code)
+
+
+def _emit_summary(summary: DecisionSummary, code: int, run_id: str) -> None:
+    """The versioned CI verdict, alone on stdout."""
+    ci = build_ci_summary(summary, command="analyze", exit_code=code, run_id=run_id)
+    sys.stdout.write(json.dumps(ci.model_dump(by_alias=True), indent=2, default=str) + "\n")
+
+
+def _save_analysis_run(
+    result: ImageAnalysis, summary: DecisionSummary, options: RunOptions, run_id: str
+) -> dict[str, str]:
+    """Keep the run for `--diff` and `export --run`; never fails the command."""
+    try:
+        saved_id = build_run_store().save(
+            command="analyze",
+            query=result.image.requested_reference or result.image.full_reference,
+            platform=str(options.platform),
+            filters="",
+            profile="",
+            completeness=result.completeness,
+            result=result.model_dump(mode="json"),
+            summary=summary.model_dump(mode="json"),
+            version=__version__,
+            run_id=run_id,
+        )
+    except Exception as e:
+        logger.warning(f"Could not save the run: {e}")
+        return {}
+    return {"run_id": saved_id} if saved_id else {}
+
+
+def _diff_against_previous(saved: dict[str, str], wanted: bool) -> RunDiff | None:
+    if not wanted or not saved:
+        return None
+    try:
+        store = build_run_store()
+        current = store.load(saved["run_id"])
+        if current is None:
+            return None
+        previous = store.previous_compatible(current, scope_of(current))
+    except Exception as e:
+        logger.warning(f"Could not compare with the previous run: {e}")
+        return None
+    if previous is None:
+        return RunDiff(
+            compatible=False, note="there is no earlier run that asked the same question"
+        )
+    return diff_runs(previous, current)
 
 
 def _emit_fix(result: ImageAnalysis, output: str) -> None:
@@ -214,7 +380,11 @@ def _fix_summary(plan: RemediationPlan) -> str:
 
 
 def _fail_on_exit_code(
-    result: ImageAnalysis, fail_on: str | None, *, machine_readable: bool = False
+    result: ImageAnalysis,
+    fail_on: str | None,
+    *,
+    machine_readable: bool = False,
+    quiet: bool = False,
 ) -> int:
     """Honours the tool-wide exit contract: 2 means "measured, and it fails".
 
@@ -256,7 +426,8 @@ def _fail_on_exit_code(
     if machine_readable:
         # stdout is the report contract. Diagnostics belong on stderr so a
         # rejected gate still leaves one parseable JSON/SARIF document.
-        sys.stderr.write("\n".join(lines) + "\n")
+        if not quiet or sys.stderr.isatty():
+            sys.stderr.write("\n".join(lines) + "\n")
     else:
         console.print(f"\n[bold red]{lines[0]}[/bold red]")
         for line in lines[1:]:

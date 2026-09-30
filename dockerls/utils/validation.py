@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # Supports plain names ("node"), tags ("node:22-alpine"), digest
 # references ("node@sha256:<64 hex>"), tag+digest combined, and private
@@ -85,3 +89,26 @@ def validate_workers(value: int, name: str = "workers") -> int:
     if value < MIN_WORKERS or value > MAX_WORKERS:
         raise ValueError(f"{name} must be between {MIN_WORKERS} and {MAX_WORKERS}")
     return value
+
+
+def validate_output_path(value: str) -> Path:
+    """A destination the user typed, checked before anything is written to it.
+
+    Refuses what is almost certainly a mistake or an attempt to make the tool
+    overwrite something else: an empty value, a NUL byte, an existing directory,
+    a symbolic link (the write would land wherever it points), and anything that
+    exists but is not a regular file. The parent directory is created by the
+    caller; this only judges the name.
+    """
+    from pathlib import Path
+
+    if not value or not value.strip():
+        raise ValueError("the output path is empty")
+    if "\x00" in value:
+        raise ValueError("the output path contains a NUL byte")
+    path = Path(value).expanduser()
+    if path.is_symlink():
+        raise ValueError(f"{path} is a symbolic link; refusing to write through it")
+    if path.exists() and not path.is_file():
+        raise ValueError(f"{path} exists and is not a regular file")
+    return path

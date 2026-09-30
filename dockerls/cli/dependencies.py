@@ -664,6 +664,7 @@ async def build_analyze_use_case(
         tag_history=TagHistoryStore(cache),
         scan_history=ScanHistoryStore(cache),
         measurement=measurement,
+        deadline=deadline,
     )
 
 

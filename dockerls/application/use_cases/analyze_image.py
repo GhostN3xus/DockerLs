@@ -12,15 +12,20 @@ from dockerls.application.use_cases.recommend_images import (
     _eol_status,
 )
 from dockerls.domain.entities.image import DockerImage
+from dockerls.domain.entities.image_facts import HardeningFacts
 from dockerls.domain.value_objects.image_reference import split_repository_and_tag
 from dockerls.domain.value_objects.platform import DEFAULT_PLATFORM
 from dockerls.domain.value_objects.remediation_score import RemediationScore
 from dockerls.domain.value_objects.security_score import SecurityScore
 from dockerls.domain.value_objects.security_tier import SecurityTier
+from dockerls.domain.value_objects.tristate import Tristate
+from dockerls.utils.deadline import Deadline, DeadlineExceededError, run_within
 from dockerls.utils.ignore_file import active_ignored_cve_ids, load_ignore_rules
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
+    from typing import Any
 
     from dockerls.application.services.hardening_analysis import HardeningAnalyzer
     from dockerls.application.services.scan_history_store import ScanHistoryStore
@@ -47,6 +52,7 @@ class AnalyzeImageUseCase:
         tag_history: TagHistoryStore | None = None,
         scan_history: ScanHistoryStore | None = None,
         measurement: MeasurementService | None = None,
+        deadline: Deadline | None = None,
     ):
         self._repository = repository
         self._scanner = scanner
@@ -64,6 +70,18 @@ class AnalyzeImageUseCase:
             scanner,
             resolver=hardening,
         )
+        # The run's time budget. What it cuts short is recorded, not hidden.
+        self._deadline = deadline or Deadline.unbounded()
+        self._pending: list[str] = []
+
+    async def _within(
+        self, what: str, operation: Callable[[], Awaitable[Any]], default: Any
+    ) -> Any:
+        try:
+            return await run_within(self._deadline, operation)
+        except DeadlineExceededError:
+            self._pending.append(f"{what} (the time budget ended first)")
+            return default
 
     @property
     def concurrency(self) -> int:
@@ -75,6 +93,7 @@ class AnalyzeImageUseCase:
         return self._measurement
 
     async def execute(self, image_reference: str) -> ImageAnalysis:
+        self._pending = []
         name, tag = self._parse_reference(image_reference)
         image = await self._repository.get_image_metadata(name, tag)
         if not image:
@@ -86,6 +105,10 @@ class AnalyzeImageUseCase:
                 # outra imagem, apresentada com o nome desta.
                 image.full_reference = image_reference
 
+        if "@" in image_reference:
+            # The reference is the identity that was asked for; a tag's
+            # metadata (looked up under `latest`) must not rename it.
+            image.full_reference = image_reference
         image.requested_reference = image_reference
         measured = await self._measurement.measure(image)
         scan = measured.scan
@@ -95,18 +118,29 @@ class AnalyzeImageUseCase:
             ]
             if len(filtered) != len(scan.vulnerabilities):
                 scan = scan.model_copy(update={"vulnerabilities": filtered})
-        if self._threat_intel is not None:
-            scan = await _enrich_with_threat_intel(
-                scan, self._threat_intel, self._exploitdb, self._osv
+        if self._threat_intel is not None and scan.is_verified:
+            threat_intel = self._threat_intel
+            scan = await self._within(
+                "threat intelligence",
+                lambda: _enrich_with_threat_intel(scan, threat_intel, self._exploitdb, self._osv),
+                scan,
             )
 
         product = name.split("/")[-1]
         match = re.match(r"^\d+(?:\.\d+){0,3}", tag)
         version = match.group(0) if match else ""
 
-        eol_status = await _eol_status(self._eol_checker, product, version)
+        eol_status = await self._within(
+            "end-of-life lookup",
+            lambda: _eol_status(self._eol_checker, product, version),
+            Tristate.UNKNOWN,
+        )
         is_eol = eol_status.is_true
-        is_lts = await self._eol_checker.is_lts(product, version)
+        is_lts = await self._within(
+            "long-term-support lookup",
+            lambda: self._eol_checker.is_lts(product, version),
+            False,
+        )
 
         # `SecurityScore` requires a completed scan and raises on anything
         # else. A failed scan is not scored at all here: the tier falls back
@@ -138,8 +172,13 @@ class AnalyzeImageUseCase:
         # they were asked about with every hardening fact unknown, while
         # the candidates they are compared against carry measurements --
         # and a comparison between a measurement and a blank is not one.
-        if self._hardening is not None:
-            digest, facts = await self._hardening.analyze(image, scan)
+        if self._hardening is not None and scan.is_verified:
+            hardening = self._hardening
+            digest, facts = await self._within(
+                "OCI config inspection",
+                lambda: hardening.analyze(image, scan),
+                ("", HardeningFacts()),
+            )
             if digest and not image.digest:
                 image.digest = digest
             apply_facts(analysis, facts)
@@ -173,6 +212,11 @@ class AnalyzeImageUseCase:
                 analysis.vuln_trend_note = after.explain()
 
         finalize_verdict(analysis, cross_validated=False)
+        analysis.pending_checks = list(dict.fromkeys(self._pending))
+        if scan.error_kind.value == "DEADLINE_EXCEEDED":
+            analysis.completeness = "NO_RESULT"
+        elif self._pending:
+            analysis.completeness = "PARTIAL"
         return analysis
 
     @staticmethod
