@@ -164,31 +164,53 @@ def _priority(image: DockerImage) -> tuple[int, float, str]:
 
 
 def _representative_order(images: Sequence[DockerImage]) -> list[DockerImage]:
-    """Ordem que cobre linhas diferentes antes de repetir uma.
+    """Ordem que cobre versões e variantes diferentes antes de repetir uma.
 
     A ordem de `_priority` -- oficial, mais nova, nome -- enche um orçamento
     pequeno com as N tags publicadas mais recentemente, que costumam ser
-    variantes da mesma linha. Aqui as tags são agrupadas por (major da versão,
-    família de distribuição, variante), cada grupo é ordenado por `_priority`,
-    e o orçamento é gasto em rodadas: o melhor de cada grupo primeiro, depois
-    o segundo melhor de cada um. Quem mede cinco tags vê cinco respostas
-    diferentes à pergunta "qual imagem", não cinco patches do mesmo `22-alpine`.
+    variantes da mesma linha. Aqui a escolha é em rodadas, em dois níveis:
+
+    * as tags são agrupadas pela **versão** (o major que o nome cita) e, dentro
+      dela, pela **variante** (família de distribuição + runtime/dev);
+    * cada rodada toma, de cada versão, a melhor tag da variante da vez -- a
+      primeira rodada é uma tag por versão, a segunda a segunda variante de cada
+      versão, e assim por diante.
+
+    Quem mede quatro tags vê quatro respostas diferentes à pergunta "qual
+    imagem", não quatro patches do mesmo `22-alpine`.
     """
-    groups: dict[tuple[tuple[int, ...], str, str], list[DockerImage]] = {}
+    by_version: dict[tuple[int, ...], dict[tuple[str, str], list[DockerImage]]] = {}
     for image in images:
         version, _ = _version_and_variant(image.tag)
-        key = ((version or ())[:1], family_of_tag(image), variant_of_tag(image).value)
-        groups.setdefault(key, []).append(image)
-    ordered_groups = sorted(
-        (sorted(members, key=_priority) for members in groups.values()),
-        key=lambda members: _priority(members[0]),
-    )
+        variant = (family_of_tag(image), variant_of_tag(image).value)
+        by_version.setdefault((version or ())[:1], {}).setdefault(variant, []).append(image)
+
+    # Within a version: variants ordered by their best member's priority, each
+    # variant's members ordered the same way.
+    lines: list[list[DockerImage]] = []
+    for variants in by_version.values():
+        ordered_variants = sorted(
+            (sorted(members, key=_priority) for members in variants.values()),
+            key=lambda members: _priority(members[0]),
+        )
+        # Depth-first inside a line: best of variant 1, best of variant 2, ...,
+        # then the runners-up. That is the order a line offers its options.
+        line: list[DockerImage] = []
+        depth = 0
+        while len(line) < sum(len(m) for m in ordered_variants):
+            for members in ordered_variants:
+                if depth < len(members):
+                    line.append(members[depth])
+            depth += 1
+        lines.append(line)
+    lines.sort(key=lambda line: _priority(line[0]))
+
     ordered: list[DockerImage] = []
     depth = 0
     while len(ordered) < len(images):
-        for members in ordered_groups:
-            if depth < len(members):
-                ordered.append(members[depth])
+        for line in lines:
+            if depth < len(line):
+                ordered.append(line[depth])
         depth += 1
     return ordered
 

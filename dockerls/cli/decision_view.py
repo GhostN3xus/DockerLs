@@ -49,7 +49,7 @@ def render_decision(console: Console, summary: DecisionSummary) -> None:
     console.print(f"\n[{style}]{safe(summary.headline)}[/{style}]")
     if summary.kind is Kind.NONE:
         _render_problems(console, summary)
-        console.print(f"  [bold]Next:[/bold] {safe(summary.next_action)}")
+        console.print(f"  [bold]Next:[/bold] {safe(summary.next_action)}", soft_wrap=True)
         return
 
     rows: list[tuple[str, str]] = [("Image", f"[cyan bold]{safe(summary.image)}[/cyan bold]")]
@@ -79,7 +79,9 @@ def render_decision(console: Console, summary: DecisionSummary) -> None:
 
     width = max(len(label) for label, _ in rows)
     for label, value in rows:
-        console.print(f"  [bold]{label:<{width}}[/bold]  {value}")
+        # soft_wrap: a digest or a pinned reference is only useful whole, and
+        # breaking it at the terminal width makes it uncopyable.
+        console.print(f"  [bold]{label:<{width}}[/bold]  {value}", soft_wrap=True)
     _render_problems(console, summary)
     console.print(f"  [bold]Next:[/bold] {safe(summary.next_action)}")
 
@@ -130,4 +132,4 @@ def _render_problems(console: Console, summary: DecisionSummary) -> None:
             style = _CATEGORY_STYLE[Category(category)]
         except ValueError:
             style = "white"
-        console.print(f"    [{style}]{category}[/{style}] {safe(rest)}")
+        console.print(f"    [{style}]{category}[/{style}] {safe(rest)}", soft_wrap=True)

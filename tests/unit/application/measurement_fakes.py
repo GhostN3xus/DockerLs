@@ -118,6 +118,7 @@ class FakeScanner(ScannerInterface):
         self.latency = latency
         self.calls: list[tuple[str, str | None]] = []
         self.findings: dict[str, int] = {}  # digest -> number of CRITICAL findings
+        self.cve_offsets: dict[str, int] = {}  # digest -> first CVE number (default 0)
         self.live_tags: dict[str, str] = {}  # "name:tag" -> digest it points at *now*
         self.on_scan: Any = None
         self.raise_for: set[str] = set()
@@ -162,7 +163,7 @@ class FakeScanner(ScannerInterface):
             status = self.status_for.get(image_reference, ScanStatus.OK)
             vulns = [
                 Vulnerability(
-                    cve_id=f"CVE-2026-{i:04d}",
+                    cve_id=f"CVE-2026-{self.cve_offsets.get(digest, 0) + i:04d}",
                     severity=Severity.CRITICAL,
                     package_name="openssl",
                     installed_version="3.0.0",

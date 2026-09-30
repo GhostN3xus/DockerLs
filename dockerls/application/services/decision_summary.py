@@ -307,7 +307,7 @@ def summarize_analysis(
         if analysis.production_ready and completeness == "COMPLETE"
         else Kind.BEST_MEASURED
     )
-    summary.headline = _headline(summary, analysis_only=True)
+    summary.headline = _analysis_headline(summary)
     _problems(summary, baseline_met=baseline_met, infrastructure=Counter(), filters_note="")
     summary.next_action = _next_action(summary, Counter(), "")
     return summary
@@ -344,12 +344,22 @@ def summarize_recommendation(
     return summary
 
 
+def _analysis_headline(summary: DecisionSummary) -> str:
+    """For one image the user asked about: a finding, never a recommendation."""
+    if summary.completeness != "COMPLETE":
+        return "Partial result for this image (time budget ended)"
+    if summary.production_ready:
+        return "This image passes the production-readiness policy"
+    if summary.blockers:
+        return "This image does not pass the production-readiness policy"
+    return "This image was measured; it is not evaluated as production ready"
+
+
 def _headline(
     summary: DecisionSummary,
     *,
     baseline_met: bool | None = None,
     result: AnalysisResult | None = None,
-    analysis_only: bool = False,
 ) -> str:
     if summary.kind is Kind.RECOMMENDED:
         return "Recommended image"
@@ -362,7 +372,7 @@ def _headline(
         qualifiers.append(f"{result.deferred_count} discovered tags were not measured")
     if result is not None and result.filters_note:
         qualifiers.append("filters applied")
-    if baseline_met is False and not analysis_only:
+    if baseline_met is False:
         qualifiers.append("none meets the baseline")
     elif summary.blockers:
         qualifiers.append("has readiness blockers")

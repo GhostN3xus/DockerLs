@@ -73,6 +73,7 @@ class AnalyzeImageUseCase:
         # The run's time budget. What it cuts short is recorded, not hidden.
         self._deadline = deadline or Deadline.unbounded()
         self._pending: list[str] = []
+        self._hardening_enabled = hardening is not None
 
     async def _within(
         self, what: str, operation: Callable[[], Awaitable[Any]], default: Any
@@ -212,12 +213,25 @@ class AnalyzeImageUseCase:
                 analysis.vuln_trend_note = after.explain()
 
         finalize_verdict(analysis, cross_validated=False)
-        analysis.pending_checks = list(dict.fromkeys(self._pending))
+        # Two different things are "pending": what the time budget cut short
+        # (which makes the run PARTIAL) and what `analyze` never does (which
+        # limits what its answer may claim, but is not an interruption).
+        analysis.pending_checks = list(dict.fromkeys([*self._not_performed(), *self._pending]))
         if scan.error_kind.value == "DEADLINE_EXCEEDED":
             analysis.completeness = "NO_RESULT"
         elif self._pending:
             analysis.completeness = "PARTIAL"
         return analysis
+
+    def _not_performed(self) -> list[str]:
+        """Checks `analyze` does not run, so its answer never reads as more than it is."""
+        skipped = ["cross-validation with a second scanner (not run by analyze)"]
+        hardening = self._hardening
+        if hardening is None or not hardening.inspects:
+            skipped.append("OCI config inspection (not run)")
+        if self._threat_intel is None:
+            skipped.append("threat intelligence (disabled)")
+        return skipped
 
     @staticmethod
     def _history_key(image: DockerImage) -> str:

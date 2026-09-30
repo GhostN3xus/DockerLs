@@ -82,7 +82,10 @@ _RANGE = re.compile(r"^v?(\d+(?:\.\d+)*)\s*-\s*v?(\d+(?:\.\d+)*)$")
 _PLAIN = re.compile(r"^v?(\d+(?:\.\d+)*)(?:\.x)?$")
 
 _KNOWN_FAMILIES = frozenset(_FAMILY_TOKENS.values()) | {
+    "chainguard",
+    "redhat",
     "rhel",
+    "centos",
     "rocky",
     "almalinux",
     "amazon",
