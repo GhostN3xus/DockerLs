@@ -1,9 +1,9 @@
 {
   "title": "DockerLs end-to-end timings (REAL CLI, real Trivy, real registries)",
   "environment": {
-    "date": "2026-09-30T15:10:58+00:00",
+    "date": "2026-09-30T15:20:32+00:00",
     "dockerls": "1.0.16",
-    "git_commit": "0bd421c",
+    "git_commit": "59ad9e5",
     "git_dirty": "yes",
     "python": "3.11.15",
     "os": "Linux 6.18.44-fc-v50",
@@ -15,18 +15,31 @@
     "network": "real, unthrottled by this script"
   },
   "parameters": {
-    "repeat": 3,
+    "repeat": 5,
     "engine": "both"
   },
   "rows": [
     {
+      "scenario": "[python] analyze, cold everything",
+      "kind": "real",
+      "n": 1,
+      "median_s": 15.800030327000059,
+      "p95_s": 15.800030327000059,
+      "min_s": 15.800030327000059,
+      "max_s": 15.800030327000059,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['scan']"
+    },
+    {
       "scenario": "[python] analyze amd64, store cold",
       "kind": "real",
-      "n": 3,
-      "median_s": 6.115822619000028,
-      "p95_s": 6.224763265001457,
-      "min_s": 6.005298387999574,
-      "max_s": 6.224763265001457,
+      "n": 5,
+      "median_s": 5.636915371998839,
+      "p95_s": 5.783392505998563,
+      "min_s": 5.310636082998826,
+      "max_s": 5.783392505998563,
       "counters": {
         "exit": 0.0
       },
@@ -35,11 +48,11 @@
     {
       "scenario": "[python] analyze amd64, store warm",
       "kind": "real",
-      "n": 3,
-      "median_s": 3.494072776000394,
-      "p95_s": 3.975580958998762,
-      "min_s": 3.335882997000226,
-      "max_s": 3.975580958998762,
+      "n": 5,
+      "median_s": 3.0458898849992693,
+      "p95_s": 3.3928909779988317,
+      "min_s": 3.025645063000411,
+      "max_s": 3.3928909779988317,
       "counters": {
         "exit": 0.0
       },
@@ -48,11 +61,11 @@
     {
       "scenario": "[python] analyze arm64, store cold",
       "kind": "real",
-      "n": 3,
-      "median_s": 6.503997607000201,
-      "p95_s": 6.9828315770009795,
-      "min_s": 6.4778368580009555,
-      "max_s": 6.9828315770009795,
+      "n": 5,
+      "median_s": 5.984947948998524,
+      "p95_s": 6.409738327000014,
+      "min_s": 5.510122460000275,
+      "max_s": 6.409738327000014,
       "counters": {
         "exit": 0.0
       },
@@ -61,11 +74,11 @@
     {
       "scenario": "[python] compare 2 images, store cold",
       "kind": "real",
-      "n": 3,
-      "median_s": 8.307948404000854,
-      "p95_s": 8.33706742999857,
-      "min_s": 7.606128830999296,
-      "max_s": 8.33706742999857,
+      "n": 5,
+      "median_s": 6.778604106000785,
+      "p95_s": 7.575253089000398,
+      "min_s": 6.676374747999944,
+      "max_s": 7.575253089000398,
       "counters": {
         "exit": 0.0
       },
@@ -74,24 +87,37 @@
     {
       "scenario": "[python] compare 2 images, store warm",
       "kind": "real",
-      "n": 3,
-      "median_s": 4.559721884001192,
-      "p95_s": 4.622523136000382,
-      "min_s": 4.541728096999577,
-      "max_s": 4.622523136000382,
+      "n": 5,
+      "median_s": 3.045896494000772,
+      "p95_s": 3.2755286949995934,
+      "min_s": 2.887235513999258,
+      "max_s": 3.2755286949995934,
       "counters": {
         "exit": 0.0
       },
       "note": "exit codes [0]; origin n/a"
     },
     {
+      "scenario": "[go] analyze, cold everything",
+      "kind": "real",
+      "n": 1,
+      "median_s": 13.493744313000207,
+      "p95_s": 13.493744313000207,
+      "min_s": 13.493744313000207,
+      "max_s": 13.493744313000207,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['scan']"
+    },
+    {
       "scenario": "[go] analyze amd64, store cold",
       "kind": "real",
-      "n": 3,
-      "median_s": 6.1012276010005735,
-      "p95_s": 6.159190840999145,
-      "min_s": 5.89464470799976,
-      "max_s": 6.159190840999145,
+      "n": 5,
+      "median_s": 5.8565734479998355,
+      "p95_s": 6.465522112001054,
+      "min_s": 5.535904514001231,
+      "max_s": 6.465522112001054,
       "counters": {
         "exit": 0.0
       },
@@ -100,11 +126,11 @@
     {
       "scenario": "[go] analyze amd64, store warm",
       "kind": "real",
-      "n": 3,
-      "median_s": 3.5486227269993833,
-      "p95_s": 3.6849361090007733,
-      "min_s": 3.3843233269999473,
-      "max_s": 3.6849361090007733,
+      "n": 5,
+      "median_s": 3.185858595999889,
+      "p95_s": 3.2785342679999303,
+      "min_s": 2.924762472999646,
+      "max_s": 3.2785342679999303,
       "counters": {
         "exit": 0.0
       },
@@ -113,11 +139,11 @@
     {
       "scenario": "[go] analyze arm64, store cold",
       "kind": "real",
-      "n": 3,
-      "median_s": 6.4905667700004415,
-      "p95_s": 6.511423371999626,
-      "min_s": 5.714152069000193,
-      "max_s": 6.511423371999626,
+      "n": 5,
+      "median_s": 5.92547638600081,
+      "p95_s": 6.2997331240003405,
+      "min_s": 5.632719655999608,
+      "max_s": 6.2997331240003405,
       "counters": {
         "exit": 0.0
       },
@@ -126,11 +152,11 @@
     {
       "scenario": "[go] compare 2 images, store cold",
       "kind": "real",
-      "n": 3,
-      "median_s": 7.518131363000066,
-      "p95_s": 7.764741607999895,
-      "min_s": 7.464692635001484,
-      "max_s": 7.764741607999895,
+      "n": 5,
+      "median_s": 6.435732031000953,
+      "p95_s": 6.6633167270010745,
+      "min_s": 6.4329142459992,
+      "max_s": 6.6633167270010745,
       "counters": {
         "exit": 0.0
       },
@@ -139,11 +165,11 @@
     {
       "scenario": "[go] compare 2 images, store warm",
       "kind": "real",
-      "n": 3,
-      "median_s": 4.7630672119994415,
-      "p95_s": 4.768057069000861,
-      "min_s": 4.436373764001473,
-      "max_s": 4.768057069000861,
+      "n": 5,
+      "median_s": 2.813635088999945,
+      "p95_s": 3.2093501840008685,
+      "min_s": 2.7320663430000423,
+      "max_s": 3.2093501840008685,
       "counters": {
         "exit": 0.0
       },
