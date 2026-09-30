@@ -2,33 +2,51 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections import Counter
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import typer
+from loguru import logger
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from dockerls import __version__
+from dockerls import cli as cli_package
+from dockerls.application.services.ci_summary import build_ci_summary
+from dockerls.application.services.decision_summary import (
+    DecisionSummary,
+    summarize_recommendation,
+)
+from dockerls.application.services.events import EventStream, NdjsonSink
+from dockerls.application.services.instrumentation import RunInstrumentation
+from dockerls.application.services.run_diff import RunDiff, diff_runs
 from dockerls.application.services.source_registry import UnknownSourceError
+from dockerls.cli.decision_view import render_decision
 from dockerls.cli.dependencies import (
     build_recommend_use_case,
+    build_run_store,
     enable_console_logging,
     resolve_tag_limit,
 )
 from dockerls.cli.image_names import display_reference, reject_tagged_reference
 from dockerls.cli.options import OutputFormat, parse_output_format
 from dockerls.cli.progress import RichScanObserver
+from dockerls.cli.run_diff_view import print_run_diff
+from dockerls.cli.run_options import RunOptions, parse_run_options
 from dockerls.cli.scan_failure import short_reason
 from dockerls.cli.text import safe
 from dockerls.cli.validators import check_limit, check_threshold, check_workers
 from dockerls.domain.value_objects.confidence import Confidence
 from dockerls.domain.value_objects.security_tier import SecurityTier, Tier
 from dockerls.domain.value_objects.tristate import Tristate
-from dockerls.exit_codes import EXIT_ERROR, EXIT_OK
+from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, exit_code_for_completeness
 from dockerls.infrastructure.evidence import slugify_reference
+from dockerls.infrastructure.run_store import RunStore, scope_of
+from dockerls.utils.deadline import Deadline
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -52,6 +70,13 @@ EXIT_BASELINE_MET = EXIT_OK
 EXIT_ERROR_CODE = EXIT_ERROR
 EXIT_ALTERNATIVES_FOUND = 2
 EXIT_NONE_FOUND = 3
+
+RECOMMEND_FORMATS = (
+    OutputFormat.TABLE,
+    OutputFormat.JSON,
+    OutputFormat.NDJSON,
+    OutputFormat.SUMMARY,
+)
 
 DISPUTED_SCORE_LABEL = "[yellow]!disputed[/yellow]"
 
@@ -109,11 +134,15 @@ def recommend(
     ),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
     no_progress: bool = typer.Option(False, "--no-progress", help="Disable the progress display"),
-    no_cross_validate: bool = typer.Option(
-        False, "--no-cross-validate", help="Skip second-scanner validation of top candidates"
+    cross_validate: bool | None = typer.Option(
+        None,
+        "--cross-validate/--no-cross-validate",
+        help="Second-scanner validation of the top candidates [default: on, or per --profile]",
     ),
-    no_hub_check: bool = typer.Option(
-        False, "--no-hub-check", help="Skip registry tag existence verification"
+    hub_check: bool | None = typer.Option(
+        None,
+        "--hub-check/--no-hub-check",
+        help="Registry tag existence verification [default: on, or per --profile]",
     ),
     no_hardened: bool = typer.Option(
         False, "--no-hardened", help="Search Docker Hub only (skip Chainguard/Distroless)"
@@ -136,13 +165,58 @@ def recommend(
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Also print logs to stderr (they always go to the log file)"
     ),
+    platform: str | None = typer.Option(
+        None,
+        "--platform",
+        help="os/architecture, with an optional /variant, e.g. linux/arm64 (default: linux/amd64)",
+    ),
+    time_budget: float | None = typer.Option(
+        None,
+        "--time-budget",
+        help=(
+            "Total seconds for the whole run. When it ends first the measurements already "
+            "done are shown as PARTIAL (exit 5), or exit 4 if there are none"
+        ),
+    ),
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        help="quick | standard | audit: how much to measure and verify (see docs/PROFILES.md)",
+    ),
+    runtime_version: str | None = typer.Option(
+        None,
+        "--runtime-version",
+        help="Only tags in this runtime version or range: 22, 22.5, '>=20,<23' or 20-22",
+    ),
+    distro: str | None = typer.Option(
+        None, "--distro", help="Only this distribution family: alpine, debian, ubuntu, wolfi, ..."
+    ),
+    variant: str | None = typer.Option(
+        None, "--variant", help="Only runtime or dev variants of an image"
+    ),
+    details: bool = typer.Option(
+        False, "--details", help="Also show the reasoning, per-image evidence and diagnostics"
+    ),
+    diff: bool = typer.Option(
+        False,
+        "--diff",
+        help="Show findings that are new or gone since the previous compatible run",
+    ),
 ) -> None:
     """Recommend the most secure Docker image tags."""
     if no_color:
         console.no_color = True
     if verbose:
         enable_console_logging()
-    fmt = parse_output_format(output_format)
+    fmt = parse_output_format(output_format, RECOMMEND_FORMATS)
+    options = parse_run_options(
+        platform=platform,
+        time_budget=time_budget,
+        profile=profile,
+        runtime_version=runtime_version,
+        distro=distro,
+        variant=variant,
+    )
 
     # Validated here, before any dependency is built: an out-of-range value
     # must produce a readable CLI error rather than a traceback from deep
@@ -182,13 +256,27 @@ def recommend(
                 workers,
                 fail_on,
                 fmt,
-                show_progress=not no_progress and fmt != OutputFormat.JSON,
-                cross_validate=not no_cross_validate,
-                verify_hub_tags=not no_hub_check,
+                show_progress=not no_progress and fmt is OutputFormat.TABLE,
+                # Without a profile these keep their historical meaning (on
+                # unless switched off); with one, only an explicit flag
+                # overrides what the profile says.
+                cross_validate=(
+                    cross_validate
+                    if cross_validate is not None
+                    else (None if options.profile is not None else True)
+                ),
+                verify_hub_tags=(
+                    hub_check
+                    if hub_check is not None
+                    else (None if options.profile is not None else True)
+                ),
                 include_hardened=not no_hardened,
                 use_cache=not no_cache,
                 sources=list(source) or None,
                 all_sources=all_sources,
+                options=options,
+                details=details,
+                diff=diff,
             )
         )
     except UnknownSourceError as e:
@@ -214,13 +302,29 @@ async def _recommend(
     fail_on: FailOn,
     output_format: OutputFormat,
     show_progress: bool = True,
-    cross_validate: bool = True,
-    verify_hub_tags: bool = True,
+    cross_validate: bool | None = True,
+    verify_hub_tags: bool | None = True,
     include_hardened: bool = True,
     use_cache: bool = True,
     sources: list[str] | None = None,
     all_sources: bool = False,
+    options: RunOptions | None = None,
+    details: bool = False,
+    diff: bool = False,
 ) -> None:
+    options = options or parse_run_options()
+    # The clock starts here, before anything is built: the budget covers
+    # discovery, database preparation, scans, retries, enrichment and the
+    # final checks -- everything a run does.
+    deadline = Deadline(options.time_budget) if options.time_budget else Deadline.unbounded()
+    instrumentation = RunInstrumentation()
+    instrumentation.add("startup", cli_package.startup_seconds())
+    run_id = RunStore.new_run_id()
+    streaming = output_format is OutputFormat.NDJSON
+    events = EventStream(
+        [NdjsonSink(sys.stdout)] if streaming else [], command="recommend", run_id=run_id
+    )
+
     # The observer builds its own stderr console; `console` (stdout) is left
     # exclusively for results so the two streams cannot interleave.
     with RichScanObserver(enabled=show_progress) as observer:
@@ -243,29 +347,70 @@ async def _recommend(
             sources=sources,
             all_sources=all_sources,
             scan_budget=budget,
+            platform=options.platform,
+            deadline=deadline,
+            instrumentation=instrumentation,
+            profile=options.profile,
+            criteria=options.criteria,
+            events=events,
         )
         result = await use_case.execute(image, limit=resolve_tag_limit(limit))
 
-    if output_format == OutputFormat.JSON:
-        console.print(json.dumps(result.model_dump(), indent=2, default=str), soft_wrap=True)
-        raise typer.Exit(_exit_code(result, fail_on))
+    violation = _fail_on_violated(result, fail_on)
+    code = exit_code_for_completeness(
+        _exit_code(result, fail_on), result.completeness, violation=violation
+    )
+    summary = summarize_recommendation(result)
+    saved = _save_run(result, summary, options, run_id)
+    previous_diff = _diff_against_previous(saved, diff)
 
+    if output_format is OutputFormat.NDJSON:
+        # Everything was already streamed; the final event carried the result.
+        raise typer.Exit(code)
+
+    if output_format is OutputFormat.SUMMARY:
+        ci = build_ci_summary(
+            summary,
+            command="recommend",
+            exit_code=code,
+            run_id=saved.get("run_id", "") if saved else "",
+            baseline=result.baseline.model_dump() if result.baseline else None,
+        )
+        sys.stdout.write(json.dumps(ci.model_dump(by_alias=True), indent=2, default=str) + "\n")
+        raise typer.Exit(code)
+
+    if output_format == OutputFormat.JSON:
+        payload = result.model_dump()
+        payload["summary"] = summary.model_dump(mode="json")
+        payload["run_id"] = saved.get("run_id", "") if saved else ""
+        if previous_diff is not None:
+            payload["diff"] = previous_diff.model_dump(mode="json")
+        console.print(json.dumps(payload, indent=2, default=str), soft_wrap=True)
+        raise typer.Exit(code)
+
+    render_decision(console, summary)
     _print_summary(result)
 
     if result.baseline_met and result.recommendations:
         console.print(Panel("[bold green]Recommended Images[/bold green]", expand=False))
         _print_table(result.recommendations)
-        _print_why(result.recommendations)
-        _print_details(result.recommendations)
+        if details:
+            _print_why(result.recommendations)
+            _print_details(result.recommendations)
         _print_divergences(result.recommendations)
     elif result.alternatives:
         console.print(Panel(_baseline_miss_message(result), expand=False))
         _print_table(result.alternatives)
-        _print_why(result.alternatives)
-        _print_details(result.alternatives)
+        if details:
+            _print_why(result.alternatives)
+            _print_details(result.alternatives)
         _print_divergences(result.alternatives)
+    elif result.filters_note:
+        console.print(f"[yellow]{safe(result.filters_note)}[/yellow]")
     elif _nothing_could_be_measured(result):
         console.print(_measurement_failure_message(result))
+    elif result.completeness == "NO_RESULT":
+        console.print("[yellow]The time budget ended before anything was measured.[/yellow]")
     else:
         console.print("[red]No suitable images found.[/red]")
         console.print(f"[dim]{_baseline_line(result)}[/dim]")
@@ -273,11 +418,137 @@ async def _recommend(
     _print_tier_warnings(result.recommendations or result.alternatives)
     _print_unverified(result)
     _print_deferred(result)
+    _print_excluded(result, details)
+    if previous_diff is not None:
+        print_run_diff(console, previous_diff)
+    if details:
+        _print_diagnostics(result)
 
     if result.evidence_manifest:
         console.print(f"\n[dim]Evidence manifest: {result.evidence_manifest}[/dim]")
+    if saved:
+        console.print(
+            f"[dim]Run id: {saved['run_id']} (export it again with "
+            f"`dockerls export --run {saved['run_id']}`)[/dim]"
+        )
 
-    raise typer.Exit(_exit_code(result, fail_on))
+    raise typer.Exit(code)
+
+
+def _fail_on_violated(result: AnalysisResult, fail_on: FailOn) -> bool:
+    items = result.recommendations or result.alternatives
+    if not items or fail_on == FailOn.NONE:
+        return False
+    return _FAIL_ON_COUNT[fail_on](items[0]) > 0
+
+
+def _save_run(
+    result: AnalysisResult, summary: DecisionSummary, options: RunOptions, run_id: str
+) -> dict[str, str]:
+    """Keep the run so a later command can diff against it or export it.
+
+    Best effort: failing to save never changes the outcome of the run.
+    """
+    try:
+        store = build_run_store()
+        saved_id = store.save(
+            command="recommend",
+            query=result.query,
+            platform=str(options.platform),
+            filters=result.filters,
+            profile=result.profile,
+            completeness=result.completeness,
+            result=result.model_dump(mode="json"),
+            summary=summary.model_dump(mode="json"),
+            version=__version__,
+            run_id=run_id,
+        )
+    except Exception as e:
+        logger.warning(f"Could not save the run: {e}")
+        return {}
+    return {"run_id": saved_id} if saved_id else {}
+
+
+def _diff_against_previous(saved: dict[str, str], wanted: bool) -> RunDiff | None:
+    if not wanted or not saved:
+        return None
+    try:
+        store = build_run_store()
+        current = store.load(saved["run_id"])
+        if current is None:
+            return None
+        previous = store.previous_compatible(current, scope_of(current))
+    except Exception as e:
+        logger.warning(f"Could not compare with the previous run: {e}")
+        return None
+    if previous is None:
+        return RunDiff(
+            compatible=False, note="there is no earlier run that asked the same question"
+        )
+    return diff_runs(previous, current)
+
+
+def _print_excluded(result: AnalysisResult, details: bool) -> None:
+    """What the compatibility filters removed, and how each was decided."""
+    if not result.excluded:
+        return
+    heuristic = sum(1 for e in result.excluded if e.basis.value == "HEURISTIC")
+    console.print(
+        f"\n[bold]Filtered out before scanning[/bold] ({len(result.excluded)} tags; "
+        f"{len(result.excluded) - heuristic} confirmed, {heuristic} judged from tag names)"
+    )
+    shown = result.excluded if details else result.excluded[:5]
+    for item in shown:
+        console.print(
+            f"  [dim]{safe(item.reference)}[/dim] -- {safe(item.criterion)}: "
+            f"{safe(item.reason)} [{item.basis.value.lower()}]"
+        )
+    if len(result.excluded) > len(shown):
+        console.print(f"  [dim]... and {len(result.excluded) - len(shown)} more (--details)[/dim]")
+    if result.enrichment_note:
+        console.print(f"[yellow]{safe(result.enrichment_note)}[/yellow]")
+
+
+def _print_diagnostics(result: AnalysisResult) -> None:
+    """Timings, request counts and cache notes: what the run *did*."""
+    timings = result.metrics.timings
+    console.print("\n[bold]Diagnostics[/bold]")
+    console.print(
+        f"  profile: {result.profile or 'default'} | platform: {safe(result.platform)} | "
+        f"completeness: {result.completeness} | elapsed: {result.elapsed_seconds}s"
+        + (f" of {result.time_budget_seconds}s budget" if result.time_budget_seconds else "")
+    )
+    if result.metrics.scanner_identity:
+        console.print(
+            f"  scanner: {safe(result.metrics.scanner_identity)} | database revision: "
+            f"{safe(result.metrics.db_revision) or 'unknown'}"
+        )
+    if timings:
+        first = timings.get("time_to_first_result_seconds")
+        console.print(
+            f"  time to first useful result: {first if first is not None else 'n/a'}s | "
+            f"total: {timings.get('total_seconds')}s"
+        )
+        for stage, data in timings.get("stages", {}).items():
+            console.print(f"    {stage:<24} {data['seconds']:>8.3f}s  ({data['calls']} call(s))")
+        console.print("  [dim]stages overlap, so they do not sum to the total[/dim]")
+        requests = timings.get("requests_by_source", {})
+        if requests:
+            console.print(
+                "  requests: " + ", ".join(f"{k}={v}" for k, v in sorted(requests.items()))
+            )
+        counters = timings.get("counters", {})
+        if counters:
+            console.print("  " + ", ".join(f"{k}={v}" for k, v in sorted(counters.items())))
+    for analysis in (result.recommendations or result.alternatives)[:5]:
+        prov = analysis.provenance
+        console.print(
+            f"  {safe(analysis.image.full_reference)}: {prov.origin}, requested "
+            f"{safe(prov.requested_reference) or '-'} -> resolved "
+            f"{safe(prov.resolved_reference) or 'not confirmed'} -> measured "
+            f"{safe(prov.measured_reference) or '-'}"
+            + (f"; cache: {safe(prov.cache_note)}" if prov.cache_note else "")
+        )
 
 
 def _baseline_line(result: AnalysisResult) -> str:

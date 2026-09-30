@@ -34,6 +34,7 @@ Three rules shape the patterns:
 from __future__ import annotations
 
 import re
+from typing import Any
 
 #: What replaces a redacted value. Recognisable on sight, and distinct from
 #: anything a real credential looks like. The exact string is part of the
@@ -128,3 +129,15 @@ def redact(message: str) -> str:
     # key in front of them for any of the patterns above to anchor on.
     result = _KNOWN_SECRET_VALUE.sub(MASK, result)
     return result
+
+
+def redact_values(value: Any) -> Any:
+    """`value` with every string leaf redacted; keys and structure untouched,
+    so the result is still exactly the JSON that was meant."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {k: redact_values(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [redact_values(v) for v in value]
+    return value

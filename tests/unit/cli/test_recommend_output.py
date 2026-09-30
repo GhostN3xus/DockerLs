@@ -136,7 +136,7 @@ class TestDockerHubLinks:
             baseline_met=True,
             recommendations=[_analysis(tag="26.7-slim")],
         )
-        out = _run(result).stdout
+        out = _run(result, "--details").stdout
         assert "Docker Hub" in out
         assert "hub.docker.com/_/node?tab=tags&name=26.7-slim" in out
 
@@ -150,7 +150,7 @@ class TestDockerHubLinks:
             baseline_met=True,
             recommendations=[analysis],
         )
-        assert "hub.docker.com/r/bitnami/node/tags?name=22" in _run(result).stdout
+        assert "hub.docker.com/r/bitnami/node/tags?name=22" in _run(result, "--details").stdout
 
 
 class TestDivergenceRendering:

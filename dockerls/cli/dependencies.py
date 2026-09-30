@@ -23,10 +23,12 @@ from dockerls.cli.runtime import (
     enable_console_logging,
 )
 from dockerls.domain.entities.image import DOCKER_HUB
+from dockerls.domain.value_objects.execution_profile import Enrichment, ExecutionProfile
 from dockerls.domain.value_objects.network_policy import NetworkPolicy
 from dockerls.domain.value_objects.platform import DEFAULT_PLATFORM, Platform
 from dockerls.infrastructure.evidence import EvidenceStore
 from dockerls.infrastructure.network.host_guard import HostGuard
+from dockerls.infrastructure.run_store import RunStore
 from dockerls.integrations.dhi.catalog import DHICatalogClient
 from dockerls.integrations.dhi.repository import DHI, DHIRepository
 from dockerls.integrations.dockerhub.client import DockerHubClient
@@ -49,11 +51,13 @@ from dockerls.utils.validation import validate_threshold, validate_workers
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from dockerls.application.services.events import EventStream
     from dockerls.application.services.instrumentation import RunInstrumentation
     from dockerls.application.services.progress import ScanObserver
     from dockerls.application.services.source_registry import SourceBuilder
     from dockerls.cache.sqlite_cache import SQLiteCache
     from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
+    from dockerls.domain.value_objects.candidate_criteria import CandidateCriteria
     from dockerls.utils.deadline import Deadline
 
 # As Settings e o logging moram em `cli/runtime.py`, que não arrasta este
@@ -108,6 +112,12 @@ def resolve_tag_limit(limit: int | None) -> int:
     """`--limit` falls back to the configured `max_tags`."""
     s = _settings()
     return validate_threshold(s.max_tags if limit is None else limit, "--limit")
+
+
+def build_run_store() -> RunStore:
+    """Where finished runs are kept, for `--diff` and `export --run`."""
+    s = _settings()
+    return RunStore(s.runs_dir, retention=s.run_retention)
 
 
 def build_evidence_store() -> EvidenceStore:
@@ -397,6 +407,9 @@ async def build_recommend_use_case(
     platform: Platform | None = None,
     deadline: Deadline | None = None,
     instrumentation: RunInstrumentation | None = None,
+    profile: ExecutionProfile | None = None,
+    criteria: CandidateCriteria | None = None,
+    events: EventStream | None = None,
 ) -> RecommendImagesUseCase:
     s = _settings()
     # None means "not given on the command line", so the configured value
@@ -411,6 +424,25 @@ async def build_recommend_use_case(
         s.max_medium if max_medium is None else max_medium, "--max-medium"
     )
     workers = resolve_workers(workers)
+
+    # Precedence: explicit flag > profile > configuration > built-in default.
+    # `None` above means "no flag was given", and only then does the profile
+    # speak; the configuration speaks only when there is no profile either.
+    effective_budget = (
+        scan_budget
+        if scan_budget is not None
+        else (profile.scan_budget if profile is not None else s.scan_budget)
+    )
+    effective_cross_validate = (
+        cross_validate
+        if cross_validate is not None
+        else (profile.cross_validate if profile is not None else s.cross_validate)
+    )
+    effective_verify = (
+        verify_hub_tags
+        if verify_hub_tags is not None
+        else (profile.verify_tags if profile is not None else s.verify_hub_tags)
+    )
 
     # `--no-cache` força uma medição nova: o cache é uma otimização, e às
     # vezes o que se quer é justamente contorná-lo.
@@ -455,7 +487,7 @@ async def build_recommend_use_case(
     secondary = None
     secondary_measurement = None
     cross_workers = min(resolve_workers(s.cross_validate_workers or None), workers)
-    if s.cross_validate if cross_validate is None else cross_validate:
+    if effective_cross_validate:
         secondary = await ScannerFactory.create_secondary(
             scanner,
             timeout=s.scanner_timeout,
@@ -503,10 +535,26 @@ async def build_recommend_use_case(
             measurement=secondary_measurement,
         ),
         evidence=evidence,
-        verify_hub_tags=s.verify_hub_tags if verify_hub_tags is None else verify_hub_tags,
+        verify_hub_tags=effective_verify,
         log_file=current_log_file(),
         cache_ttl_seconds=s.cache_ttl_seconds,
-        scan_budget=s.scan_budget if scan_budget is None else scan_budget,
+        scan_budget=effective_budget,
+        deadline=deadline,
+        events=events,
+        criteria=criteria,
+        enrichment=profile.enrichment if profile is not None else Enrichment.ALL,
+        inspect_finalists=profile.inspect_finalists if profile is not None else True,
+        # A representative selection (different versions and variants before
+        # more of the same) is used when the operator chose a profile or
+        # filters; with neither, candidate selection is what it always was.
+        spread=profile is not None or bool(criteria is not None and criteria.active),
+        profile_name=profile.name.value if profile is not None else "",
+        not_performed_by_profile=(
+            [t for t in profile.not_performed() if "threat intelligence" in t]
+            if profile is not None
+            else None
+        ),
+        instrumentation=instrumentation,
     )
 
 

@@ -61,6 +61,12 @@ class HardeningAnalyzer:
         # shared store); nothing else the inspector says is persisted.
         self._store = store
 
+    @property
+    def inspects(self) -> bool:
+        """Whether registry inspection is on. Off means every hardening fact
+        stays UNKNOWN -- the honest result of not looking."""
+        return self._inspector is not None
+
     async def resolve_identity(
         self, name: str, tag: str, digest: str = "", platform: Platform | None = None
     ) -> ResolvedIdentity:

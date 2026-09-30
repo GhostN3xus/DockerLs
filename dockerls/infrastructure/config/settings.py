@@ -37,6 +37,10 @@ def _default_evidence_dir() -> Path:
     return _default_state_dir() / "scans"
 
 
+def _default_runs_dir() -> Path:
+    return _default_state_dir() / "runs"
+
+
 def _default_config_path() -> Path:
     """~/.config/dockerls/config.toml (or $XDG_CONFIG_HOME/dockerls/config.toml)."""
     xdg_config = os.environ.get("XDG_CONFIG_HOME")
@@ -89,6 +93,12 @@ class Settings(BaseSettings):
     log_dir: Path = Field(default_factory=_default_log_dir)
     # Raw scanner JSON, kept so every displayed score is auditable.
     evidence_dir: Path = Field(default_factory=_default_evidence_dir)
+    # Saved runs (what `--diff` compares against and `export --run` re-renders).
+    # Written 0600 in a 0700 directory; only files named like a run id are ever
+    # read or pruned.
+    runs_dir: Path = Field(default_factory=_default_runs_dir)
+    # How many saved runs are kept; older ones are pruned after each save.
+    run_retention: int = 50
     # Trivy's own cache root; the per-worker cache pool is built next to it.
     trivy_cache_dir: Path | None = None
     # Re-scan the top candidates with the secondary scanner and flag

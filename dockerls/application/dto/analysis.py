@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from dockerls.domain.entities.image import DockerImage
@@ -7,6 +9,7 @@ from dockerls.domain.entities.image_facts import HardeningFacts
 from dockerls.domain.entities.recommendation import Recommendation
 from dockerls.domain.entities.scan_result import ScanResult
 from dockerls.domain.entities.vulnerability import Vulnerability
+from dockerls.domain.value_objects.candidate_criteria import Exclusion
 from dockerls.domain.value_objects.confidence import Confidence
 from dockerls.domain.value_objects.scan_plan import DeferredTag
 from dockerls.domain.value_objects.tristate import Tristate
@@ -65,6 +68,8 @@ class MeasurementProvenance(BaseModel):
     limitation: str = ""
     #: Why a cached measurement was *not* reused (e.g. DB_REVISION_CHANGED).
     cache_note: str = ""
+    #: When the threat intelligence in this analysis was retrieved ("" = none).
+    threat_intel_at: str = ""
 
 
 class ImageAnalysis(BaseModel):
@@ -228,6 +233,9 @@ class RunMetrics(BaseModel):
     #: Measurements that joined another task's scan or an earlier result of the
     #: same run instead of starting their own.
     duplicates_avoided: int = 0
+    #: Time and requests per stage (see `RunInstrumentation.to_dict`); empty
+    #: when the run was not instrumented. Stages overlap, so they do not sum.
+    timings: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def duplicates_collapsed(self) -> int:
@@ -265,6 +273,28 @@ class AnalysisResult(BaseModel):
     deferred: list[DeferredTag] = []
     #: Quantas tags a busca trouxe, antes de qualquer corte.
     tags_discovered: int = 0
+    #: Candidates a compatibility filter removed, each with the reason and
+    #: whether the reason is CONFIRMED (published data, a measurement) or a
+    #: HEURISTIC (the tag's name).
+    excluded: list[Exclusion] = []
+    #: Why the filters left nothing, when they did.
+    filters_note: str = ""
+    #: The active filters, as text; "" when there were none.
+    filters: str = ""
+    #: When threat intelligence covered only some candidates, how that limits
+    #: comparing them.
+    enrichment_note: str = ""
+    #: `COMPLETE`, `PARTIAL` (the time budget ended with some measurements done)
+    #: or `NO_RESULT` (it ended before anything was measured). Independent of
+    #: the profile: a `quick` run is complete *for what quick does*, and says
+    #: what it left out in `pending_checks`.
+    completeness: str = "COMPLETE"
+    #: Everything this run did not establish. Never turned into approval.
+    pending_checks: list[str] = []
+    time_budget_seconds: float | None = None
+    elapsed_seconds: float = 0.0
+    profile: str = ""
+    platform: str = ""
 
     @property
     def unverified_count(self) -> int:
