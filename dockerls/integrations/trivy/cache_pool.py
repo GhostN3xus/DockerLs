@@ -161,10 +161,6 @@ class TrivyCachePool:
         return self._base
 
     @property
-    def slots_root(self) -> Path:
-        return self._root
-
-    @property
     def stats(self) -> PoolStats:
         return PoolStats(
             mode="isolated" if self._isolated else "serialized",

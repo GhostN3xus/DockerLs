@@ -340,7 +340,7 @@ class OCIRegistryClient:
 
         `status` is the HTTP status when the registry answered at all;
         `reason` says what a caller should tell the user when it did not. The
-        distinction that matters most in practice is `rate_limited`: Docker
+        distinction that matters most in practice is status 429: Docker
         Hub throttles anonymous manifest pulls, and "the registry throttled
         us" must not read as "the tag does not exist".
         """
@@ -348,10 +348,6 @@ class OCIRegistryClient:
         response: httpx.Response | None
         status: int | None = None
         reason: str = ""
-
-        @property
-        def rate_limited(self) -> bool:
-            return self.status == 429
 
     #: How long an anonymous bearer token is reused. Registry tokens live for
     #: minutes; this is shorter than the shortest common lifetime, so a cached

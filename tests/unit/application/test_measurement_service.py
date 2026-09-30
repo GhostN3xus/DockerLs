@@ -58,6 +58,10 @@ def _image(tag="22", name="node") -> DockerImage:
     return DockerImage(name=name, tag=tag)
 
 
+async def measure_many(service, images):
+    return list(await asyncio.gather(*(service.measure(image) for image in images)))
+
+
 class TestImmutableIdentity:
     async def test_the_scanner_is_handed_the_platform_manifest_digest_not_the_tag(self):
         cache, resolver, scanner = _world()
@@ -136,7 +140,7 @@ class TestImmutableIdentity:
         assert first.provenance.identity_status == "UNRESOLVED"
         assert first.provenance.limitation
         assert first.refs.resolved == ""
-        assert not first.stored_as_evidence
+        assert not (first.identity.confirmed and first.scan.is_verified)
         assert [k for k in cache.rows if k.startswith("m:scan:")] == []
         assert not second.from_cache, "an unpinned result must never be reused as pinned"
         assert len(scanner.calls) == 2
@@ -151,7 +155,7 @@ class TestImmutableIdentity:
 
         assert scanner.calls[0][0] == f"node@{AMD64}"
         assert result.provenance.identity_status == "DIGEST_ONLY"
-        assert not result.stored_as_evidence
+        assert not (result.identity.confirmed and result.scan.is_verified)
 
     async def test_a_scanner_that_cannot_take_a_platform_refuses_rather_than_guess(self):
         cache, resolver, _ = _world()
@@ -189,7 +193,7 @@ class TestSharedCacheAcrossCommands:
         scanner.live_tags["node:lts"] = AMD64
         service = _service(scanner, resolver, cache)
 
-        results = await service.measure_many([_image("22"), _image("lts")])
+        results = await measure_many(service, [_image("22"), _image("lts")])
 
         assert len(scanner.calls) == 1
         assert {r.scan.image_reference for r in results} == {f"node@{AMD64}"}
@@ -493,27 +497,10 @@ class TestBoundedSharedWork:
             images.append(DockerImage(name="app", tag=tag))
         service = _service(scanner, resolver, cache, max_concurrency=3)
 
-        results = await service.measure_many(images)
+        results = await measure_many(service, images)
 
         assert scanner.max_in_flight == 3, "limited, and actually concurrent"
         assert [len(r.scan.vulnerabilities) for r in results] == list(range(9))
-
-    async def test_one_failing_image_does_not_spoil_the_others(self):
-        cache, resolver, scanner = _world()
-        good, bad = digest_of("7"), digest_of("8")
-        resolver.publish("app", "good", digest_of("f"), linux_amd64=good)
-        resolver.publish("app", "bad", digest_of("f"), linux_amd64=bad)
-        scanner.findings[good] = 2
-        scanner.raise_for = {f"app@{bad}"}
-        service = _service(scanner, resolver, cache, max_concurrency=2)
-
-        results = await service.measure_many(
-            [DockerImage(name="app", tag="bad"), DockerImage(name="app", tag="good")]
-        )
-
-        assert not results[0].scan.is_verified
-        assert "crashed" in results[0].scan.error_message
-        assert results[1].scan.is_verified and len(results[1].scan.vulnerabilities) == 2
 
     async def test_the_database_is_prepared_once_however_many_callers_ask(self):
         cache, resolver, scanner = _world()

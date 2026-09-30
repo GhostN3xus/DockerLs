@@ -63,6 +63,7 @@ from dockerls.domain.value_objects.security_score import SecurityScore
 from dockerls.domain.value_objects.security_tier import SecurityTier
 from dockerls.domain.value_objects.tristate import Tristate
 from dockerls.integrations.registry.urls import source_url
+from dockerls.integrations.threat_intel.status import IntelStatus
 from dockerls.utils.deadline import Deadline, DeadlineExceededError, run_within
 from dockerls.utils.ignore_file import active_ignored_cve_ids, load_ignore_rules
 from dockerls.utils.validation import validate_threshold, validate_workers
@@ -286,6 +287,31 @@ class RecommendImagesUseCase:
         """A phase change, for the terminal and for the event stream alike."""
         self._observer.phase(text)
         self._events.emit(PHASE, name=text)
+
+    def _note_intel_gaps(self, cve_ids: list[str]) -> None:
+        """Record, as pending, every threat-intel lookup that got no answer.
+
+        Told apart on purpose: a feed that *said* a CVE is absent is a
+        negative, while a feed that was unreachable, rate limited or returned
+        garbage established nothing -- and that is not the same thing as
+        "not exploitable".
+        """
+        lookups = (
+            ("EPSS", getattr(self._threat_intel, "epss_status_of", None)),
+            ("OSV", getattr(self._osv, "status_of", None)),
+        )
+        for source, lookup in lookups:
+            if lookup is None:
+                continue
+            counts: dict[IntelStatus, int] = {}
+            for cve in cve_ids:
+                status = lookup(cve)
+                if isinstance(status, IntelStatus) and not status.answered:
+                    counts[status] = counts.get(status, 0) + 1
+            for status, n in counts.items():
+                self._note_pending(
+                    f"{source} data for {n} CVE(s) not obtained: {_INTEL_GAP_LABEL[status]}"
+                )
 
     def _note_pending(self, text: str) -> None:
         if text not in self._pending:
@@ -865,6 +891,13 @@ class RecommendImagesUseCase:
                     ),
                     scan,
                 )
+            self._note_intel_gaps(
+                [
+                    v.cve_id
+                    for v in scan.vulnerabilities
+                    if v.severity.value in ("CRITICAL", "HIGH") and v.cve_id
+                ]
+            )
 
         product, version = _extract_product_version(image)
         eol_status = await self._within(
@@ -1324,6 +1357,16 @@ def _exploitdb_fields(entries: list[ExploitEntry] | None, *, available: bool) ->
         # reproduzida, não se todas as entradas foram reproduzidas.
         "exploitdb_verified": any(e.verified for e in entries),
     }
+
+
+_INTEL_GAP_LABEL = {
+    IntelStatus.NETWORK_ERROR: "source unreachable",
+    IntelStatus.RATE_LIMITED: "rate limited",
+    IntelStatus.INVALID_RESPONSE: "invalid response",
+    IntelStatus.UNAVAILABLE: "source unavailable",
+    IntelStatus.FOUND: "",
+    IntelStatus.ABSENT: "",
+}
 
 
 async def _osv_lookup(osv: OSVClient | None, cve_ids: list[str]) -> dict[str, OSVEnrichment]:

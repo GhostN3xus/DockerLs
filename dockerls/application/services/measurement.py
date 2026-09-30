@@ -53,7 +53,7 @@ from dockerls.utils.deadline import Deadline, DeadlineExceededError, run_within
 from dockerls.utils.single_flight import SingleFlight
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Callable, Sequence
 
     from dockerls.application.services.instrumentation import RunInstrumentation
     from dockerls.domain.entities.image import DockerImage
@@ -92,11 +92,6 @@ class Measurement:
     from_cache: bool = False
     #: Joined a scan another task in this run had already started.
     shared: bool = False
-
-    @property
-    def stored_as_evidence(self) -> bool:
-        """Whether this result is eligible to be reused later as pinned evidence."""
-        return self.identity.confirmed and self.scan.is_verified
 
 
 @dataclass
@@ -302,14 +297,14 @@ class MeasurementService:
         digest = _user_pinned_digest(image)
         key = ("identity", image.name.lower(), image.tag, digest, str(self._platform))
 
-        async def resolve_once() -> ResolvedIdentity:
-            return await self._resolve_once(image, digest)
+        async def _resolve_once() -> ResolvedIdentity:
+            return await self.__resolve_once(image, digest)
 
-        identity, _ = await self._identity_flight.run(key, resolve_once)
+        identity, _ = await self._identity_flight.run(key, _resolve_once)
         self._apply_identity(image, identity, digest)
         return identity
 
-    async def _resolve_once(self, image: DockerImage, digest: str) -> ResolvedIdentity:
+    async def __resolve_once(self, image: DockerImage, digest: str) -> ResolvedIdentity:
         base = ResolvedIdentity(
             name=image.name,
             tag=image.tag,
@@ -611,7 +606,7 @@ class MeasurementService:
             platform = str(self._platform)
             started = time.monotonic()
 
-            async def run_chunk(
+            async def _run_chunk(
                 batch: Any = batch,
                 targets: list[tuple[str, str]] = targets,
                 platform: str = platform,
@@ -619,7 +614,7 @@ class MeasurementService:
                 return await batch.scan_batch(targets, platform=platform)
 
             try:
-                outcome = await run_within(self._deadline, run_chunk)
+                outcome = await run_within(self._deadline, _run_chunk)
             except DeadlineExceededError:
                 break
             finally:
@@ -649,42 +644,6 @@ class MeasurementService:
                     ),
                 )
         return handled
-
-    async def measure_many(
-        self,
-        images: Sequence[DockerImage],
-        on_result: Callable[[DockerImage, Measurement], Awaitable[None] | None] | None = None,
-    ) -> list[Measurement]:
-        """Measure `images`, results in input order, one failure never spoiling
-        the others. Identities are resolved concurrently, scans are bounded."""
-
-        async def one(image: DockerImage) -> Measurement:
-            try:
-                result = await self.measure(image)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.warning(f"Failed to measure {image.full_reference}: {e}")
-                result = self._failed(
-                    image,
-                    ResolvedIdentity(
-                        name=image.name,
-                        tag=image.tag,
-                        platform=self._platform,
-                        status=IdentityStatus.UNRESOLVED,
-                    ),
-                    ImageRefs(requested=image.full_reference),
-                    ScanErrorKind.UNKNOWN,
-                    str(e),
-                    status=ScanStatus.ERROR,
-                )
-            if on_result is not None:
-                outcome = on_result(image, result)
-                if inspect.isawaitable(outcome):
-                    await outcome
-            return result
-
-        return list(await asyncio.gather(*(one(image) for image in images)))
 
     # ---- results -----------------------------------------------------------
 

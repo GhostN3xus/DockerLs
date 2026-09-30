@@ -228,7 +228,7 @@ class TestTrivyCachePool:
         base = _seed_db(tmp_path / "trivy")
         setup = TrivyCachePool(base, size=1)
         await setup.prepare()
-        root = setup.slots_root
+        root = setup._root
         await setup.cleanup()
 
         stale = root / "slot-7"
@@ -265,7 +265,7 @@ class TestTrivyCachePool:
         base = _seed_db(tmp_path / "trivy")
         setup = TrivyCachePool(base, size=1)
         await setup.prepare()
-        root = setup.slots_root
+        root = setup._root
         await setup.cleanup()
         for i, age in ((5, 300), (6, 200)):
             d = root / f"slot-{i}"

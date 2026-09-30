@@ -81,10 +81,6 @@ class Deadline:
         """`seconds`, or what is left of the budget when that is smaller."""
         return min(seconds, self.remaining())
 
-    def raise_if_expired(self, what: str = "operation") -> None:
-        if self.expired:
-            raise DeadlineExceededError(f"time budget exhausted before {what}")
-
 
 async def run_within(
     deadline: Deadline, operation: Callable[[], Awaitable[T]], *, cap: float | None = None

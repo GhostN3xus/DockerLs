@@ -133,6 +133,8 @@ DYNAMICALLY_DISPATCHED = {
     "refresh_db",  # getattr(scanner, "refresh_db", None)
     "close",  # getattr(scanner, "close", None)
     "verify_blob",  # getattr(cosign, "verify_blob", None) no instalador
+    "epss_status_of",  # getattr(threat_intel, "epss_status_of", None): test doubles lack it
+    "status_of",  # getattr(osv, "status_of", None): test doubles lack it
 }
 
 
