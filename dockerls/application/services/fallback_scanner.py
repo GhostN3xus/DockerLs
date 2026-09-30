@@ -36,6 +36,8 @@ class FallbackScanner(ScannerInterface):
         # Contabilidade para o resumo da execução: quantas vezes o secundário
         # salvou um alvo que o primário não conseguiu medir.
         self.fallback_successes = 0
+        self._secondary_ready = False
+        self._secondary_lock = asyncio.Lock()
         self.fallback_attempts = 0
 
     @property
@@ -63,6 +65,7 @@ class FallbackScanner(ScannerInterface):
             logger.info("No secondary scanner available; keeping the primary result")
             return result
 
+        await self._ensure_secondary_ready()
         fallback = await _scan(self._secondary, image_reference, platform)
         if not fallback.is_verified:
             # Nenhum dos dois conseguiu: devolve o resultado do primário, que
@@ -100,19 +103,29 @@ class FallbackScanner(ScannerInterface):
         return "+".join(_options_of(s) for s in (self._primary, self._secondary))
 
     async def refresh_db(self) -> bool:
-        """Prepara os dois bancos, em paralelo.
+        """Prepara o banco do primário -- e só dele.
 
-        Eram sequenciais -- o secundário só começava a baixar depois que o
-        primário terminasse -- e as duas baixas não competem por nada que
-        torne isso necessário: bancos diferentes, ferramentas diferentes.
-        Rodando juntas, o tempo de preparo passa a ser o maior dos dois, não
-        a soma, o que soma minutos num run que nunca chega a precisar do
-        secundário. O secundário só é útil se estiver pronto antes de a
-        primeira falha acontecer, então o paralelismo é o que garante isso
-        sem alongar o caminho comum.
+        O secundário só é usado quando o primário falha, e preparar o banco
+        dele é caro: medido, `grype db update` num diretório vazio levou
+        ~108 s de CPU (importação do SQLite), contra ~7 s do Trivy. Fazê-lo
+        sempre, "para o caso de precisar", somava dois minutos ao primeiro
+        run de qualquer comando, incluído o que nunca chamaria o secundário.
+        Ele é preparado na primeira vez que de fato for usado, uma só vez
+        mesmo com várias falhas simultâneas.
         """
-        primary_ok, _ = await asyncio.gather(_refresh(self._primary), _refresh(self._secondary))
-        return primary_ok
+        return await _refresh(self._primary)
+
+    async def _ensure_secondary_ready(self) -> None:
+        if self._secondary_ready:
+            return
+        async with self._secondary_lock:
+            if self._secondary_ready:
+                return
+            if not await _refresh(self._secondary):
+                # Sem banco novo o secundário ainda pode atualizar-se sozinho
+                # no próprio scan: a falha é registrada, não fatal.
+                logger.warning("Secondary scanner database refresh failed; scanning anyway")
+            self._secondary_ready = True
 
     async def close(self) -> None:
         for scanner in (self._primary, self._secondary):
