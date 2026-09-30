@@ -4,46 +4,40 @@
 only worth something if it survives the shapes a real cache goes bad in:
 truncated JSON, a payload from an older schema, a persisted ERROR status,
 and a stale entry with no scan at all.
+
+The cache now has layers (see `measurement_store`): a raw scan keyed by the
+*confirmed platform manifest* identity, and an evaluation derived from it.
+The properties below are the same as before -- corrupt or foreign rows are
+misses, failure statuses are never trusted, tags are never identities -- and
+each is exercised against the layer that can actually hold the bad row.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
-from dockerls.application.dto.analysis import ImageAnalysis
 from dockerls.application.use_cases.recommend_images import RecommendImagesUseCase
 from dockerls.domain.entities.image import DockerImage
-from dockerls.domain.entities.scan_result import ScanResult, ScanStatus
+from dockerls.domain.entities.scan_result import ScanResult
 from dockerls.domain.interfaces.cache_store import CacheStoreInterface
 from dockerls.domain.interfaces.eol_checker import EOLCheckerInterface
 from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
 from dockerls.domain.interfaces.scanner import ScannerInterface
+from tests.unit.application.measurement_fakes import FakeRegistryResolver, digest_of
 
-TAG = DockerImage(
-    name="node",
-    tag="22-alpine",
-    digest="sha256:" + "a" * 64,
-    is_official=True,
-)
-
-
-def _key_for(use_case) -> str:
-    """A chave real que o caso de uso usa, em vez de uma cópia do formato.
-
-    Ela carrega um fingerprint das entradas que mudam a análise (regras de
-    ignore ativas, threat intel ligado ou não); um teste que reconstrói a
-    string à mão passa a testar o formato, não o comportamento.
-    """
-    key = use_case._cache_key(TAG)
-    assert key is not None
-    return key
+MANIFEST = digest_of("a")
+TAG = DockerImage(name="node", tag="22-alpine", is_official=True)
 
 
 class _Repo(ImageRepositoryInterface):
+    def __init__(self, tags=None):
+        self._tags = tags or [TAG.model_copy()]
+
     async def search_tags(self, image_name, limit=100):
-        return [TAG]
+        return [t.model_copy() for t in self._tags]
 
     async def get_image_metadata(self, image_name, tag):
         return None
@@ -63,21 +57,24 @@ class _EOL(EOLCheckerInterface):
 class _CountingScanner(ScannerInterface):
     def __init__(self):
         self.scans = 0
+        self.references: list[str] = []
 
     async def is_available(self):
         return True
 
-    async def scan(self, image_reference):
+    async def scan(self, image_reference, platform=None):
         self.scans += 1
+        self.references.append(image_reference)
         return ScanResult(
             image_reference=image_reference,
             scan_timestamp=datetime.now(tz=UTC).isoformat(),
+            platform=platform or "",
         )
 
 
 class _Cache(CacheStoreInterface):
-    def __init__(self, payload, key):
-        self.store = {key: payload} if payload is not None else {}
+    def __init__(self):
+        self.store: dict[str, Any] = {}
         self.deleted: list[str] = []
 
     async def get(self, key):
@@ -94,86 +91,126 @@ class _Cache(CacheStoreInterface):
         self.store.clear()
 
 
-def _poisoned(status, timestamp="2026-01-01T00:00:00Z"):
-    return ImageAnalysis(
-        image=TAG,
-        scan=ScanResult(
-            image_reference=TAG.full_reference,
-            status=status,
-            error_message="trivy exited 1" if status != ScanStatus.OK else "",
-            scan_timestamp=timestamp,
-        ),
-        security_score=100.0,
-        tier="A",
-        remediation_score=100,
-    ).model_dump()
+def _resolver(**manifests: str) -> FakeRegistryResolver:
+    resolver = FakeRegistryResolver()
+    resolver.publish("node", "22-alpine", digest_of("1"), **(manifests or {"linux_amd64": MANIFEST}))
+    return resolver
 
 
-async def _run(cache_payload):
-    scanner = _CountingScanner()
+def _use_case(cache, scanner=None, resolver=None, repo=None, **kwargs):
+    scanner = scanner or _CountingScanner()
     use_case = RecommendImagesUseCase(
-        repository=_Repo(),
+        repository=repo or _Repo(),
         scanner=scanner,
         eol_checker=_EOL(),
+        cache=cache,
+        **kwargs,
     )
-    key = _key_for(use_case)
-    cache = _Cache(cache_payload, key)
-    use_case._cache = cache
-    result = await use_case.execute("node")
-    return result, cache, scanner, key
+    # Identity confirmation is the registry's job; the fake stands in for it.
+    use_case._measurement._resolver = resolver or _resolver()  # noqa: SLF001
+    return use_case, scanner
+
+
+async def _primed():
+    """A cache holding one good scan row and one good evaluation row."""
+    cache = _Cache()
+    use_case, scanner = _use_case(cache)
+    await use_case.execute("node")
+    assert scanner.scans == 1
+    return cache
+
+
+def _key(cache, prefix):
+    (key,) = [k for k in cache.store if k.startswith(prefix)]
+    return key
+
+
+SCAN, EVAL = "m:scan:", "m:eval:"
 
 
 class TestCorruptedPayloadsAreDiscarded:
-    @pytest.mark.parametrize(
-        "payload",
-        [
-            pytest.param({"garbage": True}, id="unknown_shape"),
-            pytest.param({"image": {"name": "node"}}, id="truncated"),
-            pytest.param({}, id="empty_dict"),
-            pytest.param("not-a-dict", id="wrong_type"),
-            pytest.param([1, 2, 3], id="list_instead_of_object"),
-            pytest.param(None, id="missing"),
-        ],
-    )
+    PAYLOADS = [
+        pytest.param({"garbage": True}, id="unknown_shape"),
+        pytest.param({"schema_version": 1, "layer": "scan", "digest": 5}, id="truncated"),
+        pytest.param({}, id="empty_dict"),
+        pytest.param("not-a-dict", id="wrong_type"),
+        pytest.param([1, 2, 3], id="list_instead_of_object"),
+    ]
+
+    @pytest.mark.parametrize("payload", PAYLOADS)
     @pytest.mark.asyncio
-    async def test_unusable_payload_forces_a_real_scan(self, payload):
-        result, _, scanner, _key = await _run(payload)
+    async def test_a_corrupt_scan_row_forces_a_real_scan(self, payload):
+        cache = await _primed()
+        cache.store[_key(cache, SCAN)] = payload
+        use_case, scanner = _use_case(cache)
+
+        result = await use_case.execute("node")
 
         assert scanner.scans == 1, "the corrupted entry was trusted"
         assert result.recommendations
         assert result.recommendations[0].scan.is_verified
 
+    @pytest.mark.parametrize("payload", PAYLOADS)
     @pytest.mark.asyncio
-    async def test_schema_mismatch_is_deleted_not_reused(self):
-        _, cache, _, key = await _run({"garbage": True})
+    async def test_a_corrupt_evaluation_row_recomputes_without_a_new_scan(self, payload):
+        cache = await _primed()
+        cache.store[_key(cache, EVAL)] = payload
+        use_case, scanner = _use_case(cache)
+
+        result = await use_case.execute("node")
+
+        assert scanner.scans == 0, "a bad *derived* row must not cost a raw scan"
+        assert result.recommendations
+
+    @pytest.mark.asyncio
+    async def test_an_unusable_row_is_evicted_not_reread_forever(self):
+        cache = await _primed()
+        key = _key(cache, SCAN)
+        cache.store[key] = {"garbage": True}
+        use_case, _ = _use_case(cache)
+
+        await use_case.execute("node")
+
         assert key in cache.deleted
 
 
 class TestPersistedFailureStatusIsNeverTrusted:
-    @pytest.mark.parametrize("status", [ScanStatus.ERROR, ScanStatus.TIMEOUT, ScanStatus.PARTIAL])
+    @pytest.mark.parametrize("status", ["ERROR", "TIMEOUT", "PARTIAL"])
     @pytest.mark.asyncio
     async def test_cached_failed_scan_is_rescanned(self, status):
-        result, cache, scanner, key = await _run(_poisoned(status))
+        cache = await _primed()
+        cache.store[_key(cache, SCAN)]["scan"]["status"] = status
+        use_case, scanner = _use_case(cache)
 
-        assert scanner.scans == 1, f"a cached {status.value} scan was reused"
-        assert key in cache.deleted
-        assert result.recommendations[0].scan.status is ScanStatus.OK
+        result = await use_case.execute("node")
+
+        assert scanner.scans == 1, f"a cached {status} scan was reused"
+        assert result.recommendations[0].scan.status.value == "OK"
 
     @pytest.mark.asyncio
     async def test_cached_scan_without_a_timestamp_is_rescanned(self):
         """A default-constructed ScanResult has status OK and no timestamp
         -- the shape a "no data" fallback would persist."""
-        result, cache, scanner, key = await _run(_poisoned(ScanStatus.OK, timestamp=""))
+        cache = await _primed()
+        cache.store[_key(cache, SCAN)]["scan"]["scan_timestamp"] = ""
+        use_case, scanner = _use_case(cache)
+
+        result = await use_case.execute("node")
 
         assert scanner.scans == 1
-        assert key in cache.deleted
         assert result.recommendations[0].scan.scan_timestamp != ""
 
     @pytest.mark.asyncio
     async def test_a_perfect_score_does_not_buy_trust(self):
-        """The poisoned entries all carry score=100 / tier=S; the gate must
-        key on scan status alone."""
-        _, _, scanner, _key = await _run(_poisoned(ScanStatus.ERROR))
+        """A poisoned evaluation carries a perfect score; the gate keys on the
+        scan underneath it, never on the number."""
+        cache = await _primed()
+        cache.store[_key(cache, SCAN)]["scan"]["status"] = "ERROR"
+        cache.store[_key(cache, EVAL)]["analysis"]["security_score"] = 100.0
+        use_case, scanner = _use_case(cache)
+
+        await use_case.execute("node")
+
         assert scanner.scans == 1
 
 
@@ -182,98 +219,105 @@ class TestValidCacheEntriesAreStillUsed:
 
     @pytest.mark.asyncio
     async def test_verified_entry_skips_the_scanner(self):
-        good = ImageAnalysis(
-            image=TAG,
-            scan=ScanResult(
-                image_reference=TAG.full_reference,
-                scan_timestamp="2026-01-01T00:00:00Z",
-            ),
-            security_score=98.0,
-            tier="A",
-            remediation_score=100,
-        ).model_dump()
+        cache = await _primed()
+        use_case, scanner = _use_case(cache)
 
-        result, cache, scanner, _key = await _run(good)
+        result = await use_case.execute("node")
 
         assert scanner.scans == 0, "a valid cache entry was ignored"
         assert cache.deleted == []
-        assert result.recommendations[0].security_score == 98.0
+        assert result.recommendations[0].provenance.origin == "cache"
 
 
 class TestCanonicalCacheIdentity:
-    def _use_case(self) -> RecommendImagesUseCase:
-        return RecommendImagesUseCase(
-            repository=_Repo(), scanner=_CountingScanner(), eol_checker=_EOL()
-        )
+    @pytest.mark.asyncio
+    async def test_an_unresolved_tag_is_never_a_security_cache_key(self):
+        cache = _Cache()
+        resolver = _resolver()
+        resolver.unreachable = True
+        use_case, scanner = _use_case(cache, resolver=resolver)
 
-    def test_unresolved_tag_is_never_a_security_cache_key(self):
-        image = DockerImage(name="nginx", tag="latest")
-        assert self._use_case()._cache_key(image) is None
+        result = await use_case.execute("node")
 
-    def test_malformed_external_digest_is_a_cache_miss_not_an_exception(self):
-        image = DockerImage(name="nginx", tag="latest", digest="sha256:not-a-digest")
-
-        assert self._use_case()._cache_key(image) is None
-
-    def test_tag_mutation_changes_the_cache_key(self):
-        first = DockerImage(name="nginx", tag="latest", digest="sha256:" + "1" * 64)
-        moved = DockerImage(name="nginx", tag="latest", digest="sha256:" + "2" * 64)
-        use_case = self._use_case()
-
-        assert use_case._cache_key(first) != use_case._cache_key(moved)
-
-    def test_platform_changes_the_cache_key(self):
-        digest = "sha256:" + "3" * 64
-        amd64 = DockerImage(name="nginx", tag="latest", digest=digest, architecture="amd64")
-        arm64 = DockerImage(name="nginx", tag="latest", digest=digest, architecture="arm64")
-        use_case = self._use_case()
-
-        assert use_case._cache_key(amd64) != use_case._cache_key(arm64)
+        assert scanner.scans == 1 and result.recommendations
+        assert cache.store == {}
 
     @pytest.mark.asyncio
-    async def test_payload_for_another_digest_is_evicted(self):
-        requested = TAG.model_copy(update={"digest": "sha256:" + "b" * 64})
-        poisoned = ImageAnalysis(
-            image=TAG,
-            scan=ScanResult(
-                image_reference=TAG.full_reference,
-                scan_timestamp="2026-01-01T00:00:00Z",
-            ),
-            security_score=100,
-            tier="A",
-            remediation_score=100,
-        ).model_dump()
-        use_case = self._use_case()
-        key = use_case._cache_key(requested)
-        assert key is not None
-        cache = _Cache(poisoned, key)
-        use_case._cache = cache
-
-        assert await use_case._get_cached(requested) is None
-        assert key in cache.deleted
-
-    @pytest.mark.asyncio
-    async def test_malformed_digest_still_gets_a_real_scan(self):
-        image = DockerImage(name="node", tag="22", digest="sha256:invalid")
-
-        class _MalformedDigestRepo(_Repo):
-            async def search_tags(self, image_name, limit=100):
-                return [image]
-
-        scanner = _CountingScanner()
-        cache = _Cache(None, "unused")
-        use_case = RecommendImagesUseCase(
-            repository=_MalformedDigestRepo(),
-            scanner=scanner,
-            eol_checker=_EOL(),
-            cache=cache,
-        )
+    async def test_a_malformed_external_digest_is_a_cache_miss_not_an_exception(self):
+        cache = _Cache()
+        resolver = _resolver(linux_amd64="sha256:not-a-digest")
+        use_case, scanner = _use_case(cache, resolver=resolver)
 
         result = await use_case.execute("node")
 
         assert scanner.scans == 1
         assert result.recommendations
         assert cache.store == {}
+        assert scanner.references == ["node:22-alpine"], "an unpinned tag is scanned as a tag"
+
+    @pytest.mark.asyncio
+    async def test_a_hint_digest_from_discovery_is_not_an_identity(self):
+        """Docker Hub reports a digest with every tag. It is a hint: the
+        registry has to confirm it before a result may be filed under it."""
+        hinted = TAG.model_copy(update={"digest": MANIFEST})
+        cache = _Cache()
+        resolver = _resolver()
+        resolver.unreachable = True
+        use_case, scanner = _use_case(cache, resolver=resolver, repo=_Repo([hinted]))
+
+        await use_case.execute("node")
+
+        assert cache.store == {}
+
+    @pytest.mark.asyncio
+    async def test_tag_mutation_changes_the_cache_key(self):
+        cache = await _primed()
+        moved = _resolver(linux_amd64=digest_of("b"))
+        use_case, scanner = _use_case(cache, resolver=moved)
+
+        await use_case.execute("node")
+
+        assert scanner.scans == 1, "a moved tag reused the previous image's verdict"
+        assert len([k for k in cache.store if k.startswith(SCAN)]) == 2
+
+    @pytest.mark.asyncio
+    async def test_platform_changes_the_cache_key(self):
+        from dockerls.domain.value_objects.platform import Platform
+
+        cache = await _primed()
+        resolver = _resolver(linux_amd64=MANIFEST, linux_arm64=digest_of("c"))
+        use_case, scanner = _use_case(cache, resolver=resolver, platform=Platform.parse("linux/arm64"))
+
+        await use_case.execute("node")
+
+        assert scanner.scans == 1, "amd64's verdict was served for arm64"
+        assert scanner.references == [f"node@{digest_of('c')}"]
+
+    @pytest.mark.asyncio
+    async def test_payload_for_another_digest_is_never_served(self):
+        cache = await _primed()
+        key = _key(cache, SCAN)
+        row = cache.store[key]
+        row["digest"] = digest_of("f")
+        row["scan"]["image_reference"] = f"node@{digest_of('f')}"
+        use_case, scanner = _use_case(cache)
+
+        result = await use_case.execute("node")
+
+        assert scanner.scans == 1
+        assert result.recommendations[0].scan.image_reference == f"node@{MANIFEST}"
+
+    @pytest.mark.asyncio
+    async def test_an_evaluation_for_another_identity_is_never_served(self):
+        cache = await _primed()
+        key = _key(cache, EVAL)
+        cache.store[key]["analysis"]["image"]["digest"] = digest_of("e")
+        use_case, scanner = _use_case(cache)
+
+        result = await use_case.execute("node")
+
+        assert result.recommendations[0].image.digest == MANIFEST
+        assert scanner.scans == 0, "the scan row is still good; only the evaluation is foreign"
 
 
 class TestCacheKeyIsSchemaVersioned:
@@ -298,47 +342,60 @@ class TestCacheKeyIsSchemaVersioned:
         assert asyncio.run(cache.get("analysis:node:22")) is not None
 
 
-class TestCacheKeyCoversScoreAffectingInputs:
-    """As regras de ignore e o threat intel são aplicados *antes* de cachear,
-    então precisam entrar na chave. Sem isso o cache guardava uma supressão
-    de CVE já revogada e a servia por até 24h."""
+class TestPolicyKeyCoversScoreAffectingInputs:
+    """As regras de ignore e o threat intel são aplicados *antes* de avaliar,
+    então precisam entrar na chave da *avaliação*. Sem isso o cache guardava
+    uma supressão de CVE já revogada e a servia por até 24h. A camada do scan
+    bruto não os conhece de propósito: mudá-los não pode custar um scan."""
 
-    def _use_case(self, **kwargs):
-        return RecommendImagesUseCase(
-            repository=_Repo(), scanner=_CountingScanner(), eol_checker=_EOL(), **kwargs
-        )
+    def _uc(self, **kwargs):
+        return _use_case(_Cache(), **kwargs)[0]
 
     def test_changing_the_ignore_set_changes_the_key(self, tmp_path):
         ignore = tmp_path / ".dockerls-ignore.yaml"
         ignore.write_text("ignores:\n  - cve: CVE-2026-0001\n")
-        with_rule = self._use_case(ignore_path=ignore)
+        with_rule = self._uc(ignore_path=ignore)
 
         ignore.write_text("ignores: []\n")
-        without_rule = self._use_case(ignore_path=ignore)
+        without_rule = self._uc(ignore_path=ignore)
 
-        assert _key_for(with_rule) != _key_for(without_rule)
+        assert with_rule._analysis_fingerprint != without_rule._analysis_fingerprint  # noqa: SLF001
 
     def test_an_expired_rule_does_not_reuse_the_suppressed_entry(self, tmp_path):
-        """O arquivo de ignore promete que uma isenção vencida deixa de
-        valer. Se a chave não mudasse, o cache desfazia essa promessa."""
         ignore = tmp_path / ".dockerls-ignore.yaml"
         ignore.write_text("ignores:\n  - cve: CVE-2026-0001\n    expires: 2999-01-01\n")
-        active = self._use_case(ignore_path=ignore)
+        active = self._uc(ignore_path=ignore)
 
         ignore.write_text("ignores:\n  - cve: CVE-2026-0001\n    expires: 2000-01-01\n")
-        expired = self._use_case(ignore_path=ignore)
+        expired = self._uc(ignore_path=ignore)
 
-        assert _key_for(active) != _key_for(expired)
+        assert active._analysis_fingerprint != expired._analysis_fingerprint  # noqa: SLF001
 
     def test_toggling_threat_intel_changes_the_key(self):
         from unittest.mock import MagicMock
 
-        assert _key_for(self._use_case()) != _key_for(self._use_case(threat_intel=MagicMock()))
+        assert (
+            self._uc()._analysis_fingerprint  # noqa: SLF001
+            != self._uc(threat_intel=MagicMock())._analysis_fingerprint  # noqa: SLF001
+        )
 
     def test_the_same_inputs_give_a_stable_key(self):
-        """O fingerprint não pode variar entre execuções, senão o cache
-        nunca acerta."""
-        assert _key_for(self._use_case()) == _key_for(self._use_case())
+        assert self._uc()._analysis_fingerprint == self._uc()._analysis_fingerprint  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_changing_the_ignore_rules_recomputes_without_a_new_scan(self, tmp_path):
+        ignore = tmp_path / ".dockerls-ignore.yaml"
+        ignore.write_text("ignores: []\n")
+        cache = _Cache()
+        first, scanner = _use_case(cache, ignore_path=ignore)
+        await first.execute("node")
+
+        ignore.write_text("ignores:\n  - cve: CVE-2026-0001\n")
+        second, _ = _use_case(cache, scanner=scanner, ignore_path=ignore)
+        await second.execute("node")
+
+        assert scanner.scans == 1, "a policy change must reuse the raw scan"
+        assert len([k for k in cache.store if k.startswith(EVAL)]) == 2
 
 
 class _BrokenCache(CacheStoreInterface):
@@ -366,24 +423,12 @@ class _BrokenCache(CacheStoreInterface):
 
 
 class TestStorageFailuresNeverDiscardAScan:
-    """The cache is an optimisation, never a source of truth.
-
-    A write error used to unwind into `analyze_tag`'s handler, which reports
-    *scan* failures -- so a fully scanned, fully scored image was recorded as
-    `ERROR`/unverified and vanished from the results because SQLite happened
-    to be locked.
-    """
+    """The cache is an optimisation, never a source of truth."""
 
     @pytest.mark.parametrize("failing", ["set", "get", "delete"])
     @pytest.mark.asyncio
     async def test_image_is_still_recommended(self, failing):
-        scanner = _CountingScanner()
-        use_case = RecommendImagesUseCase(
-            repository=_Repo(),
-            scanner=scanner,
-            eol_checker=_EOL(),
-            cache=_BrokenCache({failing}),
-        )
+        use_case, scanner = _use_case(_BrokenCache({failing}))
 
         result = await use_case.execute("node")
 
@@ -396,46 +441,43 @@ class TestStorageFailuresNeverDiscardAScan:
 class TestCacheIsKeyedByDigestNotTag:
     """Tags são mutáveis: `node:22-alpine` de hoje não é a mesma imagem de
     ontem. Uma entrada chaveada por tag continuava servindo o resultado antigo
-    por até 24h depois de um rebuild upstream -- ou seja, um veredito de
-    segurança sobre bytes que não existem mais."""
+    por até 24h depois de um rebuild upstream."""
 
-    def _use_case(self):
-        return RecommendImagesUseCase(
-            repository=_Repo(), scanner=_CountingScanner(), eol_checker=_EOL()
-        )
+    @pytest.mark.asyncio
+    async def test_same_tag_different_digest_is_a_different_entry(self):
+        cache = await _primed()
+        rebuilt = _resolver(linux_amd64=digest_of("9"))
+        use_case, scanner = _use_case(cache, resolver=rebuilt)
 
-    def test_same_tag_different_digest_is_a_different_entry(self):
-        uc = self._use_case()
-        before = DockerImage(name="node", tag="22-alpine", digest="sha256:" + "a" * 64)
-        after = DockerImage(name="node", tag="22-alpine", digest="sha256:" + "b" * 64)
+        await use_case.execute("node")
 
-        assert uc._cache_key(before) != uc._cache_key(after), (
-            "a rebuilt tag reused the previous image's cached verdict"
-        )
+        assert scanner.scans == 1, "a rebuilt tag reused the previous image's cached verdict"
 
-    def test_same_digest_under_different_tags_shares_the_entry(self):
+    @pytest.mark.asyncio
+    async def test_same_digest_under_different_tags_is_one_scan_and_one_entry(self):
         """São os mesmos bytes -- escaneá-los duas vezes é desperdício."""
-        uc = self._use_case()
-        digest = "sha256:" + "a" * 64
-        a = DockerImage(name="node", tag="22-alpine", digest=digest)
-        b = DockerImage(name="node", tag="22", digest=digest)
+        tags = [TAG.model_copy(), DockerImage(name="node", tag="22", is_official=True)]
+        resolver = _resolver()
+        resolver.publish("node", "22", digest_of("1"), linux_amd64=MANIFEST)
+        cache = _Cache()
+        use_case, scanner = _use_case(cache, resolver=resolver, repo=_Repo(tags))
 
-        assert uc._cache_key(a) == uc._cache_key(b)
+        await use_case.execute("node")
 
-    def test_it_refuses_cache_identity_without_a_digest(self):
-        """A mutable reference is metadata, never a security identity."""
-        uc = self._use_case()
-        image = DockerImage(name="cgr.dev/chainguard/node", tag="latest")
+        assert scanner.scans == 1
+        assert len([k for k in cache.store if k.startswith(SCAN)]) == 1
 
-        assert uc._cache_key(image) is None
+    @pytest.mark.asyncio
+    async def test_all_unconfirmed_images_are_ineligible_for_the_security_cache(self):
+        cache = _Cache()
+        resolver = FakeRegistryResolver()  # knows nothing: every tag is unconfirmed
+        tags = [DockerImage(name="node", tag="22-alpine"), DockerImage(name="node", tag="20-alpine")]
+        use_case, scanner = _use_case(cache, resolver=resolver, repo=_Repo(tags))
 
-    def test_all_untagged_images_are_ineligible_for_security_cache(self):
-        uc = self._use_case()
-        a = DockerImage(name="node", tag="22-alpine")
-        b = DockerImage(name="node", tag="20-alpine")
+        await use_case.execute("node")
 
-        assert uc._cache_key(a) is None
-        assert uc._cache_key(b) is None
+        assert scanner.scans == 2
+        assert cache.store == {}
 
 
 class TestFingerprintCoversTheToolItself:
@@ -443,23 +485,18 @@ class TestFingerprintCoversTheToolItself:
     verdict -- all decided by policy that lives in this package. Keying only
     on the scanner meant a release that changed a penalty weight or a
     blocking rule kept serving verdicts decided under the previous rules
-    until the TTL expired. `CACHE_SCHEMA_VERSION` does not catch it: the
-    payload's shape is unchanged, so validation accepts it and only the
-    meaning has moved.
-    """
+    until the TTL expired."""
 
     def _use_case(self):
-        return RecommendImagesUseCase(
-            repository=_Repo(), scanner=_CountingScanner(), eol_checker=_EOL()
-        )
+        return _use_case(_Cache())[0]
 
     def test_the_dockerls_version_is_part_of_the_key(self, monkeypatch):
         from dockerls.application.use_cases import recommend_images as module
 
         use_case = self._use_case()
-        before = use_case._compute_analysis_fingerprint()
+        before = use_case._compute_analysis_fingerprint()  # noqa: SLF001
         monkeypatch.setattr(module, "__version__", "999.999.999")
-        after = use_case._compute_analysis_fingerprint()
+        after = use_case._compute_analysis_fingerprint()  # noqa: SLF001
         assert before != after, (
             "an upgrade that changes scoring policy must not reuse the previous "
             "release's cached verdicts"
@@ -467,6 +504,6 @@ class TestFingerprintCoversTheToolItself:
 
     def test_the_scanner_identity_is_still_part_of_the_key(self):
         use_case = self._use_case()
-        before = use_case._compute_analysis_fingerprint()
-        use_case._scanner_identity = "grype 0.90.0"
-        assert use_case._compute_analysis_fingerprint() != before
+        before = use_case._compute_analysis_fingerprint()  # noqa: SLF001
+        use_case._scanner_identity = "grype 0.90.0"  # noqa: SLF001
+        assert use_case._compute_analysis_fingerprint() != before  # noqa: SLF001

@@ -18,6 +18,7 @@ bytes were pinned.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -29,6 +30,9 @@ from dockerls.domain.value_objects.image_identity import (
 
 if TYPE_CHECKING:
     from dockerls.domain.value_objects.platform import Platform
+
+
+_CANONICAL_DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
 
 
 class IdentityStatus(StrEnum):
@@ -77,7 +81,12 @@ class ResolvedIdentity:
 
     @property
     def confirmed(self) -> bool:
-        return self.status is IdentityStatus.CONFIRMED and bool(self.manifest_digest)
+        # A digest that is not canonical `sha256:<64 hex>` cannot be an
+        # identity, whatever the source claimed: registry and catalogue
+        # responses are untrusted input.
+        return self.status is IdentityStatus.CONFIRMED and bool(
+            _CANONICAL_DIGEST.fullmatch(self.manifest_digest)
+        )
 
     @property
     def resolved_reference(self) -> str:

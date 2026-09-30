@@ -56,7 +56,7 @@ def compare(
 
 
 async def _compare(images: list[str]) -> None:
-    use_case = await build_compare_use_case()
+    use_case = await build_compare_use_case(len(images))
     try:
         with scan_status(f"Scanning {len(images)} image(s) to compare..."):
             result = await use_case.execute(images)

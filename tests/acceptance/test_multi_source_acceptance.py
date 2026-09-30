@@ -26,6 +26,8 @@ from dockerls.domain.entities.image_facts import EvidenceSource, HardeningFacts
 from dockerls.domain.entities.scan_result import ScanErrorKind, ScanResult, ScanStatus
 from dockerls.domain.interfaces.eol_checker import EOLCheckerInterface
 from dockerls.domain.value_objects.confidence import Confidence
+from dockerls.domain.value_objects.measured_identity import IdentityStatus, ResolvedIdentity
+from dockerls.domain.value_objects.platform import DEFAULT_PLATFORM, Platform
 from dockerls.domain.value_objects.tristate import Tristate
 
 SHARED_DIGEST = "sha256:" + "a" * 64
@@ -57,7 +59,7 @@ class _CountingScanner:
         self.scanned: list[str] = []
         self._failing = failing or set()
 
-    async def scan(self, image_reference: str) -> ScanResult:
+    async def scan(self, image_reference: str, platform: str | None = None) -> ScanResult:
         self.scanned.append(image_reference)
         if any(image_reference.startswith(prefix) for prefix in self._failing):
             return ScanResult(
@@ -96,6 +98,28 @@ class _Inspector:
         self._digests = digests
         self._facts = facts or HardeningFacts()
         self.inspections: list[str] = []
+
+    async def resolve_identity(
+        self, name: str, tag: str, digest: str = "", platform: Platform | None = None
+    ) -> ResolvedIdentity:
+        wanted = platform or DEFAULT_PLATFORM
+        manifest = self._digests.get(f"{name}:{tag}", "")
+        if not manifest:
+            return ResolvedIdentity(
+                name=name,
+                tag=tag,
+                platform=wanted,
+                status=IdentityStatus.UNRESOLVED,
+                limitation="the registry did not answer",
+            )
+        return ResolvedIdentity(
+            name=name,
+            tag=tag,
+            platform=wanted,
+            status=IdentityStatus.CONFIRMED,
+            index_digest="sha256:" + "0" * 64,
+            manifest_digest=manifest,
+        )
 
     async def resolve_digest(self, image: DockerImage) -> str:
         return self._digests.get(image.full_reference, "")

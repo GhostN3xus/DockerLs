@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
+
+from loguru import logger
 
 from dockerls.application.dto.analysis import (
     ComparisonResult,
@@ -35,8 +38,40 @@ class CompareImagesUseCase:
         # pior, que servisse de piso para o delta de quem foi medido.
         analyses: list[ImageAnalysis] = []
         unverified: list[UnverifiedImage] = []
-        for ref in references:
-            analysis = await self._analyze.execute(ref)
+        # The images are independent, so they are analysed together -- but
+        # never unboundedly: each one holds a scanner process, and the limit is
+        # the machine-derived one the analyse use case was built with. Results
+        # come back in the order the images were asked for (a comparison table
+        # is read top to bottom against that order), and one image failing --
+        # a bad reference, a registry that refuses -- is that image's row in
+        # `unverified`, never the end of the others.
+        # An analyse use case that cannot state its limit is run one at a time.
+        limit = self._analyze.concurrency
+        gate = asyncio.Semaphore(limit if isinstance(limit, int) and limit > 0 else 1)
+
+        async def analyse(ref: str) -> ImageAnalysis | BaseException:
+            async with gate:
+                try:
+                    return await self._analyze.execute(ref)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"Could not analyse {ref}: {e}")
+                    return e
+
+        outcomes = await asyncio.gather(*(analyse(ref) for ref in references))
+        for ref, outcome in zip(references, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                unverified.append(
+                    UnverifiedImage(
+                        image_reference=ref,
+                        status="ERROR",
+                        reason=str(outcome) or type(outcome).__name__,
+                        kind="UNKNOWN",
+                    )
+                )
+                continue
+            analysis = outcome
             if analysis.scan.is_verified:
                 analyses.append(analysis)
                 continue

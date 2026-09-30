@@ -8,6 +8,8 @@ from loguru import logger
 from dockerls.application.services.composite_repository import CompositeImageRepository
 from dockerls.application.services.cross_validation import CrossValidator
 from dockerls.application.services.hardening_analysis import HardeningAnalyzer
+from dockerls.application.services.measurement import MeasurementService
+from dockerls.application.services.measurement_store import MeasurementStore
 from dockerls.application.services.scanner_factory import ScannerFactory
 from dockerls.application.services.source_registry import SourceRegistry, SourceSpec
 from dockerls.application.use_cases.analyze_image import AnalyzeImageUseCase
@@ -22,6 +24,7 @@ from dockerls.cli.runtime import (
 )
 from dockerls.domain.entities.image import DOCKER_HUB
 from dockerls.domain.value_objects.network_policy import NetworkPolicy
+from dockerls.domain.value_objects.platform import DEFAULT_PLATFORM, Platform
 from dockerls.infrastructure.evidence import EvidenceStore
 from dockerls.infrastructure.network.host_guard import HostGuard
 from dockerls.integrations.dhi.catalog import DHICatalogClient
@@ -46,10 +49,12 @@ from dockerls.utils.validation import validate_threshold, validate_workers
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from dockerls.application.services.instrumentation import RunInstrumentation
     from dockerls.application.services.progress import ScanObserver
     from dockerls.application.services.source_registry import SourceBuilder
     from dockerls.cache.sqlite_cache import SQLiteCache
     from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
+    from dockerls.utils.deadline import Deadline
 
 # As Settings e o logging moram em `cli/runtime.py`, que não arrasta este
 # módulo junto: o callback de bootstrap precisa deles antes de todo
@@ -389,6 +394,9 @@ async def build_recommend_use_case(
     sources: Sequence[str] | None = None,
     all_sources: bool = False,
     scan_budget: int | None = None,
+    platform: Platform | None = None,
+    deadline: Deadline | None = None,
+    instrumentation: RunInstrumentation | None = None,
 ) -> RecommendImagesUseCase:
     s = _settings()
     # None means "not given on the command line", so the configured value
@@ -414,12 +422,29 @@ async def build_recommend_use_case(
         cache=cache,
     )
     evidence = build_evidence_store()
+    scan_platform = platform or DEFAULT_PLATFORM
+    # One store behind every command: what `analyze` measured, `recommend` and
+    # `compare` reuse. `--no-cache` hands it no backing cache at all, which is
+    # what the flag has always meant (no reads, no writes of measurements).
+    store = MeasurementStore(cache, scan_ttl_seconds=s.cache_ttl_seconds)
+    hardening = build_hardening_analyzer(store=store)
     scanner = await ScannerFactory.create(
         timeout=s.scanner_timeout,
         workers=workers,
         cache_dir=s.trivy_cache_dir,
         evidence=evidence,
         guard=build_host_guard(),
+    )
+    measurement = MeasurementService(
+        scanner,
+        # Declining to pin tags (`resolve_digests = false`) leaves every
+        # identity unconfirmed: still measured, never stored as pinned.
+        resolver=hardening if s.resolve_digests else None,
+        store=store,
+        platform=scan_platform,
+        max_concurrency=workers,
+        deadline=deadline,
+        instrumentation=instrumentation,
     )
     eol = EndOfLifeChecker(
         timeout=s.http_timeout,
@@ -428,6 +453,8 @@ async def build_recommend_use_case(
     )
 
     secondary = None
+    secondary_measurement = None
+    cross_workers = min(resolve_workers(s.cross_validate_workers or None), workers)
     if s.cross_validate if cross_validate is None else cross_validate:
         secondary = await ScannerFactory.create_secondary(
             scanner,
@@ -436,12 +463,25 @@ async def build_recommend_use_case(
             guard=build_host_guard(),
             # O mesmo teto do passo principal: a cross-validação roda depois
             # dele e herda o orçamento, em vez de abrir um segundo maior.
-            workers=min(resolve_workers(s.cross_validate_workers or None), workers),
+            workers=cross_workers,
         )
+        if secondary is not None:
+            secondary_measurement = MeasurementService(
+                secondary,
+                resolver=hardening if s.resolve_digests else None,
+                store=store,
+                platform=scan_platform,
+                max_concurrency=cross_workers,
+                deadline=deadline,
+                instrumentation=instrumentation,
+                stage="scan_secondary",
+            )
 
     return RecommendImagesUseCase(
         repository=repo,
-        hardening=build_hardening_analyzer(),
+        hardening=hardening,
+        measurement=measurement,
+        platform=scan_platform,
         resolve_digests=s.resolve_digests,
         scanner=scanner,
         eol_checker=eol,
@@ -459,7 +499,8 @@ async def build_recommend_use_case(
             # Capped at the primary worker count as well as the machine's:
             # cross-validation runs after the main pass, so it inherits the
             # same budget rather than opening a second, larger one.
-            workers=min(resolve_workers(s.cross_validate_workers or None), workers),
+            workers=cross_workers,
+            measurement=secondary_measurement,
         ),
         evidence=evidence,
         verify_hub_tags=s.verify_hub_tags if verify_hub_tags is None else verify_hub_tags,
@@ -503,7 +544,7 @@ def build_registry_credentials() -> dict[str, tuple[str, str]]:
     return {s.private_registry_host: (s.private_registry_username, s.private_registry_password)}
 
 
-def build_hardening_analyzer() -> HardeningAnalyzer:
+def build_hardening_analyzer(store: MeasurementStore | None = None) -> HardeningAnalyzer:
     """The registry-backed evidence gatherer, or a disabled one.
 
     With `inspect_image_config` off the analyzer still exists but has no
@@ -523,13 +564,25 @@ def build_hardening_analyzer() -> HardeningAnalyzer:
         if s.inspect_image_config
         else None
     )
-    return HardeningAnalyzer(inspector=inspector)
+    return HardeningAnalyzer(inspector=inspector, store=store)
 
 
-async def build_analyze_use_case() -> AnalyzeImageUseCase:
+async def build_analyze_use_case(
+    *,
+    platform: Platform | None = None,
+    workers: int = 1,
+    use_cache: bool = True,
+    deadline: Deadline | None = None,
+    instrumentation: RunInstrumentation | None = None,
+) -> AnalyzeImageUseCase:
     s = _settings()
     repo = await build_repository()
-    scanner = await ScannerFactory.create(timeout=s.scanner_timeout, guard=build_host_guard())
+    scanner = await ScannerFactory.create(
+        timeout=s.scanner_timeout,
+        workers=workers,
+        cache_dir=s.trivy_cache_dir,
+        guard=build_host_guard(),
+    )
     eol = EndOfLifeChecker(
         timeout=s.http_timeout,
         max_attempts=s.retry_max_attempts,
@@ -541,6 +594,17 @@ async def build_analyze_use_case() -> AnalyzeImageUseCase:
     from dockerls.application.services.tag_history_store import TagHistoryStore
 
     cache = build_cache()
+    store = MeasurementStore(cache if use_cache else None, scan_ttl_seconds=s.cache_ttl_seconds)
+    hardening = build_hardening_analyzer(store=store)
+    measurement = MeasurementService(
+        scanner,
+        resolver=hardening if s.resolve_digests else None,
+        store=store,
+        platform=platform or DEFAULT_PLATFORM,
+        max_concurrency=workers,
+        deadline=deadline,
+        instrumentation=instrumentation,
+    )
     return AnalyzeImageUseCase(
         repository=repo,
         scanner=scanner,
@@ -548,14 +612,36 @@ async def build_analyze_use_case() -> AnalyzeImageUseCase:
         threat_intel=_threat_intel(),
         exploitdb=_exploitdb(),
         osv=_osv(),
-        hardening=build_hardening_analyzer(),
+        hardening=hardening,
         tag_history=TagHistoryStore(cache),
         scan_history=ScanHistoryStore(cache),
+        measurement=measurement,
     )
 
 
-async def build_compare_use_case() -> CompareImagesUseCase:
-    analyze = await build_analyze_use_case()
+async def build_compare_use_case(
+    image_count: int = 2,
+    *,
+    platform: Platform | None = None,
+    workers: int | None = None,
+    use_cache: bool = True,
+    deadline: Deadline | None = None,
+    instrumentation: RunInstrumentation | None = None,
+) -> CompareImagesUseCase:
+    """`compare` measures its images concurrently, within the machine's limits.
+
+    The worker count is the machine-derived (or configured) one, never more
+    than there are images: a scanner process per image is the useful ceiling,
+    and anything above it would only hold idle cache slots.
+    """
+    concurrency = max(1, min(resolve_workers(workers), image_count))
+    analyze = await build_analyze_use_case(
+        platform=platform,
+        workers=concurrency,
+        use_cache=use_cache,
+        deadline=deadline,
+        instrumentation=instrumentation,
+    )
     return CompareImagesUseCase(analyze_use_case=analyze)
 
 

@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from loguru import logger
 
 from dockerls.application.dto.analysis import MeasurementProvenance
+from dockerls.application.services.fallback_scanner import FallbackScanner
 from dockerls.application.services.measurement_store import (
     MeasurementStore,
     MissReason,
@@ -121,10 +122,52 @@ def _user_pinned_digest(image: DockerImage) -> str:
     return match.group(1).lower() if match else ""
 
 
+def _for_caller(measurement: Measurement, refs: ImageRefs, *, shared: bool) -> Measurement:
+    """`measurement` as seen by one caller.
+
+    The scan is shared; what the caller *asked for* is its own. `measured`
+    stays what the scanner really received, which is exactly the point when a
+    mirror's request is served by another repository's scan of the same bytes.
+    """
+    provenance = measurement.provenance.model_copy(
+        update={
+            "requested_reference": refs.requested,
+            "resolved_reference": refs.resolved,
+            "origin": "shared" if shared else measurement.provenance.origin,
+        }
+    )
+    return replace(
+        measurement,
+        shared=shared,
+        refs=ImageRefs(
+            requested=refs.requested, resolved=refs.resolved, measured=measurement.refs.measured
+        ),
+        provenance=provenance,
+    )
+
+
+def _hint(image: DockerImage) -> str:
+    """The digest a discovery source reported for `image`, or "".
+
+    Used only to avoid measuring the same thing twice in one run; it is never
+    an identity (see `_run_key`), so it need not be canonical.
+    """
+    return image.digest.lower()
+
+
+def _dedup_of(key: tuple[str, ...]) -> str:
+    """The engine's dedup key: identical for identical identities only."""
+    return "|".join(key)
+
+
 def _accepts_platform(scanner: ScannerInterface) -> bool:
     try:
         parameters = inspect.signature(scanner.scan).parameters
-    except (TypeError, ValueError):  # pragma: no cover - builtins/C callables
+    except (TypeError, ValueError, RecursionError):
+        # Builtins, C callables and auto-spec'd mocks have no usable signature.
+        # Unknown means "do not pass it": a scanner that cannot be inspected is
+        # not sent an argument it may not take, and a non-default platform is
+        # then refused for an unconfirmed identity rather than guessed.
         return False
     return "platform" in parameters or any(
         p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()
@@ -133,10 +176,8 @@ def _accepts_platform(scanner: ScannerInterface) -> bool:
 
 def scanner_kind(scanner: object) -> str:
     """A stable, lowercase name for a scanner, for cache namespaces."""
-    primary = getattr(scanner, "primary", None)
-    secondary = getattr(scanner, "secondary", None)
-    if primary is not None and secondary is not None:
-        return f"{scanner_kind(primary)}+{scanner_kind(secondary)}"
+    if isinstance(scanner, FallbackScanner):
+        return f"{scanner_kind(scanner.primary)}+{scanner_kind(scanner.secondary)}"
     name = type(scanner).__name__.lower()
     for known in ("trivy", "grype"):
         if known in name:
@@ -173,6 +214,10 @@ class MeasurementService:
         self._identity_flight: SingleFlight[ResolvedIdentity] = SingleFlight()
         self._prepare_flight: SingleFlight[bool] = SingleFlight()
         self._finished: dict[tuple[str, ...], Measurement] = {}
+        # Results produced by a batch before anyone asked for them: handed out
+        # once (as that caller's own measurement, not a duplicate) and then
+        # moved to `_finished`.
+        self._prefetched: dict[tuple[str, ...], Measurement] = {}
         self._fingerprint: ScannerFingerprint | None = None
         self._accepts_platform = _accepts_platform(scanner)
         self.stats = MeasurementStats()
@@ -309,10 +354,25 @@ class MeasurementService:
             return f"{image.name}@{digest}"
         return image.full_reference
 
-    def _run_key(self, identity: ResolvedIdentity, measured: str) -> tuple[str, ...]:
+    def _run_key(
+        self, identity: ResolvedIdentity, measured: str, hint: str = ""
+    ) -> tuple[str, ...]:
+        """What makes two requests *the same measurement* within this run.
+
+        A confirmed identity is the platform manifest itself. Without one, a
+        digest the discovery source reported for both tags is still good enough
+        to avoid scanning twice in one run (the same listing named the same
+        bytes) -- but it never becomes persistent evidence, which is decided by
+        `identity.identity`, not by this key.
+        """
         strict = identity.identity
         if strict is not None:
-            return ("confirmed", strict.cache_material)
+            # Digests are content addresses: the same platform manifest
+            # reached through two registries or repositories (a hardened
+            # catalogue's mirror of a Docker Hub image) is one measurement.
+            return ("confirmed", strict.digest, strict.platform)
+        if hint:
+            return ("hinted", hint, str(identity.platform), str(identity.name))
         return ("unconfirmed", measured, str(identity.platform))
 
     async def measure(self, image: DockerImage) -> Measurement:
@@ -329,11 +389,16 @@ class MeasurementService:
                 image, identity, refs, ScanErrorKind.PLATFORM_UNAVAILABLE, identity.limitation
             )
 
-        key = self._run_key(identity, measured)
+        key = self._run_key(identity, measured, _hint(image))
+        prefetched = self._prefetched.pop(key, None)
+        if prefetched is not None:
+            result = _for_caller(prefetched, refs, shared=False)
+            self._finished[key] = result
+            return result
         done = self._finished.get(key)
         if done is not None:
             self.stats.duplicates_avoided += 1
-            return replace(done, shared=True, refs=refs)
+            return _for_caller(done, refs, shared=True)
 
         async def once() -> Measurement:
             return await self._measure_once(image, identity, refs, measured)
@@ -341,7 +406,7 @@ class MeasurementService:
         result, joined = await self._scan_flight.run(key, once)
         if joined:
             self.stats.duplicates_avoided += 1
-            result = replace(result, shared=True, refs=refs)
+            result = _for_caller(result, refs, shared=True)
         self._finished[key] = result
         return result
 
@@ -365,7 +430,7 @@ class MeasurementService:
                     identity=identity,
                     refs=refs,
                     provenance=self._provenance(
-                        image, identity, refs, fingerprint, "cache", record.measured_at
+                        identity, refs, fingerprint, "cache", record.measured_at
                     ),
                     from_cache=True,
                 )
@@ -380,7 +445,7 @@ class MeasurementService:
                 identity, fingerprint, scan, requested_reference=refs.requested, origin=origin
             )
         provenance = self._provenance(
-            image, identity, refs, fingerprint, origin, scan.scan_timestamp, note=note
+            identity, refs, fingerprint, origin, scan.scan_timestamp, note=note
         )
         return Measurement(scan=scan, identity=identity, refs=refs, provenance=provenance)
 
@@ -436,6 +501,105 @@ class MeasurementService:
 
     # ---- batch -------------------------------------------------------------
 
+    async def prescan(self, images: Sequence[DockerImage], chunk_size: int | None = None) -> int:
+        """Measure what is missing in one engine batch, when an engine exists.
+
+        The Go engine turns N process round-trips into one; it does not make a
+        scan cheaper. So this only *prefills* the per-run results: identities
+        are pinned first (a batch of tags would be the old race again), stored
+        scans are served before anything is spent, identical identities are
+        sent once, and everything that follows -- `measure`, provenance,
+        storing -- is the same code as the Python path.
+
+        Under a bounded deadline the batch is cut into chunks so that the
+        results of finished chunks survive the budget running out; one giant
+        batch would lose them all together. Returns the number of targets the
+        engine measured; 0 means nothing was batched and `measure` does it all.
+        """
+        batch = getattr(self._scanner, "batch", None)
+        if batch is None or not images:
+            return 0
+        await asyncio.gather(*(self.resolve(image) for image in images))
+        fingerprint = await self.fingerprint()
+
+        pending: list[tuple[tuple[str, ...], ResolvedIdentity, ImageRefs, str]] = []
+        seen: set[tuple[str, ...]] = set()
+        for image in images:
+            identity = await self.resolve(image)
+            if identity.status is IdentityStatus.PLATFORM_MISMATCH:
+                continue
+            measured = self._measured_reference(image, identity, _user_pinned_digest(image))
+            refs = identity.refs(image.requested_reference or image.full_reference, measured)
+            key = self._run_key(identity, measured, _hint(image))
+            if key in seen or key in self._finished or key in self._prefetched:
+                continue
+            seen.add(key)
+            strict = identity.identity
+            if strict is not None:
+                lookup = await self._store.get_scan(strict, fingerprint)
+                if lookup.hit:
+                    record = lookup.value
+                    self.stats.cache_hits += 1
+                    self._prefetched[key] = Measurement(
+                        scan=record.scan,
+                        identity=identity,
+                        refs=refs,
+                        provenance=self._provenance(
+                            identity, refs, fingerprint, "cache", record.measured_at
+                        ),
+                        from_cache=True,
+                    )
+                    continue
+            pending.append((key, identity, refs, measured))
+
+        if not pending:
+            return 0
+        size = chunk_size or (max(2 * self._max_concurrency, 8) if self._deadline.bounded else 0)
+        chunks = (
+            [pending[i : i + size] for i in range(0, len(pending), size)] if size else [pending]
+        )
+        handled = 0
+        for chunk in chunks:
+            if not self._deadline.allows(self._min_scan_seconds):
+                break
+            targets = [("|".join(key), _dedup_of(key)) for key, _, _, _ in chunk]
+            platform = str(self._platform)
+            started = time.monotonic()
+
+            async def run_chunk(
+                batch: Any = batch,
+                targets: list[tuple[str, str]] = targets,
+                platform: str = platform,
+            ) -> Any:
+                return await batch.scan_batch(targets, platform=platform)
+
+            try:
+                outcome = await run_within(self._deadline, run_chunk)
+            except DeadlineExceededError:
+                break
+            finally:
+                if self._instrumentation is not None:
+                    self._instrumentation.add(self._stage, time.monotonic() - started)
+            if outcome is None:
+                break  # the engine declined; the Python path measures the rest
+            self.stats.scans_performed += outcome.scans_performed
+            handled += len(chunk)
+            for (key, identity, refs, _measured), scan in zip(chunk, outcome.results, strict=True):
+                scan.platform = platform
+                if identity.identity is not None and scan.is_verified:
+                    await self._store.put_scan(
+                        identity, fingerprint, scan, requested_reference=refs.requested
+                    )
+                self._prefetched[key] = Measurement(
+                    scan=scan,
+                    identity=identity,
+                    refs=refs,
+                    provenance=self._provenance(
+                        identity, refs, fingerprint, "scan", scan.scan_timestamp
+                    ),
+                )
+        return handled
+
     async def measure_many(
         self,
         images: Sequence[DockerImage],
@@ -476,7 +640,6 @@ class MeasurementService:
 
     def _provenance(
         self,
-        image: DockerImage,
         identity: ResolvedIdentity,
         refs: ImageRefs,
         fingerprint: ScannerFingerprint,
@@ -537,7 +700,7 @@ class MeasurementService:
             scan=scan,
             identity=identity,
             refs=refs,
-            provenance=self._provenance(image, identity, refs, fingerprint, "scan", ""),
+            provenance=self._provenance(identity, refs, fingerprint, "scan", ""),
         )
 
 

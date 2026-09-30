@@ -148,6 +148,8 @@ class ImageAnalysis(BaseModel):
     vuln_trend_note: str = ""
     #: Identity, scanner and freshness of the measurement behind this analysis.
     provenance: MeasurementProvenance = Field(default_factory=MeasurementProvenance)
+    #: The same, for the second scanner's measurement, when there was one.
+    secondary_provenance: MeasurementProvenance | None = None
 
     @property
     def pinned_reference(self) -> str:
@@ -221,6 +223,11 @@ class RunMetrics(BaseModel):
     #: Reported rather than assumed: two runs of the same command against the
     #: same image are only comparable if this matches.
     scanner_identity: str = ""
+    #: When the vulnerability database in use was built ("" = could not be read).
+    db_revision: str = ""
+    #: Measurements that joined another task's scan or an earlier result of the
+    #: same run instead of starting their own.
+    duplicates_avoided: int = 0
 
     @property
     def duplicates_collapsed(self) -> int:

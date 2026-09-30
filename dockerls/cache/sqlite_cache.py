@@ -35,7 +35,13 @@ if TYPE_CHECKING:
 # would validate and fill all of them with defaults -- which read as
 # "nothing determined" and would present a cached image as uninspected
 # rather than as measured.
-CACHE_SCHEMA_VERSION = "v4"
+# v5: measurement results moved into the layered store (`m:scan`, `m:eval`,
+# `m:oci` keys, see application/services/measurement_store.py), and identities
+# now carry the platform manifest digest. A v4 `analysis:` row was keyed by
+# whatever digest discovery reported -- an index digest for some sources, a
+# platform manifest for others -- so it could name bytes that were never the
+# ones scanned. Orphaning it costs one cold run and removes the ambiguity.
+CACHE_SCHEMA_VERSION = "v5"
 
 
 class CacheStats(NamedTuple):
