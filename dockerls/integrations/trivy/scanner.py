@@ -11,9 +11,17 @@ from loguru import logger
 from dockerls.domain.entities.scan_result import ScanErrorKind, ScanResult, ScanStatus
 from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.scanner import ScannerInterface
+from dockerls.infrastructure.toolchain.db_metadata import (
+    read_trivy_built_at,
+    read_trivy_next_update,
+)
 from dockerls.integrations.engine.batch import EngineBatchScanner
 from dockerls.integrations.scan_errors import classify_scanner_error
-from dockerls.integrations.scan_target import blocked_scan_result, blocked_target_reason
+from dockerls.integrations.scan_target import (
+    blocked_scan_result,
+    blocked_target_reason,
+    invalid_reference_scan_result,
+)
 from dockerls.integrations.trivy.cache_pool import TrivyCachePool, default_trivy_cache_dir
 from dockerls.utils.executables import ExecutableNotFoundError, resolve_executable
 from dockerls.utils.subprocess_runner import (
@@ -21,7 +29,7 @@ from dockerls.utils.subprocess_runner import (
     OutputTooLargeError,
     run_capture,
 )
-from dockerls.utils.validation import sanitize_image_name
+from dockerls.utils.validation import sanitize_image_name, sanitize_platform
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -125,6 +133,30 @@ class TrivyScanner(ScannerInterface):
         # schedule and would churn the cache key for no reason.
         return stdout.decode(errors="replace").strip().splitlines()[0].strip()
 
+    #: Severities and scanners requested from every `trivy image` call. Part
+    #: of what a cached measurement is a measurement *of*: changing it must
+    #: not be served from rows written under the old value.
+    SCAN_OPTIONS = "trivy-image;severity=CRITICAL,HIGH,MEDIUM,LOW;scanners=default;format=json"
+
+    def options(self) -> str:
+        """The options that affect what a scan finds, as one stable string."""
+        return self.SCAN_OPTIONS
+
+    async def db_revision(self) -> str:
+        """When the vulnerability database in use was built, or "".
+
+        The revision is what makes a cached scan valid or not: the same image
+        scanned against a newer database can have new findings. "" means the
+        revision could not be read -- callers treat that as its own value and
+        apply the conservative policy, never as "unchanged".
+        """
+        built, _ = await asyncio.to_thread(read_trivy_built_at, self._cache_pool.base_dir)
+        return built.isoformat() if built is not None else ""
+
+    async def components(self) -> dict[str, tuple[str, str]]:
+        """This tool's own version and database revision, by name."""
+        return {"trivy": (await self.version(), await self.db_revision())}
+
     def _cache_args(self, cache_dir: Path) -> list[str]:
         return ["--cache-dir", str(cache_dir)]
 
@@ -190,10 +222,17 @@ class TrivyScanner(ScannerInterface):
         `init error: DB error` em série. Quem chama precisa tratar o False.
         """
         base = self._cache_pool.base_dir
+        if await asyncio.to_thread(self._db_is_current, base):
+            # Same rule Trivy applies itself: before `NextUpdate` there is
+            # nothing to download, and asking the registry is a ~1.7 s round
+            # trip (measured) paid on every run, cache hits included.
+            logger.info(f"Trivy DB at {base} is current; not contacting the registry")
+            return await self._finish_refresh(base)
         for attempt in range(1, self.DB_DOWNLOAD_ATTEMPTS + 1):
             if on_attempt is not None:
                 on_attempt(attempt, self.DB_DOWNLOAD_ATTEMPTS)
-            ok, detail, retryable = await self._download_db(base)
+            async with self._cache_pool.db_refresh_lease():
+                ok, detail, retryable = await self._download_db(base)
             if ok:
                 break
             if not retryable:
@@ -217,11 +256,26 @@ class TrivyScanner(ScannerInterface):
             )
             await asyncio.sleep(wait)
 
+        return await self._finish_refresh(base)
+
+    def _db_is_current(self, base: Path) -> bool:
+        """The DB is on disk and Trivy itself would not replace it yet."""
+        if not (base / "db" / "trivy.db").is_file():
+            return False
+        next_update, _ = read_trivy_next_update(base)
+        return next_update is not None and next_update > datetime.now(tz=UTC)
+
+    async def _finish_refresh(self, base: Path) -> bool:
         self._skip_db_update = True
         isolated = await self._cache_pool.prepare()
+        stats = self._cache_pool.stats
         logger.info(
-            f"Trivy DB ready at {base}; "
-            f"cache isolation {'enabled' if isolated else 'unavailable (scans serialized)'}"
+            f"Trivy DB ready at {base}; cache isolation "
+            + (
+                f"enabled ({stats.leased} slots)"
+                if isolated
+                else f"unavailable, scans serialized ({stats.reason})"
+            )
         )
         return True
 
@@ -255,12 +309,16 @@ class TrivyScanner(ScannerInterface):
     async def close(self) -> None:
         await self._cache_pool.cleanup()
 
-    async def scan(self, image_reference: str) -> ScanResult:
+    async def scan(self, image_reference: str, platform: str | None = None) -> ScanResult:
         safe_ref = sanitize_image_name(image_reference)
+        try:
+            platform_args = sanitize_platform(platform)
+        except ValueError as e:
+            return invalid_reference_scan_result(safe_ref, "trivy", str(e))
         blocked = blocked_target_reason(safe_ref, self._guard)
         if blocked:
             return blocked_scan_result(safe_ref, "trivy", blocked)
-        logger.info(f"Scanning {safe_ref} with Trivy")
+        logger.info(f"Scanning {safe_ref} with Trivy" + (f" ({platform})" if platform else ""))
         timestamp = datetime.now(tz=UTC).isoformat()
 
         async with self._cache_pool.acquire() as cache_dir:
@@ -273,6 +331,7 @@ class TrivyScanner(ScannerInterface):
                     "--severity",
                     "CRITICAL,HIGH,MEDIUM,LOW",
                     "--quiet",
+                    *platform_args,
                     *self._cache_args(cache_dir),
                 ]
                 if self._skip_db_update:
@@ -314,6 +373,7 @@ class TrivyScanner(ScannerInterface):
                 raw = stdout.decode()
                 data = json.loads(raw)
                 result = self._parse_results(safe_ref, data)
+                result.platform = platform_args[1] if platform_args else ""
                 if self._evidence is not None:
                     result.evidence_path = await self._evidence.record_scan(safe_ref, "trivy", raw)
                 return result

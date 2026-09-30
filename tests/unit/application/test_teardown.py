@@ -124,8 +124,12 @@ class TestCompareReleasesOnce:
         analyze = AsyncMock()
         analyze.execute = AsyncMock(side_effect=ValueError("boom"))
 
-        with pytest.raises(ValueError, match="boom"):
-            await CompareImagesUseCase(analyze_use_case=analyze).execute(["node:22"])
+        # A failing image is that image's row in `unverified` (the others are
+        # still compared); the resources are released either way.
+        result = await CompareImagesUseCase(analyze_use_case=analyze).execute(["node:22"])
+
+        assert [u.image_reference for u in result.unverified] == ["node:22"]
+        assert "boom" in result.unverified[0].reason
         analyze.close.assert_awaited_once()
 
 

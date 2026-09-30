@@ -5,6 +5,83 @@ Todas as mudanças relevantes do DockerLs são documentadas neste arquivo.
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `--platform os/arch[/variant]` on `analyze`, `compare`, `recommend`, `advisor`
+  and `alternatives`. The requested, resolved and measured references are kept
+  apart; scans run on `name@digest` of the **platform manifest** (the index
+  digest is recorded separately), in the Python and Go scan paths and with the
+  primary and secondary scanners. A platform the index does not publish is
+  `PLATFORM_MISMATCH`, never a silent fallback. Engine protocol bumped to v2
+  (`platform`).
+- `--profile quick|standard|audit`, `--time-budget SECONDS`, `--details`,
+  `--diff`, and the compatibility filters `--runtime-version`, `--distro`,
+  `--variant`. See `docs/PROFILES.md`.
+- Output formats `summary` (versioned `dockerls.ci-summary/1`) and `ndjson`
+  (`dockerls.events/1`: provisional vs final ranking, exactly one final event).
+- Saved runs (`$XDG_STATE_HOME/dockerls/runs`, `0600`/`0700`, atomic, redacted,
+  50 kept) and `dockerls export --run RUN_ID`, which renders a saved run
+  without scanning, resolving or enriching anything.
+- Decision-first output: what is recommended, why, the immutable reference,
+  findings, confidence, pending checks and freshness before the table.
+- Layered measurement cache (raw scan, OCI metadata, threat intel,
+  policy evaluation) with named miss reasons; single-flight per identity;
+  bounded, order-preserving, per-image-isolated concurrency in `compare`.
+- Persistent, leased Trivy cache slots (`flock`), safe hard-link re-linking of
+  the shared DB, storage limits and cleanup of the pool's own stale slots; a
+  visible serialized fallback when no slot can be leased.
+- Migration plans state `direct_replacement`, `incompatibilities` (tagged
+  `[confirmed]`/`[heuristic]`/`[unknown]`) and `unverified_compatibility`;
+  major, libc, user, entrypoint and native-library changes are trade-offs.
+- Benchmarks: `benchmarks/bench_pipeline.py`, `bench_profiles.py` (simulated)
+  and `bench_real.py` (real CLI, real Trivy). See `docs/PERFORMANCE.md`.
+
+### Changed
+- Exit codes 4 (time budget ended with nothing measured), 5 (partial result)
+  and 130 (interrupted) exist **only** for runs given `--time-budget` or
+  interrupted. Every other run keeps its previous codes. A partial run never
+  exits 0; a violation already proven keeps its own code.
+- Only an identity confirmed by a canonical `sha256:<64 hex>` digest is stored as
+  immutable evidence; `verdict.digest_resolved` follows it.
+- Threat intel: CVEs deduplicated and requested in batches, one shared HTTP
+  client per source, negative cache for OSV 404s, and every lookup carries a
+  status (found / absent / network error / rate limited / invalid). An
+  unanswered lookup is reported as a pending check and never becomes
+  "not exploitable".
+- The secondary scanner's database is prepared when it is first used, not on
+  every run. Measured on the machine in `docs/PERFORMANCE.md`, `grype db update`
+  on an empty directory took ~108 s of CPU and made the first `analyze` take
+  ~116 s; it now takes ~15 s.
+- Docker Hub identity is resolved with a HEAD request, a persisted
+  `tag -> digest` mapping and a GET *by digest* with hash verification, and
+  the anonymous token is reused per repository. A 429 is reported as a rate
+  limit, not as a missing tag.
+- Registry credentials are sent to a token realm only over https and only when
+  the realm is the registry's own host, a subdomain of it, or the token service
+  Docker Hub is known to delegate to; otherwise the token is requested
+  anonymously.
+- `--time-budget` is parsed by DockerLs, so a malformed value exits 1 instead
+  of Typer's 2 (which is a verdict code here).
+
+### Fixed
+- End-of-life lookups for `alpine`, `httpd`, `kafka` and `cassandra` always
+  returned no data: endoflife.date now answers those slugs with a 301 to
+  `alpine-linux`, `apache-http-server`, `apache-kafka` and `apache-cassandra`,
+  and the client does not follow redirects. The mapping now uses the current
+  names (checked against the live API on 2026-09-30).
+- The Trivy database is no longer re-requested before its own `NextUpdate`
+  (Trivy would not download anything either); a cache hit no longer pays a
+  ~1.7 s registry round trip.
+
+### Known limitations
+- Docker Hub throttles anonymous manifest requests; when it does, identity is
+  reported as not confirmed and nothing is cached as immutable.
+- The `quick` profile values were chosen, not tuned; only relative cost was
+  measured.
+- Two public symbols (`detect_connector`, `emit_issue`) fail
+  `tests/unit/test_no_dead_configuration.py` on the base commit too.
+
 ## [1.0.16] -- 2026-09-10
 
 ### Security

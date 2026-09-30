@@ -251,6 +251,19 @@ dockerls recommend node --fail-on high --no-color
 `recommend` e `advisor` aceitam `--format json` (saída legível por máquina) e
 `--no-color` (texto puro, sem códigos ANSI).
 
+Opções de identidade, prazo e escopo (detalhes em [PROFILES.md](PROFILES.md)):
+
+```bash
+dockerls recommend node --platform linux/arm64          # padrão: linux/amd64
+dockerls recommend node --profile quick                 # quick | standard | audit
+dockerls recommend node --time-budget 90                # prazo total, em segundos
+dockerls recommend node --runtime-version '>=20,<23' --distro alpine --variant runtime
+dockerls recommend node --details                       # raciocínio, evidências, diagnóstico
+dockerls recommend node --diff                          # o que mudou desde o run anterior
+dockerls recommend node --format summary                # JSON versionado para CI
+dockerls recommend node --format ndjson                 # eventos progressivos, um por linha
+```
+
 <a id="exit-codes-de-recommend"></a>
 `recommend` termina com um código de saída que reflete o resultado, para servir
 de portão em CI:
@@ -261,6 +274,9 @@ de portão em CI:
 | 1               | Erro operacional: nenhuma tag encontrada, **nenhuma tag pôde ser escaneada**, configuração inválida, ou `--fail-on` violado |
 | 2               | Nenhuma imagem no baseline, mas há alternativas ranqueadas |
 | 3               | Tags foram escaneadas e nenhuma delas serve               |
+| 4               | Só com `--time-budget`: o prazo acabou antes de qualquer medição terminar (nada foi medido) |
+| 5               | Só com `--time-budget`: resultado **parcial** — o medido é real, o run não está completo e nunca sai com 0 |
+| 130             | Interrompido (Ctrl-C)                                    |
 
 A diferença entre `1` e `3` é deliberada e importa num portão de CI. `3` é um
 **veredito**: as candidatas foram medidas e nenhuma passou. `1` é "não sei" —

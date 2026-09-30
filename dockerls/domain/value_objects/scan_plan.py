@@ -30,6 +30,14 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from dockerls.domain.value_objects.candidate_criteria import (
+    CandidateCriteria,
+    Exclusion,
+    apply_criteria,
+    family_of_tag,
+    variant_of_tag,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -53,6 +61,9 @@ class DeferralReason(StrEnum):
     SUPERSEDED = "SUPERSEDED"
     #: Coube fora do orçamento de scans deste run.
     OVER_BUDGET = "OVER_BUDGET"
+    #: O prazo global (`--time-budget`) acabou antes de este scan começar ou
+    #: terminar. Não é uma falha da imagem nem do scanner.
+    TIME_BUDGET = "TIME_BUDGET"
 
 
 @dataclass(frozen=True)
@@ -76,6 +87,9 @@ class ScanPlan:
     discovered: int = 0
     #: O orçamento em vigor; 0 significa "medir todas".
     budget: int = 0
+    #: Candidatas que um filtro de compatibilidade tirou **antes** de qualquer
+    #: scan, cada uma com o motivo e se ele é confirmado ou heurístico.
+    excluded: list[Exclusion] = field(default_factory=list)
 
     @property
     def deferred_count(self) -> int:
@@ -149,17 +163,88 @@ def _priority(image: DockerImage) -> tuple[int, float, str]:
     return (0 if image.is_official else 1, -published, image.full_reference)
 
 
-def plan_scans(tags: Sequence[DockerImage], budget: int = DEFAULT_SCAN_BUDGET) -> ScanPlan:
+def _representative_order(images: Sequence[DockerImage]) -> list[DockerImage]:
+    """Ordem que cobre versões e variantes diferentes antes de repetir uma.
+
+    A ordem de `_priority` -- oficial, mais nova, nome -- enche um orçamento
+    pequeno com as N tags publicadas mais recentemente, que costumam ser
+    variantes da mesma linha. Aqui a escolha é em rodadas, em dois níveis:
+
+    * as tags são agrupadas pela **versão** (o major que o nome cita) e, dentro
+      dela, pela **variante** (família de distribuição + runtime/dev);
+    * cada rodada toma, de cada versão, a melhor tag da variante da vez -- a
+      primeira rodada é uma tag por versão, a segunda a segunda variante de cada
+      versão, e assim por diante.
+
+    Quem mede quatro tags vê quatro respostas diferentes à pergunta "qual
+    imagem", não quatro patches do mesmo `22-alpine`.
+    """
+    by_version: dict[tuple[int, ...], dict[tuple[str, str], list[DockerImage]]] = {}
+    for image in images:
+        version, _ = _version_and_variant(image.tag)
+        variant = (family_of_tag(image), variant_of_tag(image).value)
+        by_version.setdefault((version or ())[:1], {}).setdefault(variant, []).append(image)
+
+    # Within a version: variants ordered by their best member's priority, each
+    # variant's members ordered the same way.
+    lines: list[list[DockerImage]] = []
+    for variants in by_version.values():
+        ordered_variants = sorted(
+            (sorted(members, key=_priority) for members in variants.values()),
+            key=lambda members: _priority(members[0]),
+        )
+        # Depth-first inside a line: best of variant 1, best of variant 2, ...,
+        # then the runners-up. That is the order a line offers its options.
+        line: list[DockerImage] = []
+        depth = 0
+        while len(line) < sum(len(m) for m in ordered_variants):
+            for members in ordered_variants:
+                if depth < len(members):
+                    line.append(members[depth])
+            depth += 1
+        lines.append(line)
+    lines.sort(key=lambda line: _priority(line[0]))
+
+    ordered: list[DockerImage] = []
+    depth = 0
+    while len(ordered) < len(images):
+        for line in lines:
+            if depth < len(line):
+                ordered.append(line[depth])
+        depth += 1
+    return ordered
+
+
+def plan_scans(
+    tags: Sequence[DockerImage],
+    budget: int = DEFAULT_SCAN_BUDGET,
+    criteria: CandidateCriteria | None = None,
+    *,
+    spread: bool = False,
+) -> ScanPlan:
     """Escolhe quem medir, e nomeia quem ficou de fora.
 
     `budget <= 0` mede tudo, que é o comportamento de sempre e continua
     disponível por configuração -- quem precisa da varredura completa não
     perdeu nada.
+
+    `criteria` tira, antes do orçamento, o que não serve; cada exclusão volta
+    no plano com o motivo. `spread` troca a ordem de preferência por uma que
+    cobre versões e variantes diferentes antes de repetir uma (ver
+    `_representative_order`); sem ele a seleção é a de sempre.
     """
-    discovered = len(tags)
-    if budget <= 0 or discovered <= budget:
+    excluded: list[Exclusion] = []
+    if criteria is not None and criteria.active:
+        outcome = apply_criteria(tags, criteria)
+        tags, excluded = outcome.kept, outcome.excluded
+    discovered = len(tags) + len(excluded)
+    if budget <= 0 or len(tags) <= budget:
         return ScanPlan(
-            selected=list(tags), deferred=[], discovered=discovered, budget=max(0, budget)
+            selected=list(tags),
+            deferred=[],
+            discovered=discovered,
+            budget=max(0, budget),
+            excluded=excluded,
         )
 
     superseded = _superseded(tags)
@@ -170,7 +255,7 @@ def plan_scans(tags: Sequence[DockerImage], budget: int = DEFAULT_SCAN_BUDGET) -
     ]
 
     if len(survivors) > budget:
-        ranked = sorted(survivors, key=_priority)
+        ranked = _representative_order(survivors) if spread else sorted(survivors, key=_priority)
         kept = set(map(id, ranked[:budget]))
         survivors = [image for image in tags if id(image) in kept]
         for image in ranked[budget:]:
@@ -190,4 +275,5 @@ def plan_scans(tags: Sequence[DockerImage], budget: int = DEFAULT_SCAN_BUDGET) -
         deferred=deferred,
         discovered=discovered,
         budget=budget,
+        excluded=excluded,
     )

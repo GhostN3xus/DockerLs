@@ -34,6 +34,22 @@ class DockerImage(BaseModel):
     # only for sources that publish build definitions (Docker Hardened
     # Images). A claim, never a measurement -- see DeclaredImageMetadata.
     declared: DeclaredImageMetadata | None = None
+    # --- Identity, kept apart from the tag ---------------------------------
+    # `digest` above is whatever the discovery source reported; on Docker Hub
+    # that is a platform manifest, after a registry HEAD it is the *index*.
+    # These fields record what the registry actually confirmed. "" means
+    # nothing was resolved, which is not the same as "resolved to nothing".
+    #: `os/architecture[/variant]` this image was resolved and measured for.
+    platform: str = ""
+    #: Digest of the multi-arch index the tag pointed at (never scanned).
+    index_digest: str = ""
+    #: IdentityStatus value; "" until an identity resolution has run.
+    identity_status: str = ""
+    #: Why the identity is not confirmed, when it is not.
+    identity_limitation: str = ""
+    #: The reference as requested, and as actually handed to the scanner.
+    requested_reference: str = ""
+    measured_reference: str = ""
 
     def model_post_init(self, __context: object) -> None:
         if not self.full_reference:
@@ -64,6 +80,13 @@ class DockerImage(BaseModel):
         if not self.digest:
             return self.full_reference
         return f"{self.name}@{self.digest}"
+
+    @property
+    def identity_confirmed(self) -> bool:
+        """True only when the registry confirmed the platform manifest digest
+        and `digest` is that digest -- the only state in which a result may
+        be filed as immutable evidence."""
+        return self.identity_status == "CONFIRMED" and bool(self.digest)
 
     @property
     def digest_known(self) -> bool:

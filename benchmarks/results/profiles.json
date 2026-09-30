@@ -1,0 +1,71 @@
+{
+  "title": "DockerLs execution profiles (SIMULATED registry, scanner and feeds)",
+  "environment": {
+    "date": "2026-09-30T15:08:49+00:00",
+    "dockerls": "1.0.16",
+    "git_commit": "0bd421c",
+    "git_dirty": "yes",
+    "python": "3.11.15",
+    "os": "Linux 6.18.44-fc-v50",
+    "machine": "x86_64",
+    "cpus": "4"
+  },
+  "parameters": {
+    "repeat": 7,
+    "tags_in_repository": 60,
+    "scan_latency_s": 0.2,
+    "resolve_latency_s": 0.03,
+    "intel_latency_s": 0.05,
+    "not_simulated": "second-scanner cross-validation"
+  },
+  "rows": [
+    {
+      "scenario": "profile quick (scan budget 8, enrichment finalists)",
+      "kind": "simulated",
+      "n": 7,
+      "median_s": 0.5746819350006263,
+      "p95_s": 0.5757977570010553,
+      "min_s": 0.5731943560003856,
+      "max_s": 0.5757977570010553,
+      "counters": {
+        "intel_requests": 12.0,
+        "measured": 8.0,
+        "pending_checks": 5.0,
+        "scans": 8.0
+      },
+      "note": ""
+    },
+    {
+      "scenario": "profile standard (scan budget 25, enrichment all)",
+      "kind": "simulated",
+      "n": 7,
+      "median_s": 1.623972727000364,
+      "p95_s": 1.7116594599992823,
+      "min_s": 1.6204361090003658,
+      "max_s": 1.7116594599992823,
+      "counters": {
+        "intel_requests": 38.0,
+        "measured": 25.0,
+        "pending_checks": 3.0,
+        "scans": 25.0
+      },
+      "note": ""
+    },
+    {
+      "scenario": "profile audit (scan budget all, enrichment all)",
+      "kind": "simulated",
+      "n": 7,
+      "median_s": 3.3671684410001035,
+      "p95_s": 3.3693450179998763,
+      "min_s": 3.3638347659998544,
+      "max_s": 3.3693450179998763,
+      "counters": {
+        "intel_requests": 90.0,
+        "measured": 60.0,
+        "pending_checks": 3.0,
+        "scans": 60.0
+      },
+      "note": ""
+    }
+  ]
+}

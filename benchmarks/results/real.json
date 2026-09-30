@@ -1,0 +1,179 @@
+{
+  "title": "DockerLs end-to-end timings (REAL CLI, real Trivy, real registries)",
+  "environment": {
+    "date": "2026-09-30T15:20:32+00:00",
+    "dockerls": "1.0.16",
+    "git_commit": "59ad9e5",
+    "git_dirty": "yes",
+    "python": "3.11.15",
+    "os": "Linux 6.18.44-fc-v50",
+    "machine": "x86_64",
+    "cpus": "4",
+    "trivy": "Version: dev",
+    "grype": "Application:         grype",
+    "image": "mirror.gcr.io/library/alpine:3.20",
+    "network": "real, unthrottled by this script"
+  },
+  "parameters": {
+    "repeat": 5,
+    "engine": "both"
+  },
+  "rows": [
+    {
+      "scenario": "[python] analyze, cold everything",
+      "kind": "real",
+      "n": 1,
+      "median_s": 15.800030327000059,
+      "p95_s": 15.800030327000059,
+      "min_s": 15.800030327000059,
+      "max_s": 15.800030327000059,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['scan']"
+    },
+    {
+      "scenario": "[python] analyze amd64, store cold",
+      "kind": "real",
+      "n": 5,
+      "median_s": 5.636915371998839,
+      "p95_s": 5.783392505998563,
+      "min_s": 5.310636082998826,
+      "max_s": 5.783392505998563,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['scan']"
+    },
+    {
+      "scenario": "[python] analyze amd64, store warm",
+      "kind": "real",
+      "n": 5,
+      "median_s": 3.0458898849992693,
+      "p95_s": 3.3928909779988317,
+      "min_s": 3.025645063000411,
+      "max_s": 3.3928909779988317,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['cache']"
+    },
+    {
+      "scenario": "[python] analyze arm64, store cold",
+      "kind": "real",
+      "n": 5,
+      "median_s": 5.984947948998524,
+      "p95_s": 6.409738327000014,
+      "min_s": 5.510122460000275,
+      "max_s": 6.409738327000014,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['scan']"
+    },
+    {
+      "scenario": "[python] compare 2 images, store cold",
+      "kind": "real",
+      "n": 5,
+      "median_s": 6.778604106000785,
+      "p95_s": 7.575253089000398,
+      "min_s": 6.676374747999944,
+      "max_s": 7.575253089000398,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin n/a"
+    },
+    {
+      "scenario": "[python] compare 2 images, store warm",
+      "kind": "real",
+      "n": 5,
+      "median_s": 3.045896494000772,
+      "p95_s": 3.2755286949995934,
+      "min_s": 2.887235513999258,
+      "max_s": 3.2755286949995934,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin n/a"
+    },
+    {
+      "scenario": "[go] analyze, cold everything",
+      "kind": "real",
+      "n": 1,
+      "median_s": 13.493744313000207,
+      "p95_s": 13.493744313000207,
+      "min_s": 13.493744313000207,
+      "max_s": 13.493744313000207,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['scan']"
+    },
+    {
+      "scenario": "[go] analyze amd64, store cold",
+      "kind": "real",
+      "n": 5,
+      "median_s": 5.8565734479998355,
+      "p95_s": 6.465522112001054,
+      "min_s": 5.535904514001231,
+      "max_s": 6.465522112001054,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['scan']"
+    },
+    {
+      "scenario": "[go] analyze amd64, store warm",
+      "kind": "real",
+      "n": 5,
+      "median_s": 3.185858595999889,
+      "p95_s": 3.2785342679999303,
+      "min_s": 2.924762472999646,
+      "max_s": 3.2785342679999303,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['cache']"
+    },
+    {
+      "scenario": "[go] analyze arm64, store cold",
+      "kind": "real",
+      "n": 5,
+      "median_s": 5.92547638600081,
+      "p95_s": 6.2997331240003405,
+      "min_s": 5.632719655999608,
+      "max_s": 6.2997331240003405,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['scan']"
+    },
+    {
+      "scenario": "[go] compare 2 images, store cold",
+      "kind": "real",
+      "n": 5,
+      "median_s": 6.435732031000953,
+      "p95_s": 6.6633167270010745,
+      "min_s": 6.4329142459992,
+      "max_s": 6.6633167270010745,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin n/a"
+    },
+    {
+      "scenario": "[go] compare 2 images, store warm",
+      "kind": "real",
+      "n": 5,
+      "median_s": 2.813635088999945,
+      "p95_s": 3.2093501840008685,
+      "min_s": 2.7320663430000423,
+      "max_s": 3.2093501840008685,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin n/a"
+    }
+  ]
+}

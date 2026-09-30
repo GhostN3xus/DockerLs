@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from dockerls.domain.entities.image import DockerImage
@@ -7,6 +9,7 @@ from dockerls.domain.entities.image_facts import HardeningFacts
 from dockerls.domain.entities.recommendation import Recommendation
 from dockerls.domain.entities.scan_result import ScanResult
 from dockerls.domain.entities.vulnerability import Vulnerability
+from dockerls.domain.value_objects.candidate_criteria import Exclusion
 from dockerls.domain.value_objects.confidence import Confidence
 from dockerls.domain.value_objects.scan_plan import DeferredTag
 from dockerls.domain.value_objects.tristate import Tristate
@@ -34,6 +37,39 @@ class DimensionReport(BaseModel):
     negatives: list[str] = Field(default_factory=list)
     #: Properties nothing could establish, named rather than omitted.
     undetermined: list[str] = Field(default_factory=list)
+
+
+class MeasurementProvenance(BaseModel):
+    """Where a result came from and how far it can be trusted.
+
+    `requested`, `resolved` and `measured` are three different references and
+    are never merged: the first is what was typed, the second the immutable
+    reference the registry confirmed (empty when it could not), the third what
+    the scanner was actually handed.
+    """
+
+    #: `scan` (measured now), `cache` (reused from an earlier measurement) or
+    #: `shared` (another task in this run measured the same identity).
+    origin: str = "unknown"
+    measured_at: str = ""
+    scanner: str = ""
+    scanner_version: str = ""
+    #: When the vulnerability database was built; "" = could not be determined.
+    db_revision: str = ""
+    requested_reference: str = ""
+    resolved_reference: str = ""
+    measured_reference: str = ""
+    platform: str = ""
+    index_digest: str = ""
+    manifest_digest: str = ""
+    #: CONFIRMED / DIGEST_ONLY / UNRESOLVED / PLATFORM_MISMATCH / "" (never resolved).
+    identity_status: str = ""
+    #: Why the identity is not confirmed; also why a result was not stored.
+    limitation: str = ""
+    #: Why a cached measurement was *not* reused (e.g. DB_REVISION_CHANGED).
+    cache_note: str = ""
+    #: When the threat intelligence in this analysis was retrieved ("" = none).
+    threat_intel_at: str = ""
 
 
 class ImageAnalysis(BaseModel):
@@ -115,6 +151,15 @@ class ImageAnalysis(BaseModel):
     # too: the same bytes can gain a CVE between two scans as the scanner's
     # database learns about it.
     vuln_trend_note: str = ""
+    #: Identity, scanner and freshness of the measurement behind this analysis.
+    provenance: MeasurementProvenance = Field(default_factory=MeasurementProvenance)
+    #: The same, for the second scanner's measurement, when there was one.
+    secondary_provenance: MeasurementProvenance | None = None
+    #: `COMPLETE`, `PARTIAL` (the time budget cut a step short) or `NO_RESULT`.
+    #: Only `analyze` sets anything else; `recommend` reports it on the result.
+    completeness: str = "COMPLETE"
+    #: Steps this analysis did not finish, so their absence is stated.
+    pending_checks: list[str] = Field(default_factory=list)
 
     @property
     def pinned_reference(self) -> str:
@@ -188,6 +233,14 @@ class RunMetrics(BaseModel):
     #: Reported rather than assumed: two runs of the same command against the
     #: same image are only comparable if this matches.
     scanner_identity: str = ""
+    #: When the vulnerability database in use was built ("" = could not be read).
+    db_revision: str = ""
+    #: Measurements that joined another task's scan or an earlier result of the
+    #: same run instead of starting their own.
+    duplicates_avoided: int = 0
+    #: Time and requests per stage (see `RunInstrumentation.to_dict`); empty
+    #: when the run was not instrumented. Stages overlap, so they do not sum.
+    timings: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def duplicates_collapsed(self) -> int:
@@ -225,6 +278,28 @@ class AnalysisResult(BaseModel):
     deferred: list[DeferredTag] = []
     #: Quantas tags a busca trouxe, antes de qualquer corte.
     tags_discovered: int = 0
+    #: Candidates a compatibility filter removed, each with the reason and
+    #: whether the reason is CONFIRMED (published data, a measurement) or a
+    #: HEURISTIC (the tag's name).
+    excluded: list[Exclusion] = []
+    #: Why the filters left nothing, when they did.
+    filters_note: str = ""
+    #: The active filters, as text; "" when there were none.
+    filters: str = ""
+    #: When threat intelligence covered only some candidates, how that limits
+    #: comparing them.
+    enrichment_note: str = ""
+    #: `COMPLETE`, `PARTIAL` (the time budget ended with some measurements done)
+    #: or `NO_RESULT` (it ended before anything was measured). Independent of
+    #: the profile: a `quick` run is complete *for what quick does*, and says
+    #: what it left out in `pending_checks`.
+    completeness: str = "COMPLETE"
+    #: Everything this run did not establish. Never turned into approval.
+    pending_checks: list[str] = []
+    time_budget_seconds: float | None = None
+    elapsed_seconds: float = 0.0
+    profile: str = ""
+    platform: str = ""
 
     @property
     def unverified_count(self) -> int:

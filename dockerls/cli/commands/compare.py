@@ -10,12 +10,14 @@ from rich.table import Table
 
 from dockerls.cli.dependencies import build_compare_use_case
 from dockerls.cli.progress import scan_status
+from dockerls.cli.run_options import RunOptions, parse_run_options
 from dockerls.cli.scan_failure import describe_scan_failure
 from dockerls.cli.text import safe
-from dockerls.exit_codes import EXIT_ERROR, EXIT_OK
+from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, exit_code_for_completeness
+from dockerls.utils.deadline import Deadline
 
 if TYPE_CHECKING:
-    from dockerls.application.dto.analysis import ComparisonResult
+    from dockerls.application.dto.analysis import ComparisonResult, UnverifiedImage
 
 console = Console()
 
@@ -36,6 +38,19 @@ EXIT_INSUFFICIENT = 3
 def compare(
     images: list[str] = typer.Argument(help="Two or more image references to compare"),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
+    platform: str | None = typer.Option(
+        None,
+        "--platform",
+        help="os/architecture, with an optional /variant, e.g. linux/arm64 (default: linux/amd64)",
+    ),
+    time_budget: str | None = typer.Option(
+        None,
+        "--time-budget",
+        help=(
+            "Total seconds for the whole comparison. Images not measured in time are "
+            "reported as not measured and the comparison is PARTIAL (exit 5)"
+        ),
+    ),
 ) -> None:
     """Compare security posture of multiple Docker images.
 
@@ -46,17 +61,26 @@ def compare(
 
     An image that could not be scanned is never given a score or a tier: it
     is listed separately, with the classified reason.
+
+    With --time-budget the whole comparison is bounded. Images the budget cut
+    off are listed as not measured and the exit code is 5 (some measured) or 4
+    (none): a comparison cut short is never presented as a complete one.
     """
     if no_color:
         console.no_color = True
     if len(images) < 2:
         console.print("[red]Provide at least two images to compare.[/red]")
         raise typer.Exit(EXIT_ERROR_CODE)
-    asyncio.run(_compare(images))
+    options = parse_run_options(platform=platform, time_budget=time_budget)
+    asyncio.run(_compare(images, options))
 
 
-async def _compare(images: list[str]) -> None:
-    use_case = await build_compare_use_case()
+async def _compare(images: list[str], options: RunOptions | None = None) -> None:
+    options = options or parse_run_options()
+    deadline = Deadline(options.time_budget) if options.time_budget else Deadline.unbounded()
+    use_case = await build_compare_use_case(
+        len(images), platform=options.platform, deadline=deadline
+    )
     try:
         with scan_status(f"Scanning {len(images)} image(s) to compare..."):
             result = await use_case.execute(images)
@@ -68,6 +92,10 @@ async def _compare(images: list[str]) -> None:
     # tem scan verificado. A tabela abaixo, portanto, não tem como exibir
     # um score que ninguém mediu.
     measured = result.images
+    # Images the *clock* cut off are a different thing from images that failed:
+    # they were never attempted, and they make the whole comparison partial.
+    out_of_time = [u for u in result.unverified if u.kind == "DEADLINE_EXCEEDED"]
+    completeness = ("PARTIAL" if measured else "NO_RESULT") if out_of_time else "COMPLETE"
 
     if not measured:
         # Nada foi medido. Não é um veredito sobre as imagens -- é a
@@ -78,7 +106,7 @@ async def _compare(images: list[str]) -> None:
             "[dim]This is a technical failure, not a security verdict: nothing was "
             "measured, so nothing can be said about these images.[/dim]"
         )
-        raise typer.Exit(EXIT_ERROR_CODE)
+        raise typer.Exit(exit_code_for_completeness(EXIT_ERROR_CODE, completeness))
 
     if len(measured) < 2:
         # Uma imagem medida não é uma comparação. Mostrar a tabela com uma
@@ -89,9 +117,11 @@ async def _compare(images: list[str]) -> None:
             f"[yellow]Only {safe(measured[0].image.full_reference)} could be scanned; "
             f"a comparison needs at least two.[/yellow]"
         )
-        raise typer.Exit(EXIT_INSUFFICIENT)
+        raise typer.Exit(exit_code_for_completeness(EXIT_INSUFFICIENT, completeness))
 
-    console.print(Panel("[bold]Image Comparison[/bold]", expand=False))
+    console.print(
+        Panel(f"[bold]Image Comparison[/bold] [dim]({options.platform})[/dim]", expand=False)
+    )
 
     table = Table()
     table.add_column("Image", style="cyan")
@@ -107,7 +137,9 @@ async def _compare(images: list[str]) -> None:
     for a in measured:
         table.add_row(
             safe(a.image.full_reference),
-            str(a.security_score),
+            # A score is never shown without its blockers: `*` marks an image
+            # the readiness policy blocks, whatever its number says.
+            f"{a.security_score}{'*' if a.readiness_blockers else ''}",
             a.tier,
             str(a.scan.critical_count),
             str(a.scan.high_count),
@@ -117,10 +149,23 @@ async def _compare(images: list[str]) -> None:
             f"{a.remediation_score}/100",
         )
     console.print(table)
+    if any(a.readiness_blockers for a in measured):
+        console.print(
+            "[dim]* = blocked by the production-readiness policy "
+            "(see `dockerls analyze` for the reasons)[/dim]"
+        )
 
     _print_verdict(result)
     _print_failures(result)
+    _print_not_measured(out_of_time)
 
+    if out_of_time:
+        console.print(
+            f"\n[bold yellow]Partial comparison:[/bold yellow] the time budget ended with "
+            f"{len(measured)} of {len(measured) + len(result.unverified)} image(s) measured. "
+            "This is not a complete comparison."
+        )
+        raise typer.Exit(exit_code_for_completeness(EXIT_PARTIAL, completeness))
     if result.unverified:
         console.print(
             f"\n[dim]Partial comparison: {len(measured)} of "
@@ -130,6 +175,19 @@ async def _compare(images: list[str]) -> None:
     raise typer.Exit(EXIT_COMPLETE)
 
 
+def _print_not_measured(items: list[UnverifiedImage]) -> None:
+    """Images the time budget cut off: not failed, not attempted."""
+    if not items:
+        return
+    console.print("\n[bold cyan]Not measured (time budget)[/bold cyan]")
+    console.print(
+        "[dim]  These images were not compared: the budget ended before they were scanned. "
+        "That says nothing about them.[/dim]"
+    )
+    for item in items:
+        console.print(f"  {safe(item.image_reference)}")
+
+
 def _print_failures(result: ComparisonResult) -> None:
     """As imagens que não puderam ser medidas, com a causa classificada.
 
@@ -137,11 +195,12 @@ def _print_failures(result: ComparisonResult) -> None:
     imediato que estas não foram comparadas com as outras, e sim deixadas
     de fora por falta de medição.
     """
-    if not result.unverified:
+    failed = [u for u in result.unverified if u.kind != "DEADLINE_EXCEEDED"]
+    if not failed:
         return
     console.print("\n[bold yellow]Failed (not compared)[/bold yellow]")
     console.print("[dim]  These images were never scored -- no successful scan.[/dim]")
-    for item in result.unverified:
+    for item in failed:
         console.print(
             f"  {safe(item.image_reference)}  "
             f"[dim]{safe(describe_scan_failure(item.kind, item.reason))}[/dim]"

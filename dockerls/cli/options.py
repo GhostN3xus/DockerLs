@@ -27,14 +27,28 @@ _console = Console()
 class OutputFormat(StrEnum):
     TABLE = "table"
     JSON = "json"
+    #: One JSON event per line while the run progresses (provisional results,
+    #: then exactly one final event). See `application/services/events.py`.
+    NDJSON = "ndjson"
+    #: A short, versioned verdict for pipelines (`dockerls.ci-summary/1`).
+    SUMMARY = "summary"
 
 
-def parse_output_format(value: str) -> OutputFormat:
+#: What most commands accept. Commands that stream or summarise say so.
+DEFAULT_FORMATS: tuple[OutputFormat, ...] = (OutputFormat.TABLE, OutputFormat.JSON)
+
+
+def parse_output_format(
+    value: str, allowed: tuple[OutputFormat, ...] = DEFAULT_FORMATS
+) -> OutputFormat:
     """Resolve ``--format`` or fail with an actionable message and exit 1."""
     try:
-        return OutputFormat(value)
+        chosen = OutputFormat(value)
+        if chosen not in allowed:
+            raise ValueError(value)
+        return chosen
     except ValueError as e:
-        choices = ", ".join(f.value for f in OutputFormat)
+        choices = ", ".join(f.value for f in allowed)
         _console.print(
             f"[red]Error:[/red] unsupported --format {value!r}.\n"
             f"[dim]Suggested action: use one of: {choices}[/dim]"

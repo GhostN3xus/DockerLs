@@ -18,6 +18,18 @@ from dockerls.application.dto.analysis import (
     RunMetrics,
     UnverifiedImage,
 )
+from dockerls.application.services.events import (
+    CANDIDATE_MEASURED,
+    CHECK,
+    PHASE,
+    RANKING,
+    RANKING_REVISED,
+    RUN_FINISHED,
+    RUN_STARTED,
+    EventStream,
+)
+from dockerls.application.services.measurement import MeasurementService
+from dockerls.application.services.measurement_store import MeasurementStore
 from dockerls.application.services.progress import NullObserver
 from dockerls.application.services.teardown import close_quietly, sources_of
 from dockerls.application.services.verdict import (
@@ -31,22 +43,38 @@ from dockerls.domain.entities.recommendation import (
     Recommendation,
     RemediationStep,
 )
+from dockerls.domain.value_objects.candidate_criteria import CandidateCriteria, FilterOutcome
+from dockerls.domain.value_objects.execution_profile import (
+    CHECK_CROSS_VALIDATION,
+    CHECK_INSPECTION,
+    CHECK_TAG_VERIFICATION,
+    Enrichment,
+)
 from dockerls.domain.value_objects.image_identity import ImageIdentity
+from dockerls.domain.value_objects.platform import DEFAULT_PLATFORM, Platform
 from dockerls.domain.value_objects.remediation_score import RemediationScore
-from dockerls.domain.value_objects.scan_plan import DEFAULT_SCAN_BUDGET, plan_scans
+from dockerls.domain.value_objects.scan_plan import (
+    DEFAULT_SCAN_BUDGET,
+    DeferralReason,
+    DeferredTag,
+    plan_scans,
+)
 from dockerls.domain.value_objects.security_score import SecurityScore
 from dockerls.domain.value_objects.security_tier import SecurityTier
 from dockerls.domain.value_objects.tristate import Tristate
 from dockerls.integrations.registry.urls import source_url
+from dockerls.integrations.threat_intel.status import IntelStatus
+from dockerls.utils.deadline import Deadline, DeadlineExceededError, run_within
 from dockerls.utils.ignore_file import active_ignored_cve_ids, load_ignore_rules
 from dockerls.utils.validation import validate_threshold, validate_workers
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
     from dockerls.application.services.cross_validation import CrossValidator
     from dockerls.application.services.hardening_analysis import HardeningAnalyzer
+    from dockerls.application.services.instrumentation import RunInstrumentation
     from dockerls.application.services.progress import ScanObserver
     from dockerls.domain.entities.image import DockerImage
     from dockerls.domain.interfaces.cache_store import CacheStoreInterface
@@ -92,6 +120,17 @@ class RecommendImagesUseCase:
         exploitdb: ExploitDBClient | None = None,
         osv: OSVClient | None = None,
         scan_budget: int = DEFAULT_SCAN_BUDGET,
+        measurement: MeasurementService | None = None,
+        platform: Platform | None = None,
+        deadline: Deadline | None = None,
+        events: EventStream | None = None,
+        criteria: CandidateCriteria | None = None,
+        enrichment: Enrichment = Enrichment.ALL,
+        inspect_finalists: bool = True,
+        spread: bool = False,
+        profile_name: str = "",
+        not_performed_by_profile: list[str] | None = None,
+        instrumentation: RunInstrumentation | None = None,
     ):
         # Guarded at construction rather than only at the CLI boundary: the
         # use case is the last place that can refuse a value which would
@@ -105,7 +144,6 @@ class RecommendImagesUseCase:
         # Quantas tags este run pode medir. 0 mede todas, que é o
         # comportamento anterior e segue disponível por configuração.
         self._scan_budget = max(0, scan_budget)
-        self._cache = cache
         self._max_critical = validate_threshold(max_critical, "max_critical")
         self._max_high = validate_threshold(max_high, "max_high")
         self._max_medium = validate_threshold(max_medium, "max_medium")
@@ -122,6 +160,38 @@ class RecommendImagesUseCase:
         self._cache_ttl_seconds = cache_ttl_seconds
         self._hardening = hardening
         self._resolve_digests = resolve_digests
+        # Every measurement -- identity pinning, the shared scan cache,
+        # in-flight sharing, the scan itself -- goes through one service, the
+        # same one `analyze` and `compare` use. Built here when the caller did
+        # not inject one, so existing construction keeps working.
+        self._platform = platform or DEFAULT_PLATFORM
+        self._measurement = measurement or MeasurementService(
+            scanner,
+            # `resolve_digests=False` is the operator declining to pin tags:
+            # nothing is then confirmed, so nothing is filed as immutable.
+            resolver=hardening if resolve_digests else None,
+            store=MeasurementStore(cache, scan_ttl_seconds=cache_ttl_seconds),
+            platform=self._platform,
+            max_concurrency=self._workers,
+        )
+        # The run's time budget, shared with everything below it. A run without
+        # `--time-budget` holds an unbounded one, so nothing here branches on
+        # "is there a deadline".
+        self._deadline = deadline or Deadline.unbounded()
+        self._events = events or EventStream()
+        self._criteria = criteria or CandidateCriteria()
+        self._enrichment = enrichment
+        self._inspect_finalists = inspect_finalists
+        self._spread = spread
+        self._profile_name = profile_name
+        self._instrumentation = instrumentation
+        # Checks this run did not (or could not) perform, in the reader's terms.
+        # Starts with what the profile leaves out by design; the run adds what
+        # the time budget or an unavailable source cost it. Never emptied by a
+        # "success": absence of a check is stated, not implied away.
+        self._pending: list[str] = list(not_performed_by_profile or [])
+        self._deadline_hit = False
+        self._deadline_deferred: list[DeferredTag] = []
         # Filled in once the scanner has been asked who it is. Until then the
         # fingerprint deliberately carries "unknown-scanner" rather than
         # nothing: a run that could not identify its scanner must not share
@@ -171,78 +241,130 @@ class RecommendImagesUseCase:
         )
         return hashlib.sha256(material.encode()).hexdigest()[:12]
 
-    async def _identify_scanner(self) -> None:
-        """Ask the scanner who it is, and re-key the cache accordingly.
+    def _adopt_scanner_identity(self, fingerprint: Any) -> None:
+        """Record who measured, once the scanner has been asked.
 
-        Done once per run, before anything is read from or written to the
-        cache. A scanner that cannot answer leaves the identity as
-        "unknown-scanner", which is its own namespace: results whose
-        provenance is unknown are reused only by other runs in the same
-        situation.
+        The fingerprint comes from the shared measurement service, after the
+        database refresh -- the refresh is what changes the revision. A scanner
+        that could not identify itself keeps "unknown-scanner", which is its
+        own namespace: results of unknown provenance are only ever compared
+        with results in the same situation.
         """
-        version = getattr(self._scanner, "version", None)
-        name = type(self._scanner).__name__
-        if callable(version):
-            try:
-                reported = await version()
-            except Exception as e:  # pragma: no cover - identity is best-effort
-                logger.debug(f"Could not identify {name}: {e}")
-                reported = ""
-            if isinstance(reported, str) and reported:
-                self._scanner_identity = reported
+        name = getattr(fingerprint, "name", "") or "unknown-scanner"
+        version = getattr(fingerprint, "version", "")
+        self._scanner_identity = f"{name} {version}".strip() if version else name
         self._metrics.scanner_identity = self._scanner_identity
+        self._metrics.db_revision = getattr(fingerprint, "db_revision", "")
         self._analysis_fingerprint = self._compute_analysis_fingerprint()
         logger.info(f"Scanner identity for this run: {self._scanner_identity}")
 
-    async def _refresh_db_with_progress(self, refresh_db: Callable[..., Any]) -> bool:
-        """Calls `scanner.refresh_db()`, surfacing retry attempts when the
-        scanner supports it.
+    def _identity_for_cache(self, image: DockerImage) -> ImageIdentity | None:
+        """The strict, content-addressed identity of `image`, or None.
 
-        `TrivyScanner.refresh_db` accepts an `on_attempt(attempt, total)`
-        callback so a retry on a transient GHCR error shows up as "attempt
-        2/3" instead of staying invisible until the log file is opened
-        afterwards. Not every `refresh_db` -- Grype's, the fallback
-        scanner's, a test double's -- takes that argument, so it is offered
-        and the `TypeError` from an incompatible signature falls back to the
-        plain call rather than being treated as a scanner failure.
+        Only an identity the registry *confirmed* qualifies. A digest that a
+        discovery source merely reported is a hint: filing a result under it
+        would turn a claim into evidence, so the cache is skipped and the real
+        measurement stands on its own.
         """
-
-        def on_attempt(attempt: int, total: int) -> None:
-            self._observer.phase(f"Preparing vulnerability database (attempt {attempt}/{total})")
-
-        try:
-            result = await refresh_db(on_attempt=on_attempt)
-        except TypeError:
-            result = await refresh_db()
-        return bool(result)
-
-    def _cache_key(self, image: DockerImage) -> str | None:
-        """Chaveia a análise pelo **digest** do manifesto, não pela tag.
-
-        Tags são mutáveis: `node:22-alpine` de hoje não é a mesma imagem de
-        ontem. Uma entrada chaveada por tag continuava servindo o resultado
-        antigo por até 24h depois de um rebuild upstream -- ou seja, servia
-        um veredito de segurança sobre uma imagem que não existe mais. O
-        digest identifica bytes, então uma entrada só casa com a imagem que
-        de fato produziu aquele scan.
-
-        Sem digest não existe identidade de segurança estável. Nesse caso o
-        cache é deliberadamente ignorado: reutilizar a referência seria
-        transformar uma tag mutável em prova sobre bytes que podem ter mudado.
-        """
-        if not image.digest_known:
+        if not image.identity_confirmed:
             return None
-        # Registry/catalogue metadata is external input. A malformed digest
-        # makes only the cache ineligible; it must not abort the real scan.
         identity = ImageIdentity.try_from_image(image)
         if identity is None:
             logger.warning(f"Ignoring non-canonical cache identity for {image.full_reference}")
-            return None
-        return f"analysis:{self._analysis_fingerprint}:{identity.cache_material}"
+        return identity
+
+    # ---- run plumbing: time budget, events, stages ---------------------------
+
+    @contextlib.contextmanager
+    def _stage(self, name: str) -> Iterator[None]:
+        if self._instrumentation is None:
+            yield
+            return
+        with self._instrumentation.stage(name):
+            yield
+
+    def _phase(self, text: str) -> None:
+        """A phase change, for the terminal and for the event stream alike."""
+        self._observer.phase(text)
+        self._events.emit(PHASE, name=text)
+
+    def _note_intel_gaps(self, cve_ids: list[str]) -> None:
+        """Record, as pending, every threat-intel lookup that got no answer.
+
+        Told apart on purpose: a feed that *said* a CVE is absent is a
+        negative, while a feed that was unreachable, rate limited or returned
+        garbage established nothing -- and that is not the same thing as
+        "not exploitable".
+        """
+        lookups = (
+            ("EPSS", getattr(self._threat_intel, "epss_status_of", None)),
+            ("OSV", getattr(self._osv, "status_of", None)),
+        )
+        for source, lookup in lookups:
+            if lookup is None:
+                continue
+            counts: dict[IntelStatus, int] = {}
+            for cve in cve_ids:
+                status = lookup(cve)
+                if isinstance(status, IntelStatus) and not status.answered:
+                    counts[status] = counts.get(status, 0) + 1
+            for status, n in counts.items():
+                self._note_pending(
+                    f"{source} data for {n} CVE(s) not obtained: {_INTEL_GAP_LABEL[status]}"
+                )
+
+    def _note_pending(self, text: str) -> None:
+        if text not in self._pending:
+            self._pending.append(text)
+
+    async def _within(
+        self, what: str, operation: Callable[[], Awaitable[Any]], default: Any
+    ) -> Any:
+        """Run `operation` inside the run's budget.
+
+        When the budget ends first the operation is cancelled (so its
+        subprocess or request dies with it), `default` is returned, and the
+        check is recorded as pending -- never as done.
+        """
+        try:
+            return await run_within(self._deadline, operation)
+        except DeadlineExceededError:
+            self._deadline_hit = True
+            self._note_pending(f"{what} (the time budget ended first)")
+            return default
 
     async def execute(self, image_name: str, limit: int = 100) -> AnalysisResult:
+        self._events.emit(
+            RUN_STARTED,
+            query=image_name,
+            platform=str(self._platform),
+            profile=self._profile_name or "default",
+            filters=self._criteria.describe(),
+            time_budget_seconds=self._deadline.total,
+        )
         try:
-            return await self._execute(image_name, limit)
+            result = await self._execute(image_name, limit)
+        except asyncio.CancelledError:
+            # The user interrupted (Ctrl-C) or an outer task gave up. What was
+            # measured is not lost to the stream, and it is *not* presented as
+            # a finished run: the final event says CANCELLED.
+            self._events.emit(
+                RUN_FINISHED,
+                final=True,
+                status="CANCELLED",
+                pending=list(self._pending),
+                measured=self._metrics.scans_performed + self._metrics.cache_hits,
+            )
+            raise
+        else:
+            self._events.emit(
+                RUN_FINISHED,
+                final=True,
+                status=result.completeness,
+                pending=list(result.pending_checks),
+                result=result.model_dump(mode="json"),
+            )
+            return result
         finally:
             await self._close_scanners()
             await self._close_repositories()
@@ -284,29 +406,46 @@ class RecommendImagesUseCase:
         )
 
     async def _execute(self, image_name: str, limit: int = 100) -> AnalysisResult:
-        await self._identify_scanner()
         setup_errors: list[str] = []
-        refresh_db = getattr(self._scanner, "refresh_db", None)
 
         # The DB download and the tag search touch nothing in common -- one
         # talks to the scanner's vulnerability feed, the other to the image
         # registry -- so there is no reason the first minutes-long download
         # should hold the second off the network. Run them together instead
         # of one after the other. The phase text is set once, before
-        # either starts: `_refresh_db_with_progress` overwrites it with its
+        # either starts: the database refresh overwrites it with its
         # own "attempt N/3" during a retry, which is fine -- that is more
         # specific than this line, not a contradiction of it.
-        self._observer.phase(
+        self._phase(
             f"Preparing vulnerability database and fetching tags for {image_name} "
             "(first run may take a few minutes)"
         )
-        db_task = (
-            asyncio.ensure_future(self._refresh_db_with_progress(refresh_db))
-            if callable(refresh_db)
-            else None
-        )
+
+        def on_attempt(attempt: int, total: int) -> None:
+            self._phase(f"Preparing vulnerability database (attempt {attempt}/{total})")
+
+        db_task: asyncio.Future[bool] = asyncio.ensure_future(self._prepare_database(on_attempt))
         try:
-            tags = await self._repository.search_tags(image_name, limit=limit)
+            with self._stage("discovery"):
+                tags = await run_within(
+                    self._deadline,
+                    lambda: self._repository.search_tags(image_name, limit=limit),
+                )
+        except DeadlineExceededError:
+            self._deadline_hit = True
+            self._note_pending("tag discovery (the time budget ended first)")
+            await self._stop(db_task)
+            return self._stamp(
+                AnalysisResult(
+                    query=image_name,
+                    total_tags_scanned=0,
+                    baseline_met=False,
+                    errors=["The time budget ended before any tag was discovered"],
+                    log_file=str(self._log_file or ""),
+                    baseline=self._baseline(),
+                    metrics=self._metrics,
+                )
+            )
         except BaseException:
             # A failed or cancelled tag search must not leave the DB
             # download running unattended: `execute()`'s `finally` closes
@@ -314,12 +453,10 @@ class RecommendImagesUseCase:
             # task racing that shutdown is exactly the orphan this guards
             # against -- not a slow leak, a task with nothing left to
             # finish into.
-            if db_task is not None:
-                db_task.cancel()
-                with contextlib.suppress(BaseException):
-                    await db_task
+            await self._stop(db_task)
             raise
-        db_ready = await db_task if db_task is not None else True
+        db_ready = await db_task
+        self._adopt_scanner_identity(await self._measurement.fingerprint())
 
         if not db_ready:
             # O retorno era descartado. Sem a DB pronta, cada worker sai
@@ -333,13 +470,16 @@ class RecommendImagesUseCase:
             )
 
         if not tags:
-            return AnalysisResult(
-                query=image_name,
-                total_tags_scanned=0,
-                baseline_met=False,
-                errors=["No tags found for image"],
-                log_file=str(self._log_file or ""),
-                baseline=self._baseline(),
+            return self._stamp(
+                AnalysisResult(
+                    query=image_name,
+                    total_tags_scanned=0,
+                    baseline_met=False,
+                    errors=["No tags found for image"],
+                    log_file=str(self._log_file or ""),
+                    baseline=self._baseline(),
+                    metrics=self._metrics,
+                )
             )
 
         self._observer.phase_result(
@@ -354,8 +494,37 @@ class RecommendImagesUseCase:
         # quatro minutos, e 95 desses scans existem só para serem
         # descartados no ranqueamento. O plano corta isso -- e declara o
         # que cortou: uma tag adiada não é uma tag pior, é uma tag *não
-        # medida*, e ela aparece no resultado com o motivo.
-        plan = plan_scans(tags, self._scan_budget)
+        # medida*, e ela aparece no resultado com o motivo. Os filtros de
+        # compatibilidade vêm antes do orçamento e também declaram o que
+        # tiraram, e por quê.
+        plan = plan_scans(tags, self._scan_budget, self._criteria, spread=self._spread)
+        if plan.excluded:
+            self._observer.phase_result(
+                "Filtered by compatibility",
+                [
+                    ("excluded", str(len(plan.excluded))),
+                    ("filters", self._criteria.describe()),
+                ],
+            )
+        if not plan.selected:
+            note = FilterOutcome(kept=[], excluded=plan.excluded).explain_empty(
+                self._criteria, plan.discovered
+            )
+            return self._stamp(
+                AnalysisResult(
+                    query=image_name,
+                    total_tags_scanned=0,
+                    baseline_met=False,
+                    errors=[note],
+                    log_file=str(self._log_file or ""),
+                    baseline=self._baseline(),
+                    sources_searched=_sources_of(tags),
+                    metrics=self._metrics,
+                    tags_discovered=plan.discovered,
+                    excluded=plan.excluded,
+                    filters_note=note,
+                )
+            )
         if plan.deferred:
             self._observer.phase_result(
                 "Selected for measurement",
@@ -367,10 +536,24 @@ class RecommendImagesUseCase:
             )
         tags = plan.selected
 
-        await self._pin_digests(tags)
+        await self._resolve_identities(tags)
 
         analyses, unverified, errors = await self._scan_all(tags)
         errors = [*setup_errors, *errors]
+
+        # A filter on the distribution is decided twice: by the tag's name
+        # before the scan (a heuristic), and by what the scanner read inside
+        # the image after it. The second answer is a measurement and wins.
+        excluded = list(plan.excluded)
+        if self._criteria.distro:
+            kept: list[ImageAnalysis] = []
+            for analysis in analyses:
+                verdict = self._criteria.confirm(analysis.image, analysis.scan.os_family)
+                if verdict is None:
+                    kept.append(analysis)
+                else:
+                    excluded.append(verdict)
+            analyses = kept
         analyses.sort(key=lambda a: a.security_score, reverse=True)
 
         # Reported after the fact rather than before: the cache-hit and
@@ -419,94 +602,197 @@ class RecommendImagesUseCase:
             baseline=self._baseline(),
             sources_searched=_sources_of(tags),
             metrics=self._metrics,
-            deferred=plan.deferred,
+            deferred=[*plan.deferred, *self._deadline_deferred],
             tags_discovered=plan.discovered,
+            excluded=excluded,
+            filters_note=(
+                FilterOutcome(kept=[], excluded=excluded).explain_empty(
+                    self._criteria, plan.discovered
+                )
+                if not analyses and excluded
+                else ""
+            ),
+            enrichment_note=self._enrichment_note(analyses),
         )
         result.evidence_manifest = await self._write_manifest(image_name, selected)
+        return self._stamp(result, selected=selected)
+
+    async def _prepare_database(self, on_attempt: Callable[[int, int], None]) -> bool:
+        """Refresh the scanner's database inside the run's budget."""
+        ready = await self._within(
+            "vulnerability database preparation",
+            lambda: self._measurement.prepare(on_attempt),
+            False,
+        )
+        return bool(ready)
+
+    @staticmethod
+    async def _stop(task: asyncio.Future[Any]) -> None:
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+
+    def _enrichment_note(self, analyses: list[ImageAnalysis]) -> str:
+        """Say how far threat intelligence reached, when it did not reach all.
+
+        Dropping intelligence for some candidates is allowed -- it is what
+        keeps a quick run quick -- but the comparison between an enriched and
+        an unenriched candidate is not a like-for-like one, and the result
+        must say so rather than let the ranking imply it.
+        """
+        if self._threat_intel is None or self._enrichment is Enrichment.ALL:
+            return ""
+        enriched = sum(1 for a in analyses if a.provenance.threat_intel_at)
+        return (
+            f"threat intelligence was gathered for {enriched} of {len(analyses)} measured "
+            "candidates (the best ranked by scanner findings); the others have UNKNOWN "
+            "KEV, EPSS, Exploit-DB and OSV status, so comparing them with each other, or "
+            "with an enriched candidate, rests on scanner findings alone"
+        )
+
+    def _planned_checks(self) -> list[str]:
+        """Checks still to run when a provisional ranking is emitted."""
+        planned = list(self._pending)
+        if self._staged and self._threat_intel is not None:
+            planned.append("threat intelligence enrichment")
+        if self._verify_hub_tags:
+            planned.append(CHECK_TAG_VERIFICATION)
+        if self._inspect_finalists and self._hardening is not None:
+            planned.append(CHECK_INSPECTION)
+        if self._cross_validator is not None and self._cross_validator.enabled:
+            planned.append(CHECK_CROSS_VALIDATION)
+        return list(dict.fromkeys(planned))
+
+    def _final_pending(self, selected: list[ImageAnalysis]) -> list[str]:
+        """Everything this run did not establish, in the reader's terms.
+
+        Nothing here is ever turned into approval: each entry is a check whose
+        absence lowers what the result may claim.
+        """
+        pending = list(self._pending)
+        why = f"not run: {self._profile_name} profile" if self._profile_name else "not run"
+        validator = self._cross_validator
+        if validator is None or not validator.enabled:
+            pending.append(f"{CHECK_CROSS_VALIDATION} ({why})")
+        elif any(a.cross_validation == "NO_SECOND_SCANNER" for a in selected):
+            missing = sum(1 for a in selected if a.cross_validation == "NO_SECOND_SCANNER")
+            pending.append(f"{CHECK_CROSS_VALIDATION} did not complete for {missing} finalist(s)")
+        if not self._verify_hub_tags:
+            pending.append(f"{CHECK_TAG_VERIFICATION} ({why})")
+        if not self._inspect_finalists or self._hardening is None or not self._hardening.inspects:
+            pending.append(f"{CHECK_INSPECTION} ({why})")
+        if self._threat_intel is None:
+            pending.append("threat intelligence (disabled)")
+        unconfirmed = [a for a in selected if not a.image.identity_confirmed]
+        if unconfirmed:
+            pending.append(
+                f"immutable identity not confirmed for {len(unconfirmed)} finalist(s); "
+                "their results are not stored as pinned evidence"
+            )
+        return list(dict.fromkeys(pending))
+
+    def _stamp(
+        self, result: AnalysisResult, *, selected: list[ImageAnalysis] | None = None
+    ) -> AnalysisResult:
+        """Say how complete this run is, and what it did not do.
+
+        `PARTIAL` means the time budget ended with some measurements done: the
+        result is real and provisional, and is never presented as an audit.
+        `NO_RESULT` means it ended before anything was measured.
+        """
+        measured = result.total_tags_analyzed
+        if self._deadline_hit or self._deadline_deferred:
+            result.completeness = "PARTIAL" if measured else "NO_RESULT"
+        result.pending_checks = self._final_pending(selected or [])
+        result.time_budget_seconds = self._deadline.total
+        result.elapsed_seconds = round(self._deadline.elapsed(), 3)
+        result.profile = self._profile_name
+        result.platform = str(self._platform)
+        result.filters = self._criteria.describe() if self._criteria.active else ""
+        if self._instrumentation is not None:
+            self._collect_requests(self._instrumentation)
+            self._metrics.timings = self._instrumentation.to_dict()
+        result.metrics = self._metrics
         return result
 
-    async def _pin_digests(self, tags: list[DockerImage]) -> None:
-        """Resolve every candidate that arrived without a digest.
+    def _collect_requests(self, instrumentation: RunInstrumentation) -> None:
+        """Fold the clients' own request counts into the run's instrumentation."""
+        stats = self._measurement.stats
+        instrumentation.count("scans_performed", stats.scans_performed)
+        instrumentation.count("scans_avoided_by_sharing", stats.duplicates_avoided)
+        instrumentation.count("scans_avoided_by_cache", stats.cache_hits)
+        intel = self._threat_intel
+        for source, count in dict(getattr(intel, "requests", {}) or {}).items():
+            instrumentation.request(str(source), int(count))
+        osv = self._osv
+        if osv is not None:
+            instrumentation.request("osv", int(getattr(osv, "requests", 0)))
+            instrumentation.count("osv_lookups_shared", int(getattr(osv, "joined", 0)))
+        if intel is not None:
+            instrumentation.count("epss_lookups_shared", int(getattr(intel, "joined", 0)))
 
-        Deduplication keys on the digest, and a candidate with none is
-        keyed by its reference instead -- so the same manifest published
-        under `22`, `22-bookworm` and a hardened catalogue's alias is
-        scanned three times. One HEAD per unresolved tag replaces those
-        extra scans, and each scan costs orders of magnitude more than the
-        request that avoids it.
+    async def _resolve_identities(self, tags: list[DockerImage]) -> None:
+        """Pin every candidate to the manifest of the requested platform.
 
-        Failure is free: a registry that will not answer leaves the
-        candidate exactly as it arrived.
+        Deduplication and the shared cache key on this identity, and a scan is
+        handed ``name@<manifest digest>`` rather than the tag -- so tags that
+        name the same manifest collapse into one scan across every source, and
+        a tag that moves mid-run cannot change what a result describes. One
+        small registry exchange per tag, memoised for the run, buys all of it.
+
+        Failure is not free, but it is honest: a candidate the registry will
+        not confirm is still measured (by its tag) and reported with the
+        limitation, and is never filed as immutable evidence.
         """
-        if self._hardening is None or not self._resolve_digests:
+        if not tags:
             return
-        unresolved = [tag for tag in tags if not tag.digest_known]
-        if not unresolved:
-            return
-
-        self._observer.phase(f"Resolving digests for {len(unresolved)} tag(s)")
-        semaphore = asyncio.Semaphore(self._workers)
-
-        async def pin(image: DockerImage) -> None:
-            async with semaphore:
-                digest = await self._hardening.resolve_digest(image) if self._hardening else ""
-            if digest:
-                # Mutated in place because `tags` is the list the rest of
-                # the pipeline holds; replacing entries would leave the
-                # scan loop keyed on the unpinned copies.
-                image.digest = digest
-                self._metrics.digests_resolved += 1
-
-        await asyncio.gather(*[pin(image) for image in unresolved])
+        self._phase(f"Resolving digests for {len(tags)} tag(s)")
+        with self._stage("identity_resolution_wall"):
+            await asyncio.gather(*[self._measurement.resolve(tag) for tag in tags])
+        self._metrics.digests_resolved = sum(1 for tag in tags if tag.identity_confirmed)
+        unconfirmed = len(tags) - self._metrics.digests_resolved
         logger.info(
-            f"Resolved {self._metrics.digests_resolved}/{len(unresolved)} previously "
-            "unpinned tags to manifest digests"
+            f"Confirmed {self._metrics.digests_resolved}/{len(tags)} tags as "
+            f"{self._platform} manifests; {unconfirmed} unconfirmed"
         )
 
     async def _scan_all(
         self, tags: list[DockerImage]
     ) -> tuple[list[ImageAnalysis], list[UnverifiedImage], list[str]]:
-        semaphore = asyncio.Semaphore(self._workers)
         errors: list[str] = []
         unverified: list[UnverifiedImage] = []
+        self._deadline_deferred = []
 
-        # P0-3: dedupe scans by digest so tags sharing the same manifest
-        # digest are only scanned once and share the result.
-        scan_locks: dict[str, asyncio.Lock] = {}
-        scan_cache: dict[str, Any] = {}
-
-        def _dedup_key(image: DockerImage) -> str:
+        def _identity_key(image: DockerImage) -> str:
+            # Two tags of one manifest are one measurement. The key is the
+            # confirmed *platform manifest* digest when there is one.
             return image.digest or image.full_reference
 
         self._metrics.tags_discovered = len(tags)
-        self._metrics.unique_digests = len({_dedup_key(tag) for tag in tags})
+        self._metrics.unique_digests = len({_identity_key(tag) for tag in tags})
         self._metrics.workers = self._workers
 
-        # Caminho em lote: quando a engine Go está disponível, todos os
-        # scans que faltam saem numa travessia de processo só, e
-        # `scan_cache` chega aqui já preenchido. `get_scan` abaixo então
-        # não dispara scan nenhum -- ele encontra tudo pela chave.
-        #
-        # `prefetched` são as análises que já estavam no cache do disco: o
-        # lote tem de perguntar por elas *antes* de medir, ou um run
-        # inteiramente cacheado voltaria a escanear cem imagens.
-        prefetched, batched = await self._prescan(tags, scan_cache, _dedup_key)
-
-        async def get_scan(image: DockerImage) -> Any:
-            key = _dedup_key(image)
-            lock = scan_locks.setdefault(key, asyncio.Lock())
-            async with lock:
-                if key in scan_cache:
-                    return scan_cache[key]
-                async with semaphore:
-                    scan = await self._scanner.scan(image.full_reference)
-                # Counted here rather than at the call site so a tag served
-                # from a sibling's digest is never counted as a scan.
-                self._metrics.scans_performed += 1
-                scan_cache[key] = scan
-                return scan
+        # Batch path: with the Go engine every measurement that is missing
+        # goes out in one process traversal, and the per-run results are
+        # already filled when `measure` asks below -- it finds them by
+        # identity and starts no scan. Without an engine this is a no-op and
+        # the loop below does the same work one bounded scan at a time.
+        await self._measurement.prescan(tags)
 
         def _skip(image: DockerImage, status: str, reason: str, kind: str = "UNKNOWN") -> None:
+            if kind == "DEADLINE_EXCEEDED":
+                # Not a failure of the image or the scanner: the run's clock
+                # ended. It is reported with the tags that were *not measured*,
+                # never with the ones whose measurement failed.
+                self._deadline_hit = True
+                self._deadline_deferred.append(
+                    DeferredTag(
+                        reference=image.full_reference,
+                        reason=DeferralReason.TIME_BUDGET,
+                        detail=reason or "the time budget ended before this scan",
+                    )
+                )
+                return
             logger.warning(f"Skipping {image.full_reference}: {status}/{kind} ({reason})")
             unverified.append(
                 UnverifiedImage(
@@ -522,56 +808,27 @@ class RecommendImagesUseCase:
             self._observer.scanning(image.full_reference)
             analysis: ImageAnalysis | None = None
             try:
-                # Já perguntado pelo lote; perguntar de novo seria uma
-                # segunda leitura do cache por imagem.
-                cached = (
-                    prefetched.get(image.full_reference)
-                    if batched
-                    else await self._get_cached(image)
-                )
+                cached = await self._get_cached(image)
                 if cached:
                     self._metrics.cache_hits += 1
                     analysis = cached
+                    self._announce(cached)
                     return cached
 
-                scan = await get_scan(image)
+                measured = await self._measurement.measure(image)
+                scan = measured.scan
                 # Single verification gate: anything short of a completed,
                 # parsed scan is reported as unverified and is never scored.
                 if not scan.is_verified:
                     _skip(image, scan.status.value, scan.error_message, scan.error_kind.value)
                     return None
 
-                if self._ignored_cves:
-                    scan = _apply_ignore_rules(scan, self._ignored_cves)
-                if self._threat_intel is not None:
-                    scan = await _enrich_with_threat_intel(
-                        scan, self._threat_intel, self._exploitdb, self._osv
-                    )
-
-                product, version = _extract_product_version(image)
-                eol_status = await _eol_status(self._eol_checker, product, version)
-                is_eol = eol_status.is_true
-                is_lts = await self._eol_checker.is_lts(product, version)
-
-                score = SecurityScore(image, scan, is_eol=is_eol, is_lts=is_lts)
-                tier = SecurityTier(scan, score.value, is_eol=is_eol)
-                rem_score = RemediationScore(scan)
-
-                analysis = ImageAnalysis(
-                    image=image,
-                    scan=scan,
-                    security_score=score.value,
-                    tier=tier.tier.value,
-                    remediation_score=rem_score.value,
-                    is_eol=is_eol,
-                    eol_status=eol_status,
-                    is_lts=is_lts,
-                    evidence_paths=(
-                        {scan.scanner: scan.evidence_path} if scan.evidence_path else {}
-                    ),
+                analysis = await self._evaluate(
+                    image, scan, measured.provenance, enrich=not self._staged
                 )
-
-                await self._set_cached(image, analysis)
+                if not self._staged:
+                    await self._set_cached(image, analysis)
+                self._announce(analysis)
                 return analysis
             except Exception as e:
                 logger.warning(f"Failed to analyze {image.full_reference}: {e}")
@@ -582,72 +839,188 @@ class RecommendImagesUseCase:
 
         self._observer.start(len(tags))
         results = await asyncio.gather(*[analyze_tag(tag) for tag in tags])
-        return [r for r in results if r is not None], unverified, errors
+        stats = self._measurement.stats
+        self._metrics.scans_performed = stats.scans_performed
+        self._metrics.cache_hits += stats.cache_hits
+        self._metrics.duplicates_avoided = stats.duplicates_avoided
+        analyses = [r for r in results if r is not None]
 
-    async def _prescan(
-        self,
-        tags: list[DockerImage],
-        scan_cache: dict[str, Any],
-        dedup_key: Callable[[DockerImage], str],
-    ) -> tuple[dict[str, ImageAnalysis], bool]:
-        """Mede o lote inteiro de uma vez, quando a engine Go existe.
+        if self._staged and analyses:
+            analyses = await self._enrich_stage(analyses)
+        return analyses, unverified, errors
 
-        O que muda em relação ao caminho de sempre não é o scan: o Trivy
-        continua sendo o Trivy e continua custando o que custa. O que muda
-        é o entorno -- criar e colher N processos, revezar o diretório de
-        cache, coordenar o dedup por digest -- que sai de N travessias
-        Python<->processo para uma.
+    @property
+    def _staged(self) -> bool:
+        """Whether enrichment runs *after* a first ranking instead of before it.
 
-        Devolve `(análises já em cache, se o lote aconteceu)`. Quando o
-        lote não acontece -- engine ausente, versão incompatível, qualquer
-        falha -- devolve `({}, False)` e o pipeline segue exatamente como
-        antes. A engine é uma otimização, e uma otimização que pode
-        derrubar o comando não vale o ganho.
+        Staging is what makes a provisional result possible: candidates are
+        measured and ranked on scanner findings alone, that ranking is shown,
+        and threat intelligence then arrives and may revise it. It is used when
+        results are being streamed, and when intelligence is limited to the
+        finalists (which needs a ranking to choose them from). Otherwise the
+        original single pass -- enrich, then rank -- is unchanged.
         """
-        batch = getattr(self._scanner, "batch", None)
-        if batch is None:
-            return {}, False
-
-        # O cache do disco vem primeiro: um run inteiramente cacheado tem
-        # de continuar fazendo zero scans, e medir para depois descobrir
-        # que a resposta já estava guardada seria o pior dos dois mundos.
-        cached_analyses = await asyncio.gather(*[self._get_cached(tag) for tag in tags])
-        prefetched = {
-            tag.full_reference: analysis
-            for tag, analysis in zip(tags, cached_analyses, strict=True)
-            if analysis is not None
-        }
-
-        pending: list[tuple[str, str]] = []
-        seen: set[str] = set()
-        for tag in tags:
-            if tag.full_reference in prefetched:
-                continue
-            key = dedup_key(tag)
-            if key in seen:
-                continue
-            seen.add(key)
-            pending.append((tag.full_reference, key))
-
-        if not pending:
-            return prefetched, True
-
-        outcome = await batch.scan_batch(pending)
-        if outcome is None:
-            # A engine recusou o lote. As análises já lidas do cache não se
-            # perdem, mas o caminho individual precisa reler -- devolver
-            # `batched=True` aqui faria toda imagem não cacheada ser
-            # tratada como sem cache *e* sem scan.
-            return {}, False
-
-        for (_, key), result in zip(pending, outcome.results, strict=True):
-            scan_cache[key] = result
-        self._metrics.scans_performed += outcome.scans_performed
-        logger.info(
-            f"Go engine measured {len(pending)} targets in {outcome.wall_seconds:.1f}s "
-            f"({outcome.scans_performed} scans, {outcome.duplicates_collapsed} collapsed)"
+        return self._threat_intel is not None and (
+            self._events.enabled or self._enrichment is Enrichment.FINALISTS
         )
-        return prefetched, True
+
+    async def _evaluate(
+        self,
+        image: DockerImage,
+        scan: Any,
+        provenance: Any,
+        *,
+        enrich: bool,
+    ) -> ImageAnalysis:
+        """Turn a raw scan into a scored analysis under this run's policy.
+
+        The policy half of the pipeline, deliberately separate from measuring:
+        ignore rules, threat intelligence, lifecycle and scoring are applied to
+        a scan that already exists, so re-running it with a different policy
+        never needs a new scan.
+        """
+        if self._ignored_cves:
+            scan = _apply_ignore_rules(scan, self._ignored_cves)
+        if enrich and self._threat_intel is not None:
+            threat_intel = self._threat_intel
+            with self._stage("enrichment"):
+                scan = await self._within(
+                    "threat intelligence",
+                    lambda: _enrich_with_threat_intel(
+                        scan, threat_intel, self._exploitdb, self._osv
+                    ),
+                    scan,
+                )
+            self._note_intel_gaps(
+                [
+                    v.cve_id
+                    for v in scan.vulnerabilities
+                    if v.severity.value in ("CRITICAL", "HIGH") and v.cve_id
+                ]
+            )
+
+        product, version = _extract_product_version(image)
+        eol_status = await self._within(
+            "end-of-life lookup",
+            lambda: _eol_status(self._eol_checker, product, version),
+            Tristate.UNKNOWN,
+        )
+        is_eol = eol_status.is_true
+        is_lts = await self._within(
+            "long-term-support lookup",
+            lambda: self._eol_checker.is_lts(product, version),
+            False,
+        )
+
+        score = SecurityScore(image, scan, is_eol=is_eol, is_lts=is_lts)
+        tier = SecurityTier(scan, score.value, is_eol=is_eol)
+        rem_score = RemediationScore(scan)
+        stamps = [
+            v.threat_intel_timestamp for v in scan.vulnerabilities if v.threat_intel_timestamp
+        ]
+        provenance = provenance.model_copy(
+            update={"threat_intel_at": max(stamps) if stamps else ""}
+        )
+        return ImageAnalysis(
+            image=image,
+            scan=scan,
+            security_score=score.value,
+            tier=tier.tier.value,
+            remediation_score=rem_score.value,
+            is_eol=is_eol,
+            eol_status=eol_status,
+            is_lts=is_lts,
+            evidence_paths={scan.scanner: scan.evidence_path} if scan.evidence_path else {},
+            provenance=provenance,
+        )
+
+    def _announce(self, analysis: ImageAnalysis) -> None:
+        """A measured candidate, as soon as it exists (provisional by nature)."""
+        self._instrumentation_first_result()
+        if not self._events.enabled:
+            return
+        self._events.emit(
+            CANDIDATE_MEASURED,
+            provisional=True,
+            candidate=_summary(analysis),
+        )
+
+    def _instrumentation_first_result(self) -> None:
+        if self._instrumentation is not None:
+            self._instrumentation.mark_first_result()
+
+    def _ranking_items(self, analyses: list[ImageAnalysis]) -> list[dict[str, Any]]:
+        top = sorted(analyses, key=lambda a: a.security_score, reverse=True)[:TOP_N]
+        return [{"rank": i, **_summary(a)} for i, a in enumerate(top, start=1)]
+
+    async def _enrich_stage(self, analyses: list[ImageAnalysis]) -> list[ImageAnalysis]:
+        """Stage two: threat intelligence, after a first ranking has been shown.
+
+        Which candidates are enriched depends on the profile: all of them, or
+        only the best ranked (the finalists). The re-evaluated analyses replace
+        the provisional ones; if that changes the ranking, a `ranking_revised`
+        event says so -- the provisional order is never left standing as if it
+        were the final one.
+        """
+        awaiting = [
+            a
+            for a in analyses
+            if not a.provenance.threat_intel_at and a.provenance.origin != "cache"
+        ]
+        if self._enrichment is Enrichment.FINALISTS:
+            best = sorted(analyses, key=lambda a: a.security_score, reverse=True)[: TOP_N * 2]
+            chosen = {id(a) for a in best}
+            awaiting = [a for a in awaiting if id(a) in chosen]
+
+        before = self._ranking_items(analyses)
+        self._events.emit(
+            RANKING,
+            provisional=True,
+            revision=self._events.next_revision(),
+            measured=len(analyses),
+            items=before,
+            pending=self._planned_checks(),
+        )
+        if not awaiting:
+            return analyses
+
+        self._phase(f"Gathering threat intelligence for {len(awaiting)} candidate(s)")
+        gate = asyncio.Semaphore(self._workers)
+        replacements: dict[int, ImageAnalysis] = {}
+
+        async def enrich(analysis: ImageAnalysis) -> None:
+            async with gate:
+                upgraded = await self._evaluate(
+                    analysis.image, analysis.scan, analysis.provenance, enrich=True
+                )
+                replacements[id(analysis)] = upgraded
+                await self._set_cached(upgraded.image, upgraded)
+
+        await asyncio.gather(*[enrich(a) for a in awaiting])
+        analyses = [replacements.get(id(a), a) for a in analyses]
+        # Anything not enriched (outside the finalists, or cut by the budget)
+        # still needs to be cacheable as the scan-only evaluation it is.
+
+        after = self._ranking_items(analyses)
+        if [i["reference"] for i in after] != [i["reference"] for i in before]:
+            self._events.emit(
+                RANKING_REVISED,
+                provisional=True,
+                revision=self._events.next_revision(),
+                previous=before,
+                items=after,
+                reason="threat intelligence changed the scores and therefore the order",
+                pending=self._planned_checks(),
+            )
+        else:
+            self._events.emit(
+                CHECK,
+                provisional=True,
+                name="threat_intelligence",
+                status="completed",
+                ranking_changed=False,
+            )
+        return analyses
 
     async def _finalize(
         self, pool: list[ImageAnalysis], unverified: list[UnverifiedImage]
@@ -665,23 +1038,38 @@ class RecommendImagesUseCase:
         # apresentada sem contestação justamente por não ter sido checada.
         # De quebra, deixa de gastar um scan secundário em quem vai cair.
         if self._verify_hub_tags and candidates:
-            self._observer.phase("Verifying tags in their source registries")
-            await self._verify_tags(candidates, unverified)
+            self._phase("Verifying tags in their source registries")
+            checked = await self._within(
+                CHECK_TAG_VERIFICATION,
+                lambda: self._verify_tags(candidates, unverified),
+                False,
+            )
+            if checked is not False:
+                self._events.emit(CHECK, provisional=True, name="tag_verification", status="done")
             candidates = [c for c in candidates if c.hub_tag_verified is not False]
 
         selected = candidates[:TOP_N]
 
+        # The two checks that remain are independent: cross-validation spends a
+        # scanner process on the finalists, inspection spends a few small
+        # registry requests on them. Neither reads what the other writes
+        # (`apply_facts` fills hardening fields, cross-validation fills the
+        # divergence fields), each is bounded by its own limit, and both are
+        # finished before the verdict below reads either -- so they overlap
+        # instead of adding their latencies. Each is cut off, separately, when
+        # the run's budget ends: what it did not finish is *pending*.
+        checks: list[Awaitable[Any]] = []
+        if self._inspect_finalists:
+            checks.append(self._within(CHECK_INSPECTION, lambda: self._inspect(selected), None))
         if self._cross_validator is not None and self._cross_validator.enabled and selected:
-            self._observer.phase(f"Cross-validating top {len(selected)} candidates")
+            validator = self._cross_validator
+            self._phase(f"Cross-validating top {len(selected)} candidates")
             self._metrics.cross_validations = len(selected)
-            await self._cross_validator.validate(selected)
-
-        # Hardening evidence is gathered for the finalists only. Inspecting
-        # every discovered tag would cost two registry round-trips each --
-        # hundreds of requests to inform a decision between five images --
-        # and the candidates that reach this point are exactly the ones the
-        # decision is actually between.
-        await self._inspect(selected)
+            checks.append(
+                self._within(CHECK_CROSS_VALIDATION, lambda: validator.validate(selected), None)
+            )
+        if checks:
+            await asyncio.gather(*checks)
 
         for analysis in selected:
             finalize_verdict(analysis, cross_validated=cross_validation_agreed(analysis))
@@ -701,7 +1089,7 @@ class RecommendImagesUseCase:
         """Attach registry/catalogue/scanner evidence to each finalist."""
         if self._hardening is None or not selected:
             return
-        self._observer.phase(f"Inspecting {len(selected)} candidate image(s)")
+        self._phase(f"Inspecting {len(selected)} candidate image(s)")
 
         async def inspect(analysis: ImageAnalysis) -> None:
             if self._hardening is None:
@@ -755,6 +1143,14 @@ class RecommendImagesUseCase:
                 "image": a.image.full_reference,
                 "pinned_reference": a.image.pinned_reference,
                 "digest": a.image.digest,
+                "index_digest": a.image.index_digest,
+                "platform": a.image.platform,
+                "identity_status": a.image.identity_status,
+                "requested_reference": a.provenance.requested_reference,
+                "resolved_reference": a.provenance.resolved_reference,
+                "measured_reference": a.provenance.measured_reference,
+                "measurement_origin": a.provenance.origin,
+                "database_revision": a.provenance.db_revision,
                 "confidence": a.confidence.value,
                 "production_ready": a.production_ready,
                 "readiness_blockers": a.readiness_blockers,
@@ -781,12 +1177,18 @@ class RecommendImagesUseCase:
                 "scanner": self._scanner_identity,
                 "resolved_at": datetime.now(tz=UTC).isoformat(),
                 "analysis_fingerprint": self._analysis_fingerprint,
+                "platform": str(self._platform),
+                "database_revision": self._metrics.db_revision,
             },
         )
 
     async def _close_scanners(self) -> None:
         secondary = self._cross_validator.scanner if self._cross_validator else None
-        await close_quietly(self._scanner, secondary, self._hardening)
+        # The intel clients keep one connection pool for the run; they are
+        # closed here, after the last enrichment, and never earlier.
+        await close_quietly(
+            self._scanner, secondary, self._hardening, self._threat_intel, self._osv
+        )
 
     async def _close_repositories(self) -> None:
         """Release the HTTP connection pools the image sources hold.
@@ -797,80 +1199,101 @@ class RecommendImagesUseCase:
         await close_quietly(*sources_of(self._repository))
 
     async def _get_cached(self, image: DockerImage) -> ImageAnalysis | None:
-        key = image.full_reference
-        if not self._cache:
+        """A stored *evaluation* of exactly this identity under exactly this policy.
+
+        The evaluation layer is derived data: it is only served while the scan
+        it came from is itself reusable (same scanner, same database revision,
+        not expired), and only for the policy -- ignore rules, enrichment,
+        scoring version -- that produced it. A different policy is a miss
+        here, and a hit one layer down: the raw scan is reused and only the
+        score is recomputed.
+        """
+        identity = self._identity_for_cache(image)
+        if identity is None:
             return None
-        cache_key = self._cache_key(image)
-        if cache_key is None:
+        store = self._measurement.store
+        fingerprint = await self._measurement.fingerprint()
+        lookup = await store.get_evaluation(identity, fingerprint, self._analysis_fingerprint)
+        if not lookup.hit:
             return None
         try:
-            data = await self._cache.get(cache_key)
-        except Exception as e:
-            # An unreadable cache is a miss, not a scan failure.
-            logger.warning(f"Could not read cached analysis for {key}: {e}")
-            return None
-        if not (data and isinstance(data, dict)):
-            return None
-        try:
-            analysis: ImageAnalysis = ImageAnalysis.model_validate(data)
+            analysis: ImageAnalysis = ImageAnalysis.model_validate(lookup.value)
         except ValidationError as e:
-            logger.warning(f"Discarding stale cache entry for {key}: {e}")
-            await self._discard(cache_key)
+            logger.warning(f"Discarding stale cache entry for {image.full_reference}: {e}")
             return None
-        # A cache hit is not proof of a successful scan: an entry written by
-        # an older build could carry a failed scan. Re-apply the gate.
+        # A cache hit is not proof of a successful scan, and the payload is
+        # untrusted even after a key lookup: it must be verified *and* describe
+        # this digest and platform, not merely have been stored under this key.
         if not analysis.scan.is_verified:
-            logger.warning(f"Discarding cache entry for {key}: cached scan is not verified")
-            await self._discard(cache_key)
             return None
-        # Treat the payload as untrusted even after a key lookup. A manually
-        # edited/corrupt database must not return evidence for another digest
-        # or platform merely because it was stored under this key.
-        cached_identity = ImageIdentity.try_from_image(analysis.image)
-        requested_identity = ImageIdentity.try_from_image(image)
-        if cached_identity is None or requested_identity is None:
-            await self._discard(cache_key)
+        if ImageIdentity.try_from_image(analysis.image) != identity:
+            logger.warning(f"Discarding mismatched cache entry for {image.full_reference}")
             return None
-        if cached_identity != requested_identity:
-            logger.warning(f"Discarding mismatched cache entry for {key}")
-            await self._discard(cache_key)
-            return None
+        analysis.provenance = analysis.provenance.model_copy(update={"origin": "cache"})
         return analysis
 
-    async def _discard(self, cache_key: str) -> None:
-        """Best-effort eviction: failing to delete a bad entry must not
-        become a failure to analyze the image it belongs to."""
-        if not self._cache:
-            return
-        try:
-            await self._cache.delete(cache_key)
-        except Exception as e:
-            logger.warning(f"Could not evict cache entry {cache_key}: {e}")
-
     async def _set_cached(self, image: DockerImage, analysis: ImageAnalysis) -> None:
-        """Persist an analysis, treating a storage failure as a cache miss.
+        """Persist an evaluation, treating a storage failure as a cache miss.
 
-        The cache is an optimisation, never a source of truth. Letting a
-        write error escape put it on the same path as a failed scan: the
-        exception unwound into `analyze_tag`'s handler, which reported a
-        fully-scanned, fully-scored image as `ERROR`/unverified. A locked
-        SQLite file -- ordinary under the concurrency this use case creates
-        -- was enough to make a clean image vanish from the results.
+        The cache is an optimisation, never a source of truth: a write error
+        must not turn a fully scanned, fully scored image into `ERROR`. The
+        store swallows and records the failure itself.
+
+        An evaluation that would freeze an *unanswered* enrichment is not
+        stored: with notable findings and threat intelligence enabled but no
+        timestamp on any of them, the feeds did not answer, and reusing that
+        for a day would keep KEV/EPSS at UNKNOWN long after they came back.
+        The raw scan stays cached either way.
         """
-        key = image.full_reference
-        if not self._cache:
+        identity = self._identity_for_cache(image)
+        if identity is None:
             return
-        cache_key = self._cache_key(image)
-        if cache_key is None:
+        intel_at = _intel_epoch(analysis)
+        if self._threat_intel is not None and intel_at is None and _has_notable(analysis):
             return
-        try:
-            await self._cache.set(
-                cache_key,
-                analysis.model_dump(),
-                ttl_seconds=self._cache_ttl_seconds,
-            )
-        except Exception as e:
-            logger.warning(f"Could not cache analysis for {key}: {e}")
+        fingerprint = await self._measurement.fingerprint()
+        await self._measurement.store.put_evaluation(
+            identity,
+            fingerprint,
+            self._analysis_fingerprint,
+            analysis.model_dump(mode="json"),
+            scan_measured_at=analysis.provenance.measured_at,
+            intel_at=intel_at,
+        )
+
+
+def _summary(analysis: ImageAnalysis) -> dict[str, Any]:
+    """The few facts a streamed candidate carries."""
+    image = analysis.image
+    return {
+        "reference": image.full_reference,
+        "resolved_reference": analysis.provenance.resolved_reference,
+        "platform": image.platform,
+        "digest": image.digest,
+        "identity_status": image.identity_status,
+        "critical": analysis.scan.critical_count,
+        "high": analysis.scan.high_count,
+        "medium": analysis.scan.medium_count,
+        "score": analysis.security_score,
+        "tier": analysis.tier,
+        "origin": analysis.provenance.origin,
+        "threat_intel_at": analysis.provenance.threat_intel_at,
+    }
+
+
+def _has_notable(analysis: ImageAnalysis) -> bool:
+    return any(v.severity.value in ("CRITICAL", "HIGH") for v in analysis.scan.vulnerabilities)
+
+
+def _intel_epoch(analysis: ImageAnalysis) -> float | None:
+    """When the threat intelligence in `analysis` was fetched, or None."""
+    stamps: list[float] = []
+    for v in analysis.scan.vulnerabilities:
+        if not v.threat_intel_timestamp:
+            continue
+        with contextlib.suppress(ValueError):
+            stamps.append(datetime.fromisoformat(v.threat_intel_timestamp).timestamp())
+    return min(stamps) if stamps else None
 
 
 def _sources_of(tags: list[DockerImage]) -> list[str]:
@@ -934,6 +1357,16 @@ def _exploitdb_fields(entries: list[ExploitEntry] | None, *, available: bool) ->
         # reproduzida, não se todas as entradas foram reproduzidas.
         "exploitdb_verified": any(e.verified for e in entries),
     }
+
+
+_INTEL_GAP_LABEL = {
+    IntelStatus.NETWORK_ERROR: "source unreachable",
+    IntelStatus.RATE_LIMITED: "rate limited",
+    IntelStatus.INVALID_RESPONSE: "invalid response",
+    IntelStatus.UNAVAILABLE: "source unavailable",
+    IntelStatus.FOUND: "",
+    IntelStatus.ABSENT: "",
+}
 
 
 async def _osv_lookup(osv: OSVClient | None, cve_ids: list[str]) -> dict[str, OSVEnrichment]:
@@ -1015,6 +1448,18 @@ async def _enrich_with_threat_intel(
         return scan
 
     timestamp = datetime.now(tz=UTC).isoformat()
+    # Only feeds that answered are named: a source that was down is absent
+    # from the list, which is how "not consulted" stays visible.
+    sources = [
+        name
+        for name, answered in (
+            ("kev", kev_available),
+            ("epss", epss_available),
+            ("exploitdb", exploitdb_available),
+            ("osv", bool(osv_data)),
+        )
+        if answered
+    ]
     notable = set(notable_ids)
     updated = []
     for v in scan.vulnerabilities:
@@ -1034,6 +1479,7 @@ async def _enrich_with_threat_intel(
                     "epss_known": epss_available and score is not None,
                     "epss_percentile": threat_intel.percentile_of(key),
                     "threat_intel_timestamp": timestamp,
+                    "threat_intel_sources": sources,
                     **_exploitdb_fields(exploits.get(key), available=exploitdb_available),
                     **(
                         {

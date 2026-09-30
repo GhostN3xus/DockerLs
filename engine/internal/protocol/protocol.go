@@ -13,7 +13,7 @@ package protocol
 
 // Version é a versão do contrato. Incrementar sempre que o sentido de um
 // campo mudar (renomear, remover, ou alterar a unidade de um número).
-const Version = 1
+const Version = 2
 
 // Target é uma imagem a medir.
 type Target struct {
@@ -46,6 +46,14 @@ type Request struct {
 	ScannerPath string `json:"scanner_path"`
 
 	Targets []Target `json:"targets"`
+
+	// Platform é `os/arquitetura[/variante]`, ou vazio. Quando preenchida
+	// é repassada como `--platform` aos dois scanners: sem ela, o scanner
+	// mede a plataforma do *host* e o resultado poderia ser arquivado sob
+	// outra. Foi este campo que motivou a versão 2 do contrato -- um
+	// binário v1 ignoraria o campo em silêncio e mediria a plataforma
+	// errada, e recusar por versão é o que impede isso.
+	Platform string `json:"platform"`
 
 	// Workers é o teto de scans simultâneos. <= 0 vira 1.
 	Workers int `json:"workers"`

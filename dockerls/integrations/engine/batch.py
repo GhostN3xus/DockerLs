@@ -47,6 +47,15 @@ if TYPE_CHECKING:
     from dockerls.integrations.engine.client import EngineOutcome
 
 
+def _validated_platform(platform: str | None) -> str:
+    """The canonical `os/arch[/variant]`, or "" when none was requested."""
+    if platform is None or not platform.strip():
+        return ""
+    from dockerls.domain.value_objects.platform import Platform
+
+    return str(Platform.parse(platform))
+
+
 @dataclass(frozen=True)
 class BatchOutcome:
     """O que um lote medido pela engine produziu."""
@@ -94,17 +103,19 @@ class EngineBatchScanner:
         self._env = dict(env or {})
         self._client: EngineClient | None = None
         self._resolved = False
+        self._client_platform = ""
 
-    def _resolve(self) -> EngineClient | None:
+    def _resolve(self, platform: str = "") -> EngineClient | None:
         """Localiza o binário uma vez por processo.
 
         `probe()` custa milissegundos e `find_engine()` toca o disco; fazer
         isso por lote seria pagar a descoberta repetidamente por uma
         resposta que não muda dentro de um run.
         """
-        if self._resolved:
+        if self._resolved and self._client_platform == platform:
             return self._client
         self._resolved = True
+        self._client_platform = platform
 
         path = find_engine()
         if not path or not probe(path):
@@ -125,12 +136,25 @@ class EngineBatchScanner:
             skip_db_update=self._skip_db_update,
             raw_dir=self._raw_dir,
             env=self._env,
+            platform=platform,
         )
         return self._client
 
-    async def scan_batch(self, targets: Sequence[tuple[str, str]]) -> BatchOutcome | None:
-        """Mede `(referência, chave_de_dedup)`, ou None para usar o Python."""
-        client = self._resolve()
+    async def scan_batch(
+        self, targets: Sequence[tuple[str, str]], platform: str | None = None
+    ) -> BatchOutcome | None:
+        """Mede `(referência, chave_de_dedup)`, ou None para usar o Python.
+
+        `platform` vale para o lote inteiro e chega ao scanner como
+        `--platform`. Um lote é sempre de uma plataforma só: misturar duas
+        no mesmo pedido é como um resultado acaba arquivado na errada.
+        """
+        try:
+            platform_text = _validated_platform(platform)
+        except ValueError as e:
+            logger.warning(f"Refusing the batch: {e}")
+            return None
+        client = self._resolve(platform_text)
         if client is None:
             return None
 

@@ -201,3 +201,39 @@ func TestACancelledContextStopsTheScanInFlight(t *testing.T) {
 		t.Fatal("um scan cancelado não é um scan bem-sucedido")
 	}
 }
+
+func TestThePlatformReachesBothScannersArgv(t *testing.T) {
+	for _, name := range []string{"trivy", "grype"} {
+		s := NewScanner(protocol.Request{
+			Scanner:        name,
+			ScannerPath:    "/bin/scanner",
+			TimeoutSeconds: 1,
+			Platform:       "linux/arm64/v8",
+		}, defaultTestMaxOutput)
+		argv := s.argv("node@sha256:"+strings.Repeat("a", 64), "")
+		joined := strings.Join(argv, " ")
+		if !strings.Contains(joined, "--platform linux/arm64/v8") {
+			t.Errorf("%s: o --platform sumiu do argv: %v", name, argv)
+		}
+	}
+}
+
+func TestNoPlatformMeansNoFlag(t *testing.T) {
+	s := NewScanner(protocol.Request{Scanner: "trivy", ScannerPath: "/bin/t", TimeoutSeconds: 1}, defaultTestMaxOutput)
+	if strings.Contains(strings.Join(s.argv("node:22", ""), " "), "--platform") {
+		t.Fatal("sem plataforma pedida, nenhum --platform deve ser enviado")
+	}
+}
+
+func TestAMalformedPlatformIsRefusedBeforeItBecomesArgv(t *testing.T) {
+	for _, bad := range []string{"linux", "linux/amd64; rm -rf /", "LINUX/AMD64", "linux//amd64", "--x/y", "a/b/c/d"} {
+		if ValidPlatform(bad) {
+			t.Errorf("%q não devia ser uma plataforma válida", bad)
+		}
+	}
+	s := NewScanner(protocol.Request{ScannerPath: "/bin/true", TimeoutSeconds: 1, Platform: "linux/amd64 --evil"}, defaultTestMaxOutput)
+	result := s.Scan(context.Background(), "node:22", "")
+	if result.Status != protocol.StatusError {
+		t.Fatalf("plataforma inválida deve virar ERROR, veio %s", result.Status)
+	}
+}

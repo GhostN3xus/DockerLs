@@ -41,6 +41,12 @@ class ScanErrorKind(StrEnum):
     #: other error -- and it is *not* a scanner fault: a second tool would
     #: pull from exactly the same refused host.
     BLOCKED_BY_POLICY = "BLOCKED_BY_POLICY"
+    #: The image has no manifest for the requested platform, or the digest
+    #: belongs to another one. A fact about the image, not a scanner fault.
+    PLATFORM_UNAVAILABLE = "PLATFORM_UNAVAILABLE"
+    #: The run's time budget ended before this scan could start or finish.
+    #: Not a scanner fault either: a second tool would hit the same clock.
+    DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
     UNKNOWN = "UNKNOWN"
 
     @property
@@ -81,6 +87,9 @@ class ScanResult(BaseModel):
     # other. Empty when the scanner did not report it.
     os_family: str = ""
     os_version: str = ""
+    #: `os/architecture[/variant]` the scanner was asked to measure, or "" when
+    #: it was not told and measured whatever its own default was.
+    platform: str = ""
 
     @property
     def is_verified(self) -> bool:

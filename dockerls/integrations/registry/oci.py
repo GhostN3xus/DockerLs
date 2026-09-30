@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -107,6 +109,48 @@ def is_fetchable_realm(realm: str) -> bool:
     return url.scheme in ("http", "https") and bool(url.host)
 
 
+#: Token services that legitimately live on another host than the registry
+#: they serve. Everything else must be on the registry's own host or below it.
+_AUTH_HOSTS: dict[str, frozenset[str]] = {
+    "registry-1.docker.io": frozenset({"auth.docker.io"}),
+    "index.docker.io": frozenset({"auth.docker.io"}),
+    "docker.io": frozenset({"auth.docker.io"}),
+}
+
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def credentials_allowed(registry_host: str, realm: str) -> bool:
+    """Whether the registry's credentials may be sent to `realm`.
+
+    The realm is chosen by whoever answered the 401. Sending the user's
+    password to it unconditionally hands that password to any host a
+    registry -- or a machine in the middle of a plain-http hop -- names. The
+    credentials go only over https (plain http only to a local registry) and
+    only to the registry's own host, a subdomain of it, or the token service
+    that registry is known to delegate to. An anonymous token request is
+    still made otherwise: it discloses nothing.
+    """
+    try:
+        url = httpx.URL(realm)
+    except (httpx.InvalidURL, ValueError, TypeError, UnicodeError):
+        return False
+    realm_host = (url.host or "").lower().rstrip(".")
+    host = (
+        registry_host.lower().rsplit(":", 1)[0]
+        if registry_host.count(":") == 1
+        else (registry_host.lower())
+    )
+    host = host.rstrip(".")
+    if url.scheme != "https" and not (url.scheme == "http" and realm_host in _LOCAL_HOSTS):
+        return False
+    return (
+        realm_host == host
+        or realm_host.endswith(f".{host}")
+        or realm_host in _AUTH_HOSTS.get(host, frozenset())
+    )
+
+
 class OCIRegistryClient:
     """Minimal OCI Distribution v2 client for listing tags.
 
@@ -165,6 +209,10 @@ class OCIRegistryClient:
         self._backoff_base = backoff_base
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
+        # repository -> (bearer token, monotonic expiry). Anonymous tokens are
+        # scoped to one repository and short-lived; reusing one turns three
+        # requests per manifest into one.
+        self._tokens: dict[str, tuple[str, float]] = {}
         self._listings: dict[str, dict[str, Any] | None] = {}
         self._listing_locks: dict[str, asyncio.Lock] = {}
         # Repositories whose cached listing is known-complete (fetched
@@ -251,6 +299,12 @@ class OCIRegistryClient:
             logger.warning(f"Refusing token realm advertised by {self._host}: {realm!r}")
             return ""
         auth = (self._username, self._password) if self._username and self._password else None
+        if auth is not None and not credentials_allowed(self._host, realm):
+            logger.warning(
+                f"Token realm {httpx.URL(realm).host!r} is not {self._host}'s own "
+                "authorisation host: requesting the token without credentials"
+            )
+            auth = None
         resp = await client.get(realm, params=params, auth=auth)
         resp.raise_for_status()
         data = resp.json()
@@ -328,6 +382,35 @@ class OCIRegistryClient:
             return cached, True
         return None, False
 
+    @dataclass(frozen=True)
+    class Result:
+        """What one request established: the response, or *why there is none*.
+
+        `status` is the HTTP status when the registry answered at all;
+        `reason` says what a caller should tell the user when it did not. The
+        distinction that matters most in practice is status 429: Docker
+        Hub throttles anonymous manifest pulls, and "the registry throttled
+        us" must not read as "the tag does not exist".
+        """
+
+        response: httpx.Response | None
+        status: int | None = None
+        reason: str = ""
+
+    #: How long an anonymous bearer token is reused. Registry tokens live for
+    #: minutes; this is shorter than the shortest common lifetime, so a cached
+    #: token is never used past the point a registry would refuse it.
+    TOKEN_REUSE_SECONDS = 240.0
+
+    @staticmethod
+    def _repository_of(path: str) -> str:
+        """The repository scope a token is issued for: `library/alpine` for
+        `library/alpine/manifests/latest`."""
+        for marker in ("/manifests/", "/blobs/", "/tags/"):
+            if marker in path:
+                return path.split(marker, 1)[0]
+        return path
+
     async def get(
         self,
         path: str,
@@ -336,42 +419,69 @@ class OCIRegistryClient:
         head: bool = False,
         max_bytes: int = MAX_BLOB_BYTES,
     ) -> httpx.Response | None:
+        """`get_result(...).response`: the response, or None on any failure."""
+        return (await self.get_result(path, accept=accept, head=head, max_bytes=max_bytes)).response
+
+    async def get_result(
+        self,
+        path: str,
+        *,
+        accept: str = "",
+        head: bool = False,
+        max_bytes: int = MAX_BLOB_BYTES,
+    ) -> Result:
         """One authenticated request against `/v2/<path>` on this registry.
 
-        Performs the same anonymous token dance `_fetch_tags` uses, and
-        bounds the response body: a manifest or config blob is a few
-        kilobytes, and a registry answering with megabytes is either broken
-        or hostile. Returns None on any failure, including an oversized
-        body -- callers treat that as "could not determine", never as an
-        empty result.
+        Performs the same anonymous token dance `_fetch_tags` uses -- once per
+        repository, then reusing the token for a few minutes instead of paying
+        a 401, a token request and a retry for every manifest -- and bounds the
+        response body: a manifest or config blob is a few kilobytes, and a
+        registry answering with megabytes is either broken or hostile. A
+        failure of any kind (including an oversized body) yields no response
+        and a reason -- callers treat that as "could not determine", never as
+        an empty result.
         """
         url = f"https://{self._host}/v2/{path}"
         headers = {"Accept": accept} if accept else {}
         method = "HEAD" if head else "GET"
+        repository = self._repository_of(path)
         try:
             client = await self._get_client()
-            resp = await self._request(client, method, url, headers)
+            cached = self._tokens.get(repository)
+            fresh = cached is not None and cached[1] > time.monotonic()
+            sent = (
+                {**headers, "Authorization": f"Bearer {cached[0]}"} if fresh and cached else headers
+            )
+            resp = await self._request(client, method, url, sent)
             if resp.status_code == 401:
                 token = await self._token(client, resp.headers.get("WWW-Authenticate", ""))
                 if not token:
                     logger.info(f"No anonymous token available for {self._host}/{path}")
-                    return None
+                    return self.Result(None, 401, "the registry requires authentication")
+                self._tokens[repository] = (token, time.monotonic() + self.TOKEN_REUSE_SECONDS)
                 resp = await self._request(
                     client, method, url, {**headers, "Authorization": f"Bearer {token}"}
                 )
         except (httpx.HTTPError, ValueError, CircuitOpenError) as e:
             logger.warning(f"Registry request failed for {self._host}/{path}: {e}")
-            return None
+            return self.Result(None, None, "the registry could not be reached")
 
         if not resp.is_success:
             logger.info(f"Registry answered {resp.status_code} for {self._host}/{path}")
-            return None
+            if resp.status_code == 429:
+                return self.Result(
+                    None,
+                    429,
+                    "the registry is rate limiting pulls (HTTP 429); wait, or authenticate "
+                    "with `dockerls login` for a higher limit",
+                )
+            return self.Result(None, resp.status_code, f"the registry answered {resp.status_code}")
         if not head and len(resp.content) > max_bytes:
             logger.warning(
                 f"Registry response for {self._host}/{path} exceeded {max_bytes} bytes; discarded"
             )
-            return None
-        return resp
+            return self.Result(None, resp.status_code, "the registry response was too large")
+        return self.Result(resp, resp.status_code)
 
     @staticmethod
     def _next_page_url(resp: httpx.Response, base_url: str) -> str | None:

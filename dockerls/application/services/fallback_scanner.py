@@ -36,6 +36,8 @@ class FallbackScanner(ScannerInterface):
         # Contabilidade para o resumo da execução: quantas vezes o secundário
         # salvou um alvo que o primário não conseguiu medir.
         self.fallback_successes = 0
+        self._secondary_ready = False
+        self._secondary_lock = asyncio.Lock()
         self.fallback_attempts = 0
 
     @property
@@ -49,8 +51,8 @@ class FallbackScanner(ScannerInterface):
     async def is_available(self) -> bool:
         return await self._primary.is_available() or await self._secondary.is_available()
 
-    async def scan(self, image_reference: str) -> ScanResult:
-        result = await self._primary.scan(image_reference)
+    async def scan(self, image_reference: str, platform: str | None = None) -> ScanResult:
+        result = await _scan(self._primary, image_reference, platform)
         if result.is_verified or not result.error_kind.is_scanner_fault:
             return result
 
@@ -63,7 +65,8 @@ class FallbackScanner(ScannerInterface):
             logger.info("No secondary scanner available; keeping the primary result")
             return result
 
-        fallback = await self._secondary.scan(image_reference)
+        await self._ensure_secondary_ready()
+        fallback = await _scan(self._secondary, image_reference, platform)
         if not fallback.is_verified:
             # Nenhum dos dois conseguiu: devolve o resultado do primário, que
             # é o que descreve a falha da ferramenta que deveria ter medido.
@@ -76,26 +79,80 @@ class FallbackScanner(ScannerInterface):
         logger.info(f"{fallback.scanner} recovered {image_reference} after {result.scanner} failed")
         return fallback
 
-    async def refresh_db(self) -> bool:
-        """Prepara os dois bancos, em paralelo.
+    async def version(self) -> str:
+        """Both tools' versions: a result may have come from either."""
+        parts = [await _describe(s, "version") for s in (self._primary, self._secondary)]
+        return "+".join(parts)
 
-        Eram sequenciais -- o secundário só começava a baixar depois que o
-        primário terminasse -- e as duas baixas não competem por nada que
-        torne isso necessário: bancos diferentes, ferramentas diferentes.
-        Rodando juntas, o tempo de preparo passa a ser o maior dos dois, não
-        a soma, o que soma minutos num run que nunca chega a precisar do
-        secundário. O secundário só é útil se estiver pronto antes de a
-        primeira falha acontecer, então o paralelismo é o que garante isso
-        sem alongar o caminho comum.
+    async def db_revision(self) -> str:
+        """Both databases' revisions; "" only when neither could be read."""
+        parts = [await _describe(s, "db_revision") for s in (self._primary, self._secondary)]
+        return "" if not any(parts) else "+".join(p or "unknown" for p in parts)
+
+    async def components(self) -> dict[str, tuple[str, str]]:
+        """Each tool's own version and database revision: a result came from
+        exactly one of them, and provenance names that one."""
+        merged: dict[str, tuple[str, str]] = {}
+        for scanner in (self._primary, self._secondary):
+            method = getattr(scanner, "components", None)
+            if callable(method):
+                merged.update(await method())
+        return merged
+
+    def options(self) -> str:
+        return "+".join(_options_of(s) for s in (self._primary, self._secondary))
+
+    async def refresh_db(self) -> bool:
+        """Prepara o banco do primário -- e só dele.
+
+        O secundário só é usado quando o primário falha, e preparar o banco
+        dele é caro: medido, `grype db update` num diretório vazio levou
+        ~108 s de CPU (importação do SQLite), contra ~7 s do Trivy. Fazê-lo
+        sempre, "para o caso de precisar", somava dois minutos ao primeiro
+        run de qualquer comando, incluído o que nunca chamaria o secundário.
+        Ele é preparado na primeira vez que de fato for usado, uma só vez
+        mesmo com várias falhas simultâneas.
         """
-        primary_ok, _ = await asyncio.gather(_refresh(self._primary), _refresh(self._secondary))
-        return primary_ok
+        return await _refresh(self._primary)
+
+    async def _ensure_secondary_ready(self) -> None:
+        if self._secondary_ready:
+            return
+        async with self._secondary_lock:
+            if self._secondary_ready:
+                return
+            if not await _refresh(self._secondary):
+                # Sem banco novo o secundário ainda pode atualizar-se sozinho
+                # no próprio scan: a falha é registrada, não fatal.
+                logger.warning("Secondary scanner database refresh failed; scanning anyway")
+            self._secondary_ready = True
 
     async def close(self) -> None:
         for scanner in (self._primary, self._secondary):
             close = getattr(scanner, "close", None)
             if callable(close):
                 await close()
+
+
+async def _scan(scanner: ScannerInterface, reference: str, platform: str | None) -> ScanResult:
+    """Pass `platform` only when there is one, so a scanner written before the
+    parameter existed keeps working for the default case."""
+    if platform is None:
+        return await scanner.scan(reference)
+    return await scanner.scan(reference, platform=platform)
+
+
+def _options_of(scanner: ScannerInterface) -> str:
+    method = getattr(scanner, "options", None)
+    return str(method()) if callable(method) else type(scanner).__name__
+
+
+async def _describe(scanner: ScannerInterface, attribute: str) -> str:
+    method = getattr(scanner, attribute, None)
+    if not callable(method):
+        return ""
+    value = await method()
+    return value if isinstance(value, str) else ""
 
 
 async def _refresh(scanner: ScannerInterface) -> bool:

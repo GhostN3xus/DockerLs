@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,7 @@ from dockerls.domain.entities.vulnerability import Severity, finding_identity
 
 if TYPE_CHECKING:
     from dockerls.application.dto.analysis import ImageAnalysis
+    from dockerls.application.services.measurement import MeasurementService
     from dockerls.domain.entities.scan_result import ScanResult
     from dockerls.domain.interfaces.scanner import ScannerInterface
 
@@ -77,6 +79,32 @@ def _examples(identities: set[str]) -> str:
     return f" [{names}{f', +{more} more' if more > 0 else ''}]"
 
 
+def _measured_reference(analysis: ImageAnalysis) -> str:
+    """What the primary scanner measured: the pinned reference when there is
+    one. The old code re-scanned `name:tag`, so a tag that moved between the
+    two scans made the "second opinion" about different bytes -- and reported
+    the difference as a scanner disagreement."""
+    image = analysis.image
+    return image.measured_reference or image.full_reference
+
+
+def _platform_of(analyses: list[ImageAnalysis]) -> str | None:
+    platforms = {a.image.platform for a in analyses if a.image.platform}
+    return next(iter(platforms)) if len(platforms) == 1 else None
+
+
+async def _scan_pinned(scanner: ScannerInterface, analysis: ImageAnalysis) -> ScanResult:
+    reference = _measured_reference(analysis)
+    platform = analysis.image.platform
+    try:
+        accepts = "platform" in inspect.signature(scanner.scan).parameters
+    except (TypeError, ValueError, RecursionError):
+        accepts = False
+    if platform and accepts:
+        return await scanner.scan(reference, platform=platform)
+    return await scanner.scan(reference)
+
+
 class CrossValidator:
     """Re-scans top candidates with a second scanner and flags material
     disagreements, so a score is never presented at full confidence when
@@ -88,8 +116,15 @@ class CrossValidator:
         abs_tolerance: int = DEFAULT_ABS_TOLERANCE,
         rel_tolerance: float = DEFAULT_REL_TOLERANCE,
         workers: int = DEFAULT_WORKERS,
+        measurement: MeasurementService | None = None,
     ):
         self._scanner = scanner
+        # The second opinion is a *measurement* like any other: pinned to the
+        # same platform manifest the primary scanner measured, reused from the
+        # shared store when the same scanner already saw those bytes, bounded
+        # by the same deadline. Without a service (a bare scanner) it still
+        # measures the reference the primary measured -- never the tag again.
+        self._measurement = measurement
         self._abs_tolerance = abs_tolerance
         self._rel_tolerance = rel_tolerance
         self._workers = max(1, workers)
@@ -116,11 +151,15 @@ class CrossValidator:
             logger.info("Cross-validation scanner unavailable; skipping")
             return
 
-        refresh_db = getattr(self._scanner, "refresh_db", None)
-        if callable(refresh_db):
-            await refresh_db()
-
-        prefetched = await self._prescan(analyses)
+        if self._measurement is not None:
+            await self._measurement.prepare()
+            await self._measurement.prescan([a.image for a in analyses])
+            prefetched: dict[str, ScanResult] = {}
+        else:
+            refresh_db = getattr(self._scanner, "refresh_db", None)
+            if callable(refresh_db):
+                await refresh_db()
+            prefetched = await self._prescan(analyses)
 
         semaphore = asyncio.Semaphore(self._workers)
 
@@ -145,8 +184,8 @@ class CrossValidator:
             return {}
         # A chave é a referência: o dedup por digest não se aplica aqui,
         # porque os finalistas já vieram deduplicados do passo principal.
-        targets = [(a.image.full_reference, a.image.digest or "") for a in analyses]
-        outcome = await batch.scan_batch(targets)
+        targets = [(_measured_reference(a), a.image.digest or "") for a in analyses]
+        outcome = await batch.scan_batch(targets, platform=_platform_of(analyses))
         if outcome is None:
             return {}
         return {
@@ -160,9 +199,14 @@ class CrossValidator:
         if self._scanner is None:
             return
         reference = analysis.image.full_reference
-        secondary = (prefetched or {}).get(reference)
-        if secondary is None:
-            secondary = await self._scanner.scan(reference)
+        measured = _measured_reference(analysis)
+        secondary = (prefetched or {}).get(measured)
+        if secondary is None and self._measurement is not None:
+            measurement = await self._measurement.measure(analysis.image)
+            secondary = measurement.scan
+            analysis.secondary_provenance = measurement.provenance
+        elif secondary is None:
+            secondary = await _scan_pinned(self._scanner, analysis)
 
         if not secondary.is_verified:
             logger.warning(

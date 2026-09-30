@@ -21,6 +21,21 @@ _PLATFORM_PART = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 DOCKER_HUB_REGISTRY = "docker.io"
 
 
+def split_registry_and_repository(name: str) -> tuple[str, str]:
+    """``(registry, repository)`` in the canonical, host-qualified form."""
+    parts = name.lower().split("/")
+    if len(parts) > 1 and is_registry_host(parts[0]):
+        registry = parts.pop(0)
+    else:
+        registry = DOCKER_HUB_REGISTRY
+    repository = "/".join(parts)
+    if registry in {"index.docker.io", "registry-1.docker.io"}:
+        registry = DOCKER_HUB_REGISTRY
+    if registry == DOCKER_HUB_REGISTRY and "/" not in repository:
+        repository = f"library/{repository}"
+    return registry, repository
+
+
 @dataclass(frozen=True, slots=True)
 class ImageIdentity:
     """Content-addressed image identity, including the selected platform."""
@@ -42,18 +57,8 @@ class ImageIdentity:
     @classmethod
     def from_image(cls, image: DockerImage) -> ImageIdentity:
         """Build a strict identity, raising when external metadata is invalid."""
-        name = image.name.lower()
-        parts = name.split("/")
-        if len(parts) > 1 and is_registry_host(parts[0]):
-            registry = parts.pop(0)
-        else:
-            registry = DOCKER_HUB_REGISTRY
-        repository = "/".join(parts)
-        if registry in {"index.docker.io", "registry-1.docker.io"}:
-            registry = DOCKER_HUB_REGISTRY
-        if registry == DOCKER_HUB_REGISTRY and "/" not in repository:
-            repository = f"library/{repository}"
-        platform = f"{image.os}/{image.architecture}".lower()
+        registry, repository = split_registry_and_repository(image.name)
+        platform = (image.platform or f"{image.os}/{image.architecture}").lower()
         return cls(
             registry=registry,
             repository=repository,

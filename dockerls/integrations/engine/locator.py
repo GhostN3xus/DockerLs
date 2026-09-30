@@ -28,8 +28,10 @@ from pathlib import Path
 
 from loguru import logger
 
-#: Versão do contrato JSON. Tem de bater com `protocol.Version` do Go.
-PROTOCOL_VERSION = 1
+#: Versão do contrato JSON. Tem de bater com `protocol.Version` do Go. A 2
+#: acrescentou `platform`: um binário v1 ignoraria o campo e mediria a
+#: plataforma do host, então a versão sobe para que ele seja recusado.
+PROTOCOL_VERSION = 2
 
 #: Quanto o `--version` da engine pode demorar. Ele responde na hora ou não
 #: responde: um binário que trava aqui não vai medir imagem nenhuma.

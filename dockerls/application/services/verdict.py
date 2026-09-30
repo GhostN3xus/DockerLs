@@ -92,7 +92,10 @@ def finalize_verdict(analysis: ImageAnalysis, *, cross_validated: bool) -> None:
             scanners_differ_slightly=(
                 analysis.cross_validation == CrossValidationOutcome.MINOR_DIVERGENCE.value
             ),
-            digest_resolved=analysis.image.digest_known,
+            # Only a digest the registry confirmed for the measured platform
+            # counts: a digest a discovery source merely reported is a hint,
+            # and confidence must not rest on a hint.
+            digest_resolved=analysis.image.identity_confirmed,
             registry_verified=analysis.hub_tag_verified,
             hardening_coverage=analysis.hardening.coverage,
         )

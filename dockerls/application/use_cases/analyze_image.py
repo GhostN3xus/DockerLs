@@ -4,6 +4,7 @@ import re
 from typing import TYPE_CHECKING
 
 from dockerls.application.dto.analysis import ImageAnalysis
+from dockerls.application.services.measurement import MeasurementService
 from dockerls.application.services.teardown import close_quietly, sources_of
 from dockerls.application.services.verdict import apply_facts, finalize_verdict
 from dockerls.application.use_cases.recommend_images import (
@@ -11,14 +12,20 @@ from dockerls.application.use_cases.recommend_images import (
     _eol_status,
 )
 from dockerls.domain.entities.image import DockerImage
+from dockerls.domain.entities.image_facts import HardeningFacts
 from dockerls.domain.value_objects.image_reference import split_repository_and_tag
+from dockerls.domain.value_objects.platform import DEFAULT_PLATFORM
 from dockerls.domain.value_objects.remediation_score import RemediationScore
 from dockerls.domain.value_objects.security_score import SecurityScore
 from dockerls.domain.value_objects.security_tier import SecurityTier
+from dockerls.domain.value_objects.tristate import Tristate
+from dockerls.utils.deadline import Deadline, DeadlineExceededError, run_within
 from dockerls.utils.ignore_file import active_ignored_cve_ids, load_ignore_rules
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
+    from typing import Any
 
     from dockerls.application.services.hardening_analysis import HardeningAnalyzer
     from dockerls.application.services.scan_history_store import ScanHistoryStore
@@ -44,6 +51,8 @@ class AnalyzeImageUseCase:
         osv: OSVClient | None = None,
         tag_history: TagHistoryStore | None = None,
         scan_history: ScanHistoryStore | None = None,
+        measurement: MeasurementService | None = None,
+        deadline: Deadline | None = None,
     ):
         self._repository = repository
         self._scanner = scanner
@@ -55,8 +64,37 @@ class AnalyzeImageUseCase:
         self._osv = osv
         self._tag_history = tag_history
         self._scan_history = scan_history
+        # Shared with `compare`, `advisor` and `recommend`: the same identity
+        # pinning, the same stored scans, the same one-scan-per-identity rule.
+        self._measurement = measurement or MeasurementService(
+            scanner,
+            resolver=hardening,
+        )
+        # The run's time budget. What it cuts short is recorded, not hidden.
+        self._deadline = deadline or Deadline.unbounded()
+        self._pending: list[str] = []
+        self._hardening_enabled = hardening is not None
+
+    async def _within(
+        self, what: str, operation: Callable[[], Awaitable[Any]], default: Any
+    ) -> Any:
+        try:
+            return await run_within(self._deadline, operation)
+        except DeadlineExceededError:
+            self._pending.append(f"{what} (the time budget ended first)")
+            return default
+
+    @property
+    def concurrency(self) -> int:
+        """How many images this use case may measure at the same time."""
+        return self._measurement.max_concurrency
+
+    @property
+    def measurement(self) -> MeasurementService:
+        return self._measurement
 
     async def execute(self, image_reference: str) -> ImageAnalysis:
+        self._pending = []
         name, tag = self._parse_reference(image_reference)
         image = await self._repository.get_image_metadata(name, tag)
         if not image:
@@ -68,25 +106,42 @@ class AnalyzeImageUseCase:
                 # outra imagem, apresentada com o nome desta.
                 image.full_reference = image_reference
 
-        scan = await self._scanner.scan(image.full_reference)
+        if "@" in image_reference:
+            # The reference is the identity that was asked for; a tag's
+            # metadata (looked up under `latest`) must not rename it.
+            image.full_reference = image_reference
+        image.requested_reference = image_reference
+        measured = await self._measurement.measure(image)
+        scan = measured.scan
         if self._ignored_cves:
             filtered = [
                 v for v in scan.vulnerabilities if v.cve_id.upper() not in self._ignored_cves
             ]
             if len(filtered) != len(scan.vulnerabilities):
                 scan = scan.model_copy(update={"vulnerabilities": filtered})
-        if self._threat_intel is not None:
-            scan = await _enrich_with_threat_intel(
-                scan, self._threat_intel, self._exploitdb, self._osv
+        if self._threat_intel is not None and scan.is_verified:
+            threat_intel = self._threat_intel
+            scan = await self._within(
+                "threat intelligence",
+                lambda: _enrich_with_threat_intel(scan, threat_intel, self._exploitdb, self._osv),
+                scan,
             )
 
         product = name.split("/")[-1]
         match = re.match(r"^\d+(?:\.\d+){0,3}", tag)
         version = match.group(0) if match else ""
 
-        eol_status = await _eol_status(self._eol_checker, product, version)
+        eol_status = await self._within(
+            "end-of-life lookup",
+            lambda: _eol_status(self._eol_checker, product, version),
+            Tristate.UNKNOWN,
+        )
         is_eol = eol_status.is_true
-        is_lts = await self._eol_checker.is_lts(product, version)
+        is_lts = await self._within(
+            "long-term-support lookup",
+            lambda: self._eol_checker.is_lts(product, version),
+            False,
+        )
 
         # `SecurityScore` requires a completed scan and raises on anything
         # else. A failed scan is not scored at all here: the tier falls back
@@ -110,6 +165,7 @@ class AnalyzeImageUseCase:
             eol_status=eol_status,
             is_lts=is_lts,
             evidence_paths={scan.scanner: scan.evidence_path} if scan.evidence_path else {},
+            provenance=measured.provenance,
         )
 
         # The same evidence gathering `recommend` does for its finalists.
@@ -117,8 +173,13 @@ class AnalyzeImageUseCase:
         # they were asked about with every hardening fact unknown, while
         # the candidates they are compared against carry measurements --
         # and a comparison between a measurement and a blank is not one.
-        if self._hardening is not None:
-            digest, facts = await self._hardening.analyze(image, scan)
+        if self._hardening is not None and scan.is_verified:
+            hardening = self._hardening
+            digest, facts = await self._within(
+                "OCI config inspection",
+                lambda: hardening.analyze(image, scan),
+                ("", HardeningFacts()),
+            )
             if digest and not image.digest:
                 image.digest = digest
             apply_facts(analysis, facts)
@@ -128,8 +189,9 @@ class AnalyzeImageUseCase:
         # move for. Only a mutable `name:tag` reference has history worth
         # keeping -- the same distinction `base` already draws for
         # Dockerfile-pinned bases (`tag_history.py`).
+        history_key = self._history_key(image)
         if self._tag_history is not None and image.digest_known and "@" not in image_reference:
-            history = await self._tag_history.observe(f"{name}:{tag}", image.digest)
+            history = await self._tag_history.observe(history_key, image.digest)
             if history.moves:
                 analysis.tag_drift_note = history.explain()
 
@@ -137,9 +199,9 @@ class AnalyzeImageUseCase:
         # too: a scanner's database learning about a new CVE can change the
         # count for the exact same, unmoving digest between two runs.
         if self._scan_history is not None and scan.is_verified and image.digest_known:
-            before = await self._scan_history.get(image.full_reference)
+            before = await self._scan_history.get(history_key)
             after = await self._scan_history.observe(
-                image.full_reference,
+                history_key,
                 digest=image.digest,
                 critical=scan.critical_count,
                 high=scan.high_count,
@@ -151,7 +213,38 @@ class AnalyzeImageUseCase:
                 analysis.vuln_trend_note = after.explain()
 
         finalize_verdict(analysis, cross_validated=False)
+        # Two different things are "pending": what the time budget cut short
+        # (which makes the run PARTIAL) and what `analyze` never does (which
+        # limits what its answer may claim, but is not an interruption).
+        analysis.pending_checks = list(dict.fromkeys([*self._not_performed(), *self._pending]))
+        if scan.error_kind.value == "DEADLINE_EXCEEDED":
+            analysis.completeness = "NO_RESULT"
+        elif self._pending:
+            analysis.completeness = "PARTIAL"
         return analysis
+
+    def _not_performed(self) -> list[str]:
+        """Checks `analyze` does not run, so its answer never reads as more than it is."""
+        skipped = ["cross-validation with a second scanner (not run by analyze)"]
+        hardening = self._hardening
+        if hardening is None or not hardening.inspects:
+            skipped.append("OCI config inspection (not run)")
+        if self._threat_intel is None:
+            skipped.append("threat intelligence (disabled)")
+        return skipped
+
+    @staticmethod
+    def _history_key(image: DockerImage) -> str:
+        """The key a tag's history is kept under -- per platform.
+
+        A tag's digest *per platform* differs by construction; filing the
+        arm64 manifest under the same key as the amd64 one would read every
+        platform switch as a tag that moved.
+        """
+        base = image.full_reference
+        if image.platform and image.platform != str(DEFAULT_PLATFORM):
+            return f"{base}#{image.platform}"
+        return base
 
     async def close(self) -> None:
         """Release the scanner and the repository's connection pool.
@@ -160,7 +253,13 @@ class AnalyzeImageUseCase:
         once per image: closing there would leave the second comparison
         talking to a client that had already been shut down.
         """
-        await close_quietly(self._scanner, self._hardening, *sources_of(self._repository))
+        await close_quietly(
+            self._scanner,
+            self._hardening,
+            self._threat_intel,
+            self._osv,
+            *sources_of(self._repository),
+        )
 
     def _parse_reference(self, reference: str) -> tuple[str, str]:
         """Repositório e tag, sem confundir a porta do registry com uma tag.

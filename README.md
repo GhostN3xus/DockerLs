@@ -153,7 +153,21 @@ dockerls build . -t minhaapp:1.0 --fail-on high
 
 # Exportar o relatório pra anexar num PR ou mandar pro SIEM
 dockerls export node:22-alpine --format sarif --output results.sarif
+
+# Uma plataforma específica, com prazo, num perfil rápido — e um resumo JSON pro CI
+dockerls recommend node --platform linux/arm64 --profile quick --time-budget 60 --format summary
+
+# O que mudou desde a última vez que rodei isso (e por quê)
+dockerls recommend node --diff
+
+# Reexportar um run que já foi feito, sem escanear nada de novo
+dockerls export --run 20260930T131500Z-1a2b3c4d --format markdown
 ```
+
+`--platform`, `--profile`, `--time-budget`, os filtros de compatibilidade, o
+cache em camadas, os formatos `summary`/`ndjson` e os códigos de saída `4`/`5`/`130`
+estão em **[docs/PROFILES.md](docs/PROFILES.md)**; os tempos medidos (e o que
+é simulado) em **[docs/PERFORMANCE.md](docs/PERFORMANCE.md)**.
 
 Toda vez que você roda `analyze` contra a mesma imagem, o DockerLs lembra:
 se a tag mudou de digest, ou se a contagem de CVE mudou desde a última vez
@@ -544,6 +558,13 @@ confunde "não consegui olhar" com "olhei, e é inseguro".
 dockerls recommend node --max-critical 0
 echo $?   # 0 = achou uma imagem dentro do baseline | 2 = achou candidatas, nenhuma dentro do baseline
 ```
+
+Com `--time-budget` (ou ao apertar Ctrl-C) existem três códigos a mais, que
+**nenhum run sem prazo devolve**: `4` (o prazo acabou antes de qualquer medição
+terminar — nada foi medido), `5` (resultado **parcial**: o que foi medido é real,
+mas o run não está completo e nunca sai com `0`) e `130` (interrompido). Uma
+violação já provada pelo que foi medido mantém o código dela. Tabela completa em
+[docs/PROFILES.md](docs/PROFILES.md#códigos-de-saída-só-com---time-budget-ou-ao-interromper).
 
 ---
 

@@ -1,7 +1,6 @@
 import pytest
 
 from dockerls.cache.sqlite_cache import SQLiteCache
-from dockerls.domain.entities.image import DockerImage
 
 
 @pytest.fixture
@@ -88,56 +87,31 @@ class TestSQLiteCache:
 class TestCacheValidationMiss:
     @pytest.mark.asyncio
     async def test_stale_payload_treated_as_miss(self, tmp_path):
-        from dockerls.application.use_cases.recommend_images import RecommendImagesUseCase
+        """A row of the wrong shape, in the *real* SQLite store, is a miss and
+        is evicted -- it must neither be served nor raise."""
+        from dockerls.application.services.measurement_store import (
+            MeasurementStore,
+            MissReason,
+            ScannerFingerprint,
+        )
         from dockerls.cache.sqlite_cache import SQLiteCache
-        from dockerls.domain.interfaces.eol_checker import EOLCheckerInterface
-        from dockerls.domain.interfaces.image_repository import ImageRepositoryInterface
-        from dockerls.domain.interfaces.scanner import ScannerInterface
-
-        class NullRepo(ImageRepositoryInterface):
-            async def search_tags(self, image_name, limit=100):
-                return []
-
-            async def get_image_metadata(self, image_name, tag):
-                return None
-
-        class NullScanner(ScannerInterface):
-            async def scan(self, image_reference):
-                raise AssertionError("should not be called")
-
-            async def is_available(self):
-                return True
-
-        class NullEOL(EOLCheckerInterface):
-            async def is_eol(self, product, version):
-                return False
-
-            async def is_lts(self, product, version):
-                return False
+        from dockerls.domain.value_objects.image_identity import ImageIdentity
 
         cache = SQLiteCache(tmp_path / "cache.db")
-        uc = RecommendImagesUseCase(
-            repository=NullRepo(),
-            scanner=NullScanner(),
-            eol_checker=NullEOL(),
-            cache=cache,
+        store = MeasurementStore(cache)
+        identity = ImageIdentity("docker.io", "library/node", "sha256:" + "a" * 64, "linux/amd64")
+        fingerprint = ScannerFingerprint(
+            name="trivy", version="0.60", db_revision="r1", options="o"
         )
-        # Analysis cache entries require an immutable identity. Use a
-        # canonical digest here so this test reaches SQLite and exercises
-        # corrupt-payload eviction rather than the intentional tag-only
-        # cache-miss path.
-        image = DockerImage(
-            name="node",
-            tag="latest",
-            digest="sha256:" + "a" * 64,
-        )
-        key = uc._cache_key(image)
-        assert key is not None
+        key = store._scan_key(identity, fingerprint)  # noqa: SLF001 - the key under test
         await cache.set(key, {"totally": "wrong-shape"})
 
-        result = await uc._get_cached(image)
-        assert result is None
+        lookup = await store.get_scan(identity, fingerprint)
+
+        assert lookup.value is None
+        assert lookup.reason in (MissReason.CORRUPT, MissReason.SCHEMA_MISMATCH)
         assert await cache.get(key) is None
+        cache.close()
 
 
 class TestConcurrentWrites:

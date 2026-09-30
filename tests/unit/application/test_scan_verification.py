@@ -243,28 +243,16 @@ class TestStaleCacheIsRevalidated:
     @pytest.mark.asyncio
     async def test_cached_failed_scan_is_discarded(self):
         from dockerls.domain.interfaces.cache_store import CacheStoreInterface
+        from tests.unit.application.measurement_fakes import FakeRegistryResolver, digest_of
 
-        # Analysis cache entries are intentionally ineligible without a
-        # canonical digest. Exercise stale-entry eviction with an identity
-        # that can actually reach L2 rather than the mutable-tag cache miss
-        # path tested elsewhere.
-        cached_image = TAGS[0].model_copy(update={"digest": "sha256:" + "a" * 64})
-        poisoned = ImageAnalysis(
-            image=cached_image,
-            scan=ScanResult(
-                image_reference=cached_image.full_reference,
-                status=ScanStatus.ERROR,
-                error_message="exit 1",
-                scan_timestamp="2026-01-01T00:00:00Z",
-            ),
-            security_score=100.0,
-            tier="A",
-            remediation_score=100,
-        )
+        manifest = digest_of("a")
+        resolver = FakeRegistryResolver()
+        for image in TAGS:
+            resolver.publish(image.name, image.tag, digest_of("1"), linux_amd64=manifest)
 
         class _Cache(CacheStoreInterface):
-            def __init__(self, key):
-                self.store = {key: poisoned.model_dump()}
+            def __init__(self):
+                self.store = {}
                 self.deleted: list[str] = []
 
             async def get(self, key):
@@ -280,18 +268,22 @@ class TestStaleCacheIsRevalidated:
             async def clear(self):
                 self.store.clear()
 
-        # A chave carrega um fingerprint das regras de ignore e do threat
-        # intel; perguntá-la ao caso de uso evita testar o formato dela.
-        use_case = _use_case(_CleanScanner(), repository=_Repo(tags=[cached_image]))
-        key = use_case._cache_key(cached_image)
-        assert key is not None
-        cache = _Cache(key)
-        use_case._cache = cache
+        cache = _Cache()
+        primer = _use_case(_CleanScanner(), cache=cache)
+        primer._measurement._resolver = resolver  # noqa: SLF001 - the registry double
+        await primer.execute("node")
+        (scan_key,) = [k for k in cache.store if k.startswith("m:scan:")]
+        cache.store[scan_key]["scan"]["status"] = "ERROR"
+        cache.store[scan_key]["scan"]["error_message"] = "exit 1"
+
+        use_case = _use_case(_CleanScanner(), cache=cache)
+        use_case._measurement._resolver = resolver  # noqa: SLF001
         result = await use_case.execute("node")
 
-        assert key in cache.deleted
         # Re-scanned cleanly, so it is recommended on the fresh scan's merit.
+        assert result.recommendations
         assert all(a.scan.is_verified for a in result.recommendations)
+        assert cache.store[scan_key]["scan"]["status"] == "OK", "the bad row was replaced"
 
 
 class TestHubTagVerification:

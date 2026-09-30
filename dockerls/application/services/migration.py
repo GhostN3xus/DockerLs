@@ -17,6 +17,7 @@ question can only be answered by running it.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
@@ -86,6 +87,19 @@ class MigrationPlan(BaseModel):
     improvements: list[str] = Field(default_factory=list)
     trade_offs: list[str] = Field(default_factory=list)
     checklist: list[str] = Field(default_factory=list)
+    #: True only when *nothing measured or named* says the move is more than a
+    #: patch-level swap: the same base distribution, the same C library, the
+    #: same major version, the same platform. It is the absence of known
+    #: incompatibilities, never a claim of compatibility -- see
+    #: `unverified_compatibility`.
+    direct_replacement: bool = False
+    #: Each reason this move is not a drop-in replacement, tagged
+    #: `[confirmed]` (from a measurement or the image's own published data)
+    #: or `[heuristic]` (from a tag name).
+    incompatibilities: list[str] = Field(default_factory=list)
+    #: What could not be established either way, so is neither claimed nor
+    #: excluded: it needs the application's own tests.
+    unverified_compatibility: list[str] = Field(default_factory=list)
 
 
 def plan_migration(current: ImageAnalysis, target: ImageAnalysis) -> MigrationPlan:
@@ -100,6 +114,9 @@ def plan_migration(current: ImageAnalysis, target: ImageAnalysis) -> MigrationPl
         improvements=_improvements(current, target),
         trade_offs=_trade_offs(current, target),
         checklist=_checklist(current, target),
+        direct_replacement=not _incompatibilities(current, target),
+        incompatibilities=_incompatibilities(current, target),
+        unverified_compatibility=_unverified_compatibility(current, target),
     )
 
 
@@ -160,9 +177,13 @@ def _trade_offs(current: ImageAnalysis, target: ImageAnalysis) -> list[str]:
         if after > before:
             costs.append(f"{label} findings increase: {before} -> {after}")
 
+    costs.extend(_major_trade_off(current, target))
     costs.extend(_libc_trade_off(current, target))
     costs.extend(_package_manager_trade_off(current, target))
     costs.extend(_shell_trade_off(target))
+    costs.extend(_user_trade_off(current, target))
+    costs.extend(_entrypoint_trade_off(current, target))
+    costs.extend(_native_libraries_trade_off(current, target))
     costs.extend(_architecture_trade_off(current, target))
 
     if target.image.source != current.image.source:
@@ -178,6 +199,115 @@ def _trade_offs(current: ImageAnalysis, target: ImageAnalysis) -> list[str]:
     if declared is not None and declared.end_of_life:
         costs.append(f"target release is declared end-of-life on {declared.end_of_life}")
     return _unique(costs)
+
+
+def _major_of(analysis: ImageAnalysis) -> int | None:
+    """The major version a tag *names*, or None when it names none.
+
+    `22-alpine` -> 22, `3.12.4-slim` -> 3, `latest` -> None. Read from the tag,
+    so it is only a heuristic about what the image contains -- but a runtime
+    tag that says 24 is very rarely a swap-in for one that says 22.
+    """
+    match = re.match(r"^v?(\d+)", analysis.image.tag.strip().lower())
+    return int(match.group(1)) if match else None
+
+
+def _major_trade_off(current: ImageAnalysis, target: ImageAnalysis) -> list[str]:
+    before, after = _major_of(current), _major_of(target)
+    if before is None or after is None:
+        return []
+    if before == after:
+        return []
+    direction = "upgrade" if after > before else "downgrade"
+    return [
+        f"major version {direction} ({before} -> {after}): not a direct replacement -- "
+        "breaking changes between majors (removed APIs, changed defaults, dropped "
+        "platforms) must be read in the release notes and tested"
+    ]
+
+
+def _user_trade_off(current: ImageAnalysis, target: ImageAnalysis) -> list[str]:
+    """The account the container runs as, when both sides were measured."""
+    before, after = current.facts.user.strip(), target.facts.user.strip()
+    if not (
+        current.facts.is_verified("runs_as_non_root")
+        and target.facts.is_verified("runs_as_non_root")
+    ):
+        return []
+    if before == after:
+        return []
+    return [
+        f"default user changes ({before or 'root'} -> {after or 'root'}): file ownership, "
+        "bound ports below 1024 and volume permissions may behave differently"
+    ]
+
+
+def _entrypoint_trade_off(current: ImageAnalysis, target: ImageAnalysis) -> list[str]:
+    """ENTRYPOINT/CMD, from the registry's config on both sides."""
+    if not (current.facts.is_verified("entrypoint") and target.facts.is_verified("entrypoint")):
+        return []
+    if (current.facts.entrypoint, current.facts.cmd) == (target.facts.entrypoint, target.facts.cmd):
+        return []
+    return [
+        "entrypoint or default command differ between the two images: anything that "
+        "relies on the old defaults (or overrides them) needs to be checked"
+    ]
+
+
+def _native_libraries_trade_off(current: ImageAnalysis, target: ImageAnalysis) -> list[str]:
+    """What a vulnerability scan can and cannot say about shared libraries.
+
+    The scan lists packages *with findings*, not every library in the image, so
+    it cannot show that a shared object your application links against is (or
+    is not) present in the target. That is stated instead of implied.
+    """
+    if _family_of(current) == _family_of(target) and _family_of(current):
+        return []
+    return [
+        "the set of shared libraries differs between different base images; the scan only "
+        "sees packages with findings, so it cannot confirm that the native libraries your "
+        "application links against exist in the target (check with `ldd`)"
+    ]
+
+
+def _incompatibilities(current: ImageAnalysis, target: ImageAnalysis) -> list[str]:
+    """Reasons this is *not* a drop-in replacement, each tagged with its basis."""
+    reasons: list[str] = []
+    before, after = _major_of(current), _major_of(target)
+    if before is not None and after is not None and before != after:
+        reasons.append(f"[heuristic] major version {before} -> {after} (from the tags)")
+    elif before is None or after is None:
+        reasons.append("[heuristic] a tag names no version, so the major cannot be compared")
+    family_before, family_after = _family_of(current), _family_of(target)
+    if not family_before or not family_after:
+        reasons.append("[unknown] a base distribution was not identified by the scanner")
+    elif family_before != family_after:
+        reasons.append(f"[confirmed] base distribution {family_before} -> {family_after}")
+    libc_before, libc_after = _libc_of(current), _libc_of(target)
+    if libc_before and libc_after and libc_before != libc_after:
+        reasons.append(f"[confirmed] C library {libc_before} -> {libc_after}")
+    platform_before, platform_after = current.image.platform, target.image.platform
+    if platform_before and platform_after and platform_before != platform_after:
+        reasons.append(f"[confirmed] platform {platform_before} -> {platform_after}")
+    if current.image.source != target.image.source:
+        reasons.append(f"[confirmed] publisher {current.image.source} -> {target.image.source}")
+    return reasons
+
+
+def _unverified_compatibility(current: ImageAnalysis, target: ImageAnalysis) -> list[str]:
+    """What nothing here could settle, listed rather than assumed away."""
+    open_questions = [
+        "whether your application starts and behaves the same (only its own tests can say)",
+    ]
+    if not (current.facts.is_verified("entrypoint") and target.facts.is_verified("entrypoint")):
+        open_questions.append("entrypoint and default command (one side was not inspected)")
+    if not (
+        current.facts.is_verified("runs_as_non_root")
+        and target.facts.is_verified("runs_as_non_root")
+    ):
+        open_questions.append("the default user (one side was not inspected)")
+    open_questions.append("which native libraries your application links against")
+    return open_questions
 
 
 def _libc_trade_off(current: ImageAnalysis, target: ImageAnalysis) -> list[str]:

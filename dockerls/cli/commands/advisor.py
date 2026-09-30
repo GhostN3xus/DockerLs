@@ -15,6 +15,7 @@ from dockerls.application.use_cases.recommend_images import build_recommendation
 from dockerls.cli.dependencies import build_analyze_use_case, build_recommend_use_case
 from dockerls.cli.image_names import split_repository_and_tag
 from dockerls.cli.options import OutputFormat, parse_output_format
+from dockerls.cli.run_options import RunOptions, parse_run_options
 from dockerls.cli.scan_failure import describe_scan_failure
 from dockerls.cli.text import safe
 from dockerls.cli.validators import check_workers
@@ -43,23 +44,44 @@ def advisor(
         OutputFormat.TABLE.value, "--format", "-f", help="Output format: table or json"
     ),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
+    platform: str | None = typer.Option(
+        None,
+        "--platform",
+        help="os/architecture, with an optional /variant (default: linux/amd64)",
+    ),
+    runtime_version: str | None = typer.Option(
+        None, "--runtime-version", help="Only candidates in this runtime version or range"
+    ),
+    distro: str | None = typer.Option(
+        None, "--distro", help="Only candidates of this distribution family"
+    ),
+    variant: str | None = typer.Option(None, "--variant", help="Only runtime or dev candidates"),
 ) -> None:
     """Security advisor: analyze and provide actionable remediation plan."""
     if no_color:
         console.no_color = True
     fmt = parse_output_format(output_format)
+    options = parse_run_options(
+        platform=platform, runtime_version=runtime_version, distro=distro, variant=variant
+    )
     # `0` means "size it to this machine", so it is passed through rather
     # than validated: the resolver, not the flag, decides what it becomes.
     if workers:
         workers = check_workers(workers)
     try:
-        asyncio.run(_advisor(image, workers, fmt))
+        asyncio.run(_advisor(image, workers, fmt, options))
     except ValueError as e:
         console.print(f"[red]Invalid configuration:[/red] {e}")
         raise typer.Exit(EXIT_ERROR) from e
 
 
-async def _advisor(image: str, workers: int | None, output_format: OutputFormat) -> None:
+async def _advisor(
+    image: str,
+    workers: int | None,
+    output_format: OutputFormat,
+    options: RunOptions | None = None,
+) -> None:
+    options = options or parse_run_options()
     # A tagged argument names an image the user runs *today*, so the advice
     # can be a migration rather than a standalone suggestion. A bare name
     # ("node") has no current image to move away from, and the command
@@ -69,9 +91,11 @@ async def _advisor(image: str, workers: int | None, output_format: OutputFormat)
     # "registry.internal". A regra compartilhada só aceita dois-pontos no
     # último segmento do caminho.
     repository, current_tag = split_repository_and_tag(image)
-    current = await _analyze_current(image) if current_tag else None
+    current = await _analyze_current(image, options) if current_tag else None
 
-    use_case = await build_recommend_use_case(workers=workers)
+    use_case = await build_recommend_use_case(
+        workers=workers, platform=options.platform, criteria=options.criteria
+    )
     result = await use_case.execute(repository)
 
     items = result.recommendations or result.alternatives
@@ -199,14 +223,16 @@ async def _advisor(image: str, workers: int | None, output_format: OutputFormat)
         console.print(f"[bold]Summary:[/bold] {rec.summary}")
 
 
-async def _analyze_current(reference: str) -> ImageAnalysis | None:
+async def _analyze_current(
+    reference: str, options: RunOptions | None = None
+) -> ImageAnalysis | None:
     """Scan the image named on the command line, or give up quietly.
 
     Failing to measure the current image costs the migration section, not
     the command: the advice about the best available image is still valid,
     and claiming an improvement over something never measured would not be.
     """
-    use_case = await build_analyze_use_case()
+    use_case = await build_analyze_use_case(platform=options.platform if options else None)
     try:
         analysis = await use_case.execute(reference)
     except (ValueError, RuntimeError) as e:
@@ -237,6 +263,10 @@ def _print_migration(plan: MigrationPlan) -> None:
     console.print(Panel("[bold green]Migration[/bold green]", expand=False))
     console.print(f"  CURRENT      [cyan]{plan.from_reference}[/cyan]")
     console.print(f"  RECOMMENDED  [green]{plan.to_reference}[/green]")
+    if not plan.direct_replacement:
+        console.print(
+            "  [bold yellow]NOT A DIRECT REPLACEMENT[/bold yellow] -- see the reasons below"
+        )
     if plan.to_pinned_reference != plan.to_reference:
         console.print(f"  PIN TO       [dim]{plan.to_pinned_reference}[/dim]")
 
@@ -252,6 +282,14 @@ def _print_migration(plan: MigrationPlan) -> None:
         console.print("\n[bold]TRADE-OFFS[/bold]")
         for cost in plan.trade_offs:
             console.print(f"  [yellow]![/yellow] {safe(cost)}")
+    if plan.incompatibilities:
+        console.print("\n[bold]NOT A DIRECT REPLACEMENT BECAUSE[/bold]")
+        for reason in plan.incompatibilities:
+            console.print(f"  [yellow]![/yellow] {safe(reason)}")
+    if plan.unverified_compatibility:
+        console.print("\n[bold]NOT ESTABLISHED (needs your own tests)[/bold]")
+        for question in plan.unverified_compatibility:
+            console.print(f"  ? {safe(question)}")
     if plan.checklist:
         console.print("\n[bold]MIGRATION CHECKLIST[/bold]")
         for i, step in enumerate(plan.checklist, 1):

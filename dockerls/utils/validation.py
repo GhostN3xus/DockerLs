@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # Supports plain names ("node"), tags ("node:22-alpine"), digest
 # references ("node@sha256:<64 hex>"), tag+digest combined, and private
@@ -47,6 +51,21 @@ def _reject_option_lookalike(name: str) -> None:
             )
 
 
+def sanitize_platform(platform: str | None) -> list[str]:
+    """`["--platform", "os/arch[/variant]"]` for a scanner, or `[]`.
+
+    The value is parsed with the same strict rule the CLI uses and re-rendered,
+    so nothing the caller typed reaches argv except lowercase alphanumerics and
+    `._-/`. Raises `ValueError` for anything else: a malformed platform is a
+    refused scan, not a scan of the host's platform.
+    """
+    if platform is None or not platform.strip():
+        return []
+    from dockerls.domain.value_objects.platform import Platform
+
+    return ["--platform", str(Platform.parse(platform))]
+
+
 _MAX_THRESHOLD = 10000
 
 # Each worker holds a slot on an asyncio.Semaphore; 0 would deadlock the
@@ -70,3 +89,26 @@ def validate_workers(value: int, name: str = "workers") -> int:
     if value < MIN_WORKERS or value > MAX_WORKERS:
         raise ValueError(f"{name} must be between {MIN_WORKERS} and {MAX_WORKERS}")
     return value
+
+
+def validate_output_path(value: str) -> Path:
+    """A destination the user typed, checked before anything is written to it.
+
+    Refuses what is almost certainly a mistake or an attempt to make the tool
+    overwrite something else: an empty value, a NUL byte, an existing directory,
+    a symbolic link (the write would land wherever it points), and anything that
+    exists but is not a regular file. The parent directory is created by the
+    caller; this only judges the name.
+    """
+    from pathlib import Path
+
+    if not value or not value.strip():
+        raise ValueError("the output path is empty")
+    if "\x00" in value:
+        raise ValueError("the output path contains a NUL byte")
+    path = Path(value).expanduser()
+    if path.is_symlink():
+        raise ValueError(f"{path} is a symbolic link; refusing to write through it")
+    if path.exists() and not path.is_file():
+        raise ValueError(f"{path} exists and is not a regular file")
+    return path

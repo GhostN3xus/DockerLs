@@ -26,6 +26,7 @@ to describe the image whose security we are about to certify.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import re
@@ -34,12 +35,15 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from dockerls.domain.entities.image_facts import EvidenceSource, HardeningFacts
+from dockerls.domain.value_objects.measured_identity import IdentityStatus, ResolvedIdentity
+from dockerls.domain.value_objects.platform import DEFAULT_PLATFORM, Platform, parse_platform
 from dockerls.domain.value_objects.tristate import Tristate
 from dockerls.infrastructure.network.host_guard import HostGuard
 from dockerls.integrations.registry.oci import OCIRegistryClient
 from dockerls.utils.retry import DEFAULT_BACKOFF_BASE, DEFAULT_MAX_ATTEMPTS
 
 if TYPE_CHECKING:
+    from dockerls.application.services.measurement_store import MeasurementStore
     from dockerls.domain.entities.image import DockerImage
 
 #: Docker Hub's registry endpoint. Distinct from `hub.docker.com`, which is
@@ -57,10 +61,6 @@ MANIFEST_ACCEPT = ", ".join(
         "application/vnd.docker.distribution.manifest.v2+json",
     )
 )
-
-#: Architecture preferred when a tag resolves to a multi-arch index.
-DEFAULT_ARCHITECTURE = "amd64"
-DEFAULT_OS = "linux"
 
 _DIGEST = re.compile(r"^sha256:[a-f0-9]{64}$")
 #: Registry host: a DNS name with an optional port. Anchored, and no
@@ -86,8 +86,12 @@ class RegistryInspector:
         credentials: dict[str, tuple[str, str]] | None = None,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         backoff_base: float = DEFAULT_BACKOFF_BASE,
+        mapping_store: MeasurementStore | None = None,
     ):
         self._timeout = timeout
+        # Where verified digest -> platform-manifest mappings are remembered
+        # between runs. None means none are, and every new run re-verifies.
+        self._mapping_store = mapping_store
         self._max_attempts = max_attempts
         self._backoff_base = backoff_base
         # Where this inspector is permitted to send a request. A reference is
@@ -108,6 +112,11 @@ class RegistryInspector:
         # inspection of the same reference does not re-resolve them.
         self._digests: dict[str, str] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # (registry, repository, reference, platform) -> identity. A tag is
+        # resolved once per run: asking twice could return two different
+        # digests if the tag moves mid-run, and the *first* answer is the one
+        # every later step has to keep attributing its evidence to.
+        self._identities: dict[str, ResolvedIdentity] = {}
 
     async def _client(self, host: str) -> OCIRegistryClient | None:
         if not _HOST.match(host):
@@ -175,27 +184,279 @@ class RegistryInspector:
             self._digests[key] = digest
             return digest
 
-    async def inspect(self, image: DockerImage) -> tuple[str, HardeningFacts]:
-        """Return (digest, facts) for `image`.
+    async def resolve_identity(
+        self, name: str, tag: str, digest: str = "", platform: Platform | None = None
+    ) -> ResolvedIdentity:
+        """Pin `name:tag` (or `name@digest`) to the manifest of one platform.
+
+        This is the step that separates the three things that used to be one
+        string. The tag is asked about **once per run**; the answer names the
+        index digest (what the tag pointed at) and the digest of the manifest
+        for `platform` (what will be measured). Everything downstream scans
+        `name@<manifest digest>`, so a tag that moves a second later cannot
+        change which bytes the result is filed under.
+
+        Nothing is guessed. A registry that does not answer, an index with no
+        manifest for the platform, a manifest whose bytes do not hash to the
+        digest that named it: each returns a non-CONFIRMED identity carrying
+        the reason, and the caller keeps measuring *without* filing the
+        result as pinned evidence.
+        """
+        wanted = platform or DEFAULT_PLATFORM
+        reference = digest if _DIGEST.match(digest) else tag
+        base = ResolvedIdentity(
+            name=name, tag=tag, platform=wanted, status=IdentityStatus.UNRESOLVED
+        )
+        target = _registry_target_of(name)
+        if target is None:
+            return _with(base, limitation="the image name is not a valid registry reference")
+        host, repository = target
+        key = f"{host}/{repository}:{reference}|{wanted}"
+
+        lock = self._locks.setdefault(f"identity:{key}", asyncio.Lock())
+        async with lock:
+            known = self._identities.get(key)
+            if known is not None:
+                return known
+            identity = await self._resolve_identity(
+                base, host, repository, reference, digest=digest
+            )
+            self._identities[key] = identity
+            if identity.index_digest or identity.manifest_digest:
+                self._digests.setdefault(
+                    f"{host}/{repository}:{tag}", identity.index_digest or identity.manifest_digest
+                )
+            return identity
+
+    async def _resolve_identity(
+        self, base: ResolvedIdentity, host: str, repository: str, reference: str, *, digest: str
+    ) -> ResolvedIdentity:
+        """HEAD, then the remembered mapping, then -- only if needed -- one GET.
+
+        Docker Hub throttles anonymous *manifest GETs*; HEAD requests are free.
+        So the tag is first asked with a HEAD, which names the digest it points
+        at right now. A digest is a content address, so what an index or
+        manifest with that digest maps to for a platform never changes: once
+        verified it is remembered (by digest, in the shared store), and a later
+        run pays a HEAD and nothing else. Only a digest never seen before costs
+        a GET -- and that GET is **by digest**, so the bytes fetched are exactly
+        the ones the HEAD named even if the tag moves in between.
+        """
+        client = await self._client(host)
+        unconfirmed = IdentityStatus.DIGEST_ONLY if digest else IdentityStatus.UNRESOLVED
+        if client is None:
+            return _with(
+                base,
+                limitation=f"{host} was not contacted (refused by network policy or invalid host)",
+                status=unconfirmed,
+                manifest_digest="",
+            )
+
+        top_digest = digest
+        if not top_digest:
+            head = await client.get_result(
+                f"{repository}/manifests/{reference}", accept=MANIFEST_ACCEPT, head=True
+            )
+            if head.response is None:
+                return _with(
+                    base,
+                    limitation=f"no digest for {reference}: {head.reason}",
+                    status=unconfirmed,
+                )
+            top_digest = _clean_digest(head.response.headers.get("Docker-Content-Digest", ""))
+            if not top_digest:
+                return _with(
+                    base,
+                    limitation=f"the registry did not state a digest for {reference}",
+                    status=unconfirmed,
+                )
+
+        remembered = await self._remembered(host, repository, top_digest, base.platform)
+        if remembered is not None:
+            return remembered_identity(base, *remembered)
+
+        got = await client.get_result(
+            f"{repository}/manifests/{top_digest}", accept=MANIFEST_ACCEPT
+        )
+        resp = got.response
+        if resp is None:
+            return _with(
+                base,
+                limitation=f"the registry did not return the manifest {top_digest[:19]}...: "
+                f"{got.reason}",
+                status=unconfirmed,
+            )
+
+        # Content addressing, checked: the digest is the hash of the bytes we
+        # were served, not merely a header the far end chose to send.
+        computed = f"sha256:{hashlib.sha256(resp.content).hexdigest()}"
+        header = _clean_digest(resp.headers.get("Docker-Content-Digest", ""))
+        if computed != top_digest or (header and header != computed):
+            return _with(
+                base,
+                limitation=(
+                    "the manifest bytes served do not hash to the digest that named them "
+                    f"(expected {top_digest}, computed {computed})"
+                ),
+            )
+        try:
+            manifest: Any = resp.json()
+        except ValueError:
+            return _with(base, limitation="the registry returned an unparseable manifest")
+        if not isinstance(manifest, dict):
+            return _with(base, limitation="the registry returned a manifest that is not an object")
+
+        wanted = base.platform
+        manifests = manifest.get("manifests")
+        if isinstance(manifests, list):
+            identity = self._identity_from_index(base, computed, manifests)
+        elif not isinstance(manifest.get("config"), dict):
+            return _with(base, limitation="the manifest declares no config (unsupported schema)")
+        else:
+            identity = await self._identity_from_manifest(
+                base, client, host, repository, computed, manifest, wanted
+            )
+        if identity.confirmed:
+            await self._remember(host, repository, top_digest, identity)
+        return identity
+
+    async def _remembered(
+        self, host: str, repository: str, digest: str, platform: Platform
+    ) -> tuple[str, str] | None:
+        """`(index digest, manifest digest)` verified earlier for this digest."""
+        if self._mapping_store is None:
+            return None
+        try:
+            return await self._mapping_store.get_mapping(host, repository, digest, str(platform))
+        except Exception as e:  # a cache that misbehaves is a miss
+            logger.debug(f"Could not read the remembered mapping for {digest[:19]}: {e}")
+            return None
+
+    async def _remember(
+        self, host: str, repository: str, digest: str, identity: ResolvedIdentity
+    ) -> None:
+        if self._mapping_store is None:
+            return
+        try:
+            await self._mapping_store.put_mapping(
+                host,
+                repository,
+                digest,
+                str(identity.platform),
+                index_digest=identity.index_digest,
+                manifest_digest=identity.manifest_digest,
+            )
+        except Exception as e:
+            logger.debug(f"Could not remember the mapping for {digest[:19]}: {e}")
+
+    @staticmethod
+    def _identity_from_index(
+        base: ResolvedIdentity, index_digest: str, manifests: list[Any]
+    ) -> ResolvedIdentity:
+        wanted = base.platform
+        child = _select_platform(manifests, wanted)
+        if child is None:
+            offered = sorted(
+                {
+                    str(p)
+                    for entry in manifests
+                    if isinstance(entry, dict)
+                    and (p := Platform.from_index_entry(entry)) is not None
+                }
+            )
+            ambiguous = any(
+                isinstance(entry, dict)
+                and (p := Platform.from_index_entry(entry)) is not None
+                and wanted.satisfied_by(p)
+                for entry in manifests
+            )
+            why = (
+                f"more than one variant of {wanted} is published; name the variant"
+                if ambiguous
+                else f"the index has no manifest for {wanted}"
+            )
+            return _with(
+                base,
+                status=IdentityStatus.PLATFORM_MISMATCH,
+                index_digest=index_digest,
+                limitation=f"{why} (offered: {', '.join(offered) or 'none'})",
+            )
+        child_digest = _clean_digest(str(child.get("digest") or ""))
+        if not child_digest:
+            return _with(
+                base,
+                index_digest=index_digest,
+                limitation="the index entry for the platform carries no valid digest",
+            )
+        return _with(
+            base,
+            status=IdentityStatus.CONFIRMED,
+            index_digest=index_digest,
+            manifest_digest=child_digest,
+        )
+
+    async def _identity_from_manifest(
+        self,
+        base: ResolvedIdentity,
+        client: OCIRegistryClient,
+        host: str,
+        repository: str,
+        manifest_digest: str,
+        manifest: dict[str, Any],
+        wanted: Platform,
+    ) -> ResolvedIdentity:
+        """A single-platform manifest: its platform comes from its config."""
+        config = await self._fetch_config(client, host, repository, manifest)
+        # Kept for `inspect`, so the same blob is not fetched twice.
+        self._resolved.setdefault(
+            f"{host}/{repository}:{manifest_digest}|{wanted}", (manifest_digest, config)
+        )
+        declared = _platform_of_config(config)
+        if declared is None:
+            return _with(
+                base,
+                status=IdentityStatus.DIGEST_ONLY,
+                manifest_digest=manifest_digest,
+                limitation="the platform of this single manifest could not be verified",
+            )
+        if not wanted.satisfied_by(declared):
+            return _with(
+                base,
+                status=IdentityStatus.PLATFORM_MISMATCH,
+                manifest_digest=manifest_digest,
+                limitation=f"the image is {declared}, not the requested {wanted}",
+            )
+        return _with(base, status=IdentityStatus.CONFIRMED, manifest_digest=manifest_digest)
+
+    async def inspect(
+        self, image: DockerImage, platform: Platform | None = None
+    ) -> tuple[str, HardeningFacts]:
+        """Return (digest, facts) for `image`, for one platform.
 
         The digest is "" when the registry could not be asked or did not
         answer, and the facts are empty in the same case. Both outcomes mean
         "not determined": the caller keeps whatever it already had and the
         candidate carries UNKNOWNs rather than fabricated defaults.
+
+        The config that is read is the one of `platform`'s manifest -- the
+        image's own platform when it has one, the default otherwise. It used
+        to be a hard-coded linux/amd64, so facts measured on that manifest
+        were attributed to an arm64 scan.
         """
         target = _registry_target(image)
         if target is None:
             return "", HardeningFacts()
         host, repository = target
+        wanted = platform or _platform_of(image)
         reference = image.digest if _DIGEST.match(image.digest) else image.tag
-        key = f"{host}/{repository}:{reference}"
+        key = f"{host}/{repository}:{reference}|{wanted}"
 
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             if key in self._resolved:
                 digest, config = self._resolved[key]
             else:
-                digest, config = await self._resolve(host, repository, reference)
+                digest, config = await self._resolve(host, repository, reference, wanted)
                 self._resolved[key] = (digest, config)
                 if digest:
                     self._digests.setdefault(f"{host}/{repository}:{image.tag}", digest)
@@ -203,7 +464,7 @@ class RegistryInspector:
         return digest, _facts_from_config(config)
 
     async def _resolve(
-        self, host: str, repository: str, reference: str
+        self, host: str, repository: str, reference: str, platform: Platform = DEFAULT_PLATFORM
     ) -> tuple[str, dict[str, Any] | None]:
         client = await self._client(host)
         if client is None:
@@ -227,7 +488,7 @@ class RegistryInspector:
             # A multi-arch index. The index digest is the image's identity,
             # so it is kept; the per-architecture manifest is followed only
             # to reach the config.
-            child = _select_platform(manifests)
+            child = _select_platform(manifests, platform)
             if child is None:
                 return digest, None
             child_digest = _clean_digest(str(child.get("digest") or ""))
@@ -292,6 +553,63 @@ class RegistryInspector:
         return config
 
 
+def remembered_identity(
+    base: ResolvedIdentity, index_digest: str, manifest_digest: str
+) -> ResolvedIdentity:
+    """A CONFIRMED identity rebuilt from a mapping verified on an earlier run."""
+    return _with(
+        base,
+        status=IdentityStatus.CONFIRMED,
+        index_digest=index_digest,
+        manifest_digest=manifest_digest,
+    )
+
+
+def _with(identity: ResolvedIdentity, **changes: Any) -> ResolvedIdentity:
+    return dataclasses.replace(identity, **changes)
+
+
+def _platform_of(image: DockerImage) -> Platform:
+    """The platform an image was asked for, falling back to the default."""
+    try:
+        return parse_platform(image.platform)
+    except ValueError:
+        return DEFAULT_PLATFORM
+
+
+def _platform_of_config(config: dict[str, Any] | None) -> Platform | None:
+    """The `os/architecture[/variant]` an OCI image config declares."""
+    if config is None:
+        return None
+    os_name = str(config.get("os") or "")
+    architecture = str(config.get("architecture") or "")
+    if not os_name or not architecture:
+        return None
+    variant = str(config.get("variant") or "")
+    text = "/".join(p for p in (os_name, architecture, variant) if p)
+    try:
+        return Platform.parse(text)
+    except ValueError:
+        return None
+
+
+def _registry_target_of(name: str) -> tuple[str, str] | None:
+    """`_registry_target` for a bare name, without building an image."""
+    from dockerls.domain.value_objects.image_reference import registry_host_of
+
+    name = name.strip()
+    host = registry_host_of(name)
+    repository = name[len(host) + 1 :] if host else name
+    if not host:
+        host = DOCKER_HUB_REGISTRY
+        if "/" not in repository:
+            repository = f"library/{repository}"
+    if not _HOST.match(host) or not _REPOSITORY.match(repository):
+        logger.info(f"Not resolving {name!r}: unexpected registry or repository shape")
+        return None
+    return host, repository
+
+
 def _registry_target(image: DockerImage) -> tuple[str, str] | None:
     """Split an image name into (registry host, repository path).
 
@@ -314,26 +632,35 @@ def _registry_target(image: DockerImage) -> tuple[str, str] | None:
     return host, repository
 
 
-def _select_platform(manifests: list[Any]) -> dict[str, Any] | None:
-    """Pick the linux/amd64 entry of an index, or the first usable one.
+def _select_platform(
+    manifests: list[Any], platform: Platform = DEFAULT_PLATFORM
+) -> dict[str, Any] | None:
+    """The index entry for `platform`, or None when the index has none.
 
     Attestation manifests (cosign, SLSA) appear alongside real images in
-    modern indexes and declare `platform.architecture: unknown`; selecting
-    one would produce a config describing a signature rather than an image.
+    modern indexes and declare `unknown/unknown`; they are never a candidate.
+
+    There is deliberately **no fallback** to "the first usable entry": that
+    was how a request for one platform quietly returned another's config. When
+    several variants satisfy a variant-less request the default variant for
+    the architecture wins, and if that still leaves more than one the choice
+    is refused rather than guessed.
     """
-    usable: list[dict[str, Any]] = []
+    matches: list[tuple[dict[str, Any], Platform]] = []
     for entry in manifests:
         if not isinstance(entry, dict):
             continue
-        platform = entry.get("platform")
-        platform = platform if isinstance(platform, dict) else {}
-        architecture = str(platform.get("architecture") or "")
-        if architecture == "unknown":
-            continue
-        if architecture == DEFAULT_ARCHITECTURE and str(platform.get("os") or "") == DEFAULT_OS:
-            return entry
-        usable.append(entry)
-    return usable[0] if usable else None
+        declared = Platform.from_index_entry(entry)
+        if declared is not None and platform.satisfied_by(declared):
+            matches.append((entry, declared))
+    if len(matches) == 1:
+        return matches[0][0]
+    if not matches:
+        return None
+    preferred = [
+        entry for entry, declared in matches if declared.variant in ("", platform.default_variant)
+    ]
+    return preferred[0] if len(preferred) == 1 else None
 
 
 def _clean_digest(value: str) -> str:

@@ -198,38 +198,72 @@ class _SlowRefresh(ScannerInterface):
         return True
 
 
-class TestFallbackRefreshDbRunsInParallel:
-    """The primary and secondary DB downloads used to run one after the
-    other; a run that never needed the secondary still paid for both in
-    sequence."""
+class _Failing(ScannerInterface):
+    def __init__(self, log: list[str]):
+        self._log = log
+
+    async def is_available(self) -> bool:
+        return True
+
+    async def scan(self, image_reference: str, platform: str | None = None) -> ScanResult:
+        self._log.append("secondary-scan")
+        return ScanResult(image_reference=image_reference, scanner="grype", scan_timestamp="t")
+
+    async def refresh_db(self) -> bool:
+        self._log.append("secondary-refresh")
+        await asyncio.sleep(0.02)
+        return False
+
+
+class _PrimaryFails(_SlowRefresh):
+    async def scan(self, image_reference: str, platform: str | None = None) -> ScanResult:
+        return ScanResult(
+            image_reference=image_reference,
+            status=ScanStatus.ERROR,
+            error_kind=ScanErrorKind.TIMEOUT,
+            error_message="slow",
+        )
+
+
+class TestSecondaryDatabaseIsPreparedOnlyWhenUsed:
+    """`grype db update` on an empty directory measured ~108 s of CPU against
+    ~7 s for Trivy: preparing it up front taxed every first run, including
+    the ones that never reach the secondary."""
 
     @pytest.mark.asyncio
-    async def test_both_downloads_overlap(self):
+    async def test_refresh_touches_only_the_primary(self):
         log: list[str] = []
-        primary = _SlowRefresh("primary", delay=0.05, log=log)
-        secondary = _SlowRefresh("secondary", delay=0.05, log=log)
-        fallback = FallbackScanner(primary, secondary)
-
-        ok = await fallback.refresh_db()
-
-        assert ok is True
-        # Sequential would read primary-start, primary-end, secondary-start,
-        # secondary-end. Overlapping, secondary starts before primary ends.
-        assert log.index("secondary-start") < log.index("primary-end")
-
-    @pytest.mark.asyncio
-    async def test_primary_result_is_returned_even_if_secondary_fails(self):
-        class _Failing(ScannerInterface):
-            async def is_available(self) -> bool:
-                return True
-
-            async def scan(self, image_reference: str) -> ScanResult:  # pragma: no cover
-                raise NotImplementedError
-
-            async def refresh_db(self) -> bool:
-                return False
-
-        log: list[str] = []
-        fallback = FallbackScanner(_SlowRefresh("primary", 0.0, log), _Failing())
+        fallback = FallbackScanner(_SlowRefresh("primary", 0.0, log), _Failing(log))
 
         assert await fallback.refresh_db() is True
+        assert log == ["primary-start", "primary-end"]
+
+    @pytest.mark.asyncio
+    async def test_it_is_prepared_once_on_the_first_fallback(self):
+        log: list[str] = []
+        fallback = FallbackScanner(_PrimaryFails("primary", 0.0, log), _Failing(log))
+        await fallback.refresh_db()
+
+        results = await asyncio.gather(*(fallback.scan(f"app:{i}") for i in range(4)))
+
+        assert log.count("secondary-refresh") == 1
+        assert log.count("secondary-scan") == 4
+        assert all(r.is_verified for r in results)
+        # the refresh finished before the first secondary scan
+        assert log.index("secondary-refresh") < log.index("secondary-scan")
+
+    @pytest.mark.asyncio
+    async def test_a_failed_secondary_refresh_does_not_block_the_fallback_scan(self):
+        log: list[str] = []
+        fallback = FallbackScanner(_PrimaryFails("primary", 0.0, log), _Failing(log))
+
+        result = await fallback.scan("app:1")
+
+        assert result.is_verified and "secondary-scan" in log
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_means_the_secondary_is_never_prepared(self):
+        log: list[str] = []
+        fallback = FallbackScanner(_SlowRefresh("primary", 0.0, log), _Failing(log))
+        await fallback.refresh_db()
+        assert "secondary-refresh" not in log

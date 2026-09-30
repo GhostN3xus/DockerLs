@@ -40,6 +40,15 @@ class TestProductMapping:
     def test_postgres_maps_to_postgresql(self):
         assert DOCKER_TO_ENDOFLIFE["postgres"] == "postgresql"
 
+    def test_slugs_that_endoflife_date_renamed_use_the_current_name(self):
+        """These four answered 301 -> the new slug when checked against
+        endoflife.date on 2026-09-30, and this client does not follow
+        redirects, so every lookup for them silently returned no data."""
+        assert DOCKER_TO_ENDOFLIFE["alpine"] == "alpine-linux"
+        assert DOCKER_TO_ENDOFLIFE["httpd"] == "apache-http-server"
+        assert DOCKER_TO_ENDOFLIFE["kafka"] == "apache-kafka"
+        assert DOCKER_TO_ENDOFLIFE["cassandra"] == "apache-cassandra"
+
     def test_unmapped_product_falls_back_to_itself(self):
         checker = EndOfLifeChecker()
         assert checker._resolve_product("some-unknown-image") == "some-unknown-image"

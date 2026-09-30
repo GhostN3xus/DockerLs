@@ -36,6 +36,7 @@ from dockerls.cli.dependencies import build_analyze_use_case, build_recommend_us
 from dockerls.cli.image_names import display_reference, split_repository_and_tag
 from dockerls.cli.options import OutputFormat, parse_output_format
 from dockerls.cli.progress import RichScanObserver, scan_status
+from dockerls.cli.run_options import RunOptions, parse_run_options
 from dockerls.cli.scan_failure import describe_scan_failure
 from dockerls.cli.text import safe
 from dockerls.cli.validators import check_workers
@@ -86,11 +87,29 @@ def alternatives(
     ),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
     no_progress: bool = typer.Option(False, "--no-progress", help="Disable the progress display"),
+    platform: str | None = typer.Option(
+        None,
+        "--platform",
+        help="os/architecture, with an optional /variant; both your image and the "
+        "candidates are measured for it (default: linux/amd64)",
+    ),
+    runtime_version: str | None = typer.Option(
+        None,
+        "--runtime-version",
+        help="Only candidates in this runtime version or range: 22, '>=20,<23' or 20-22",
+    ),
+    distro: str | None = typer.Option(
+        None, "--distro", help="Only candidates of this distribution family"
+    ),
+    variant: str | None = typer.Option(None, "--variant", help="Only runtime or dev candidates"),
 ) -> None:
     """Find safer alternatives to an image you already run, with trade-offs."""
     if no_color:
         console.no_color = True
     fmt = parse_output_format(output_format)
+    options = parse_run_options(
+        platform=platform, runtime_version=runtime_version, distro=distro, variant=variant
+    )
     # `0` means "size it to this machine", so it is passed through rather
     # than validated: the resolver, not the flag, decides what it becomes.
     if workers:
@@ -104,6 +123,7 @@ def alternatives(
                 sources=list(source) or None,
                 all_sources=all_sources,
                 show_progress=not no_progress and fmt != OutputFormat.JSON,
+                options=options,
             )
         )
     except UnknownSourceError as e:
@@ -122,14 +142,16 @@ async def _alternatives(
     sources: list[str] | None = None,
     all_sources: bool = False,
     show_progress: bool = True,
+    options: RunOptions | None = None,
 ) -> None:
+    options = options or parse_run_options()
     # A regra compartilhada, e não um `rsplit(":", 1)`: a porta de um
     # registry (`registry.internal:5000/app`) não é tag, e procurar o
     # repositório "registry.internal" não devolve nada.
     repository, tag = split_repository_and_tag(reference)
 
     with scan_status(f"Scanning {reference} (your current image)..."):
-        current = await _analyze_current(reference)
+        current = await _analyze_current(reference, options)
     if current is None:
         # No measurement of the current image means no honest claim about
         # an improvement over it. The command fails rather than presenting
@@ -147,6 +169,8 @@ async def _alternatives(
             observer=observer,
             sources=sources,
             all_sources=all_sources,
+            platform=options.platform,
+            criteria=options.criteria,
         )
         result = await use_case.execute(repository)
 
@@ -182,7 +206,9 @@ async def _alternatives(
     raise typer.Exit(EXIT_FOUND if result.baseline_met else EXIT_BELOW_BASELINE)
 
 
-async def _analyze_current(reference: str) -> ImageAnalysis | None:
+async def _analyze_current(
+    reference: str, options: RunOptions | None = None
+) -> ImageAnalysis | None:
     """Scan the image the user runs today, or return None if it cannot be.
 
     A falha do scan chega de duas formas, e as duas significam a mesma
@@ -192,7 +218,7 @@ async def _analyze_current(reference: str) -> ImageAnalysis | None:
     comparação valer zero, e toda alternativa apareceria como uma melhoria
     enorme sobre uma imagem que ninguém mediu.
     """
-    use_case = await build_analyze_use_case()
+    use_case = await build_analyze_use_case(platform=options.platform if options else None)
     try:
         analysis = await use_case.execute(reference)
     except (ValueError, RuntimeError) as e:
@@ -258,6 +284,7 @@ def _render(
     table.add_column("Delta", justify="right")
     table.add_column("C/H/M", justify="center", no_wrap=True)
     table.add_column("Conf", justify="center")
+    table.add_column("Drop-in?", justify="center")
 
     for i, (candidate, plan) in enumerate(zip(candidates, plans, strict=True), 1):
         delta = plan.score_delta
@@ -271,8 +298,21 @@ def _render(
             f"{candidate.scan.critical_count}/{candidate.scan.high_count}/"
             f"{candidate.scan.medium_count}",
             candidate.confidence.value[:4],
+            # Never "yes": at best nothing known says otherwise.
+            "[green]no known blocker[/green]" if plan.direct_replacement else "[yellow]no[/yellow]",
         )
     console.print(table)
+    direct = next((c for c, p in zip(candidates, plans, strict=True) if p.direct_replacement), None)
+    if direct is None:
+        console.print(
+            "[yellow]None of these is a direct replacement:[/yellow] each differs from "
+            f"{safe(current.image.full_reference)} in a way listed under TRADE-OFFS."
+        )
+    else:
+        console.print(
+            f"[dim]Closest to a drop-in: {safe(direct.image.full_reference)} "
+            "(no known incompatibility -- not proof of compatibility).[/dim]"
+        )
 
     best, best_plan = candidates[0], plans[0]
     console.print(f"\n[bold]WHY {safe(best.image.full_reference)}[/bold]")
@@ -283,6 +323,13 @@ def _render(
         console.print("\n[bold]TRADE-OFFS[/bold]")
         for cost in best_plan.trade_offs[:8]:
             console.print(f"  [yellow]![/yellow] {safe(cost)}")
+    if best_plan.incompatibilities:
+        console.print("\n[bold]NOT A DIRECT REPLACEMENT BECAUSE[/bold]")
+        for reason in best_plan.incompatibilities:
+            console.print(f"  [yellow]![/yellow] {safe(reason)}")
+    console.print("\n[bold]NOT ESTABLISHED (needs your own tests)[/bold]")
+    for question in best_plan.unverified_compatibility:
+        console.print(f"  ? {safe(question)}")
 
     console.print("\n[bold]MIGRATION CHECKLIST[/bold]")
     for step_number, step in enumerate(best_plan.checklist, 1):

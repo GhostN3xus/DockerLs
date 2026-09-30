@@ -23,12 +23,14 @@ from typing import TYPE_CHECKING, Any
 import httpx
 from loguru import logger
 
+from dockerls.integrations.threat_intel.status import IntelStatus
 from dockerls.utils.rate_limit import CircuitBreaker, CircuitOpenError, RateLimiter
 from dockerls.utils.retry import (
     DEFAULT_BACKOFF_BASE,
     DEFAULT_MAX_ATTEMPTS,
     retry_policy,
 )
+from dockerls.utils.single_flight import SingleFlight
 
 if TYPE_CHECKING:
     from dockerls.domain.interfaces.cache_store import CacheStoreInterface
@@ -99,14 +101,30 @@ def _parse_osv_record(data: Any) -> OSVEnrichment:
 
 class OSVClient:
     """Best-effort OSV.dev lookups by CVE-ID. Complements, never replaces,
-    what the scanners already reported for a finding."""
+    what the scanners already reported for a finding.
+
+    OSV has no batch endpoint keyed by vulnerability ID (`/v1/querybatch`
+    answers package/version queries), so each distinct CVE is one GET. What is
+    shared instead is everything around it: one HTTP client and its
+    connections for the whole run, one in-flight request per CVE however many
+    candidates ask, a bound on simultaneous requests, and both kinds of answer
+    remembered -- a record, and a confirmed 404 (for a shorter time).
+    """
 
     BASE_URL = "https://api.osv.dev/v1"
 
     # Advisories move far slower than the daily KEV/EPSS feeds; a day's TTL
     # avoids re-fetching the same CVE across back-to-back runs.
     CACHE_TTL_SECONDS = 24 * 60 * 60
+    #: A confirmed "OSV has no such record". Shorter than a positive answer:
+    #: an advisory can be published any day, and an absence is only as good as
+    #: the moment it was checked.
+    ABSENT_TTL_SECONDS = 6 * 60 * 60
     _CACHE_PREFIX = "threat-intel:osv:v1:"
+    _ABSENT_PREFIX = "threat-intel:osv-absent:v1:"
+    #: Simultaneous GETs. Independent of the rate limiter, which paces the
+    #: *start* of requests; this bounds how many are open at once.
+    MAX_CONCURRENT = 8
 
     def __init__(
         self,
@@ -125,6 +143,16 @@ class OSVClient:
         self._available: bool | None = None
         self._limiter = RateLimiter(rate=_RATE, period=_RATE_PERIOD)
         self._breaker = CircuitBreaker()
+        self._http: httpx.AsyncClient | None = None
+        self._http_lock = asyncio.Lock()
+        self._slots = asyncio.Semaphore(self.MAX_CONCURRENT)
+        self._flight: SingleFlight[tuple[IntelStatus, OSVEnrichment | None]] = SingleFlight()
+        self._status: dict[str, IntelStatus] = {}
+        #: Requests actually sent, cache answers and joined lookups, for the
+        #: run's instrumentation.
+        self.requests = 0
+        self.cache_hits = 0
+        self.joined = 0
 
     @property
     def available(self) -> bool | None:
@@ -132,96 +160,134 @@ class OSVClient:
         lookup in this run failed, None before anything was asked."""
         return self._available
 
+    def status_of(self, cve_id: str) -> IntelStatus | None:
+        """What the lookup of `cve_id` established this run, or None if it was
+        never asked. Distinguishes a confirmed absence from every way of not
+        having an answer."""
+        return self._status.get(cve_id.upper())
+
+    async def close(self) -> None:
+        """Release the shared connection pool."""
+        client, self._http = self._http, None
+        if client is not None:
+            await client.aclose()
+
+    async def _client(self) -> httpx.AsyncClient:
+        if self._http is None:
+            async with self._http_lock:
+                if self._http is None:
+                    self._http = httpx.AsyncClient(timeout=self._timeout)
+        return self._http
+
     async def enrich(self, cve_ids: list[str]) -> dict[str, OSVEnrichment]:
         """Map each of `cve_ids` that OSV has a record for to its aliases
-        and affected ranges. A CVE absent from the result was either not
-        found in OSV (a real, cacheable answer) or could not be looked up
-        this run -- the caller has no way to tell those apart from the
-        result alone, which is why `available` exists.
+        and affected ranges.
+
+        A CVE absent from the result was either confirmed absent (see
+        `status_of`, `ABSENT`) or could not be looked up this run
+        (`NETWORK_ERROR`, `RATE_LIMITED`, ...) -- the two are told apart by
+        `status_of`, never by the result alone.
         """
         if not cve_ids:
             return {}
-
         wanted = sorted({cve.upper() for cve in cve_ids})
+        outcomes = await asyncio.gather(*(self._lookup(cve) for cve in wanted))
         result: dict[str, OSVEnrichment] = {}
-        if self._cache is not None:
-            cached = await asyncio.gather(*[self._from_cache(cve) for cve in wanted])
-            for cve, hit in zip(wanted, cached, strict=True):
-                if hit is not None:
-                    result[cve] = hit
-        cached_hit = bool(result)
-        if cached_hit:
-            self._available = True
-
-        missing = [cve for cve in wanted if cve not in result]
-        if missing:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                outcomes = await asyncio.gather(*[self._fetch_one(client, cve) for cve in missing])
-            for cve, (answered, enrichment) in zip(missing, outcomes, strict=True):
-                if answered:
-                    self._available = True
-                if enrichment is not None:
-                    result[cve] = enrichment
-                    await self._store_cache(cve, enrichment)
-
-        if self._available is None and not cached_hit:
+        for cve, (status, enrichment) in zip(wanted, outcomes, strict=True):
+            self._status[cve] = status
+            if status.answered:
+                self._available = True
+            if enrichment is not None:
+                result[cve] = enrichment
+        if self._available is None:
             self._available = False
         return result
 
+    async def _lookup(self, cve: str) -> tuple[IntelStatus, OSVEnrichment | None]:
+        """One CVE, shared by every caller that asks while it is in flight."""
+        outcome, joined = await self._flight.run(cve, lambda: self._resolve(cve))
+        if joined:
+            self.joined += 1
+        return outcome
+
+    async def _resolve(self, cve: str) -> tuple[IntelStatus, OSVEnrichment | None]:
+        cached = await self._from_cache(cve)
+        if cached is not None:
+            self.cache_hits += 1
+            return cached
+        async with self._slots:
+            status, enrichment = await self._fetch_one(cve)
+        if status is IntelStatus.FOUND and enrichment is not None:
+            await self._store_cache(cve, enrichment)
+        elif status is IntelStatus.ABSENT:
+            await self._store_absent(cve)
+        return status, enrichment
+
     @staticmethod
     async def _get_raising_5xx(client: httpx.AsyncClient, url: str) -> httpx.Response:
-        """GET, raising only on a 5xx so the retry policy sees a transient
-        failure. 4xx (404 "no such record", or anything else) is returned
-        as-is for the caller to interpret -- retrying a 404 would never
-        turn it into an answer."""
+        """GET, raising on a 5xx or a 429 so the retry policy sees a transient
+        failure. Any other 4xx (404 "no such record", ...) is returned as-is
+        for the caller to interpret -- retrying a 404 would never turn it into
+        an answer."""
         resp = await client.get(url)
-        if resp.status_code >= 500:
+        if resp.status_code >= 500 or resp.status_code == 429:
             resp.raise_for_status()
         return resp
 
-    async def _fetch_one(
-        self, client: httpx.AsyncClient, cve: str
-    ) -> tuple[bool, OSVEnrichment | None]:
-        """One CVE lookup. Returns `(answered, enrichment)`: `answered` is
-        True for any definitive response (found or 404-not-found), False
-        for a failure the retry policy could not recover from."""
+    async def _fetch_one(self, cve: str) -> tuple[IntelStatus, OSVEnrichment | None]:
+        """One network lookup, classified: never "found nothing" for a failure."""
         try:
             self._breaker.check("OSV.dev")
         except CircuitOpenError as e:
             logger.debug(str(e))
-            return False, None
+            return IntelStatus.UNAVAILABLE, None
         try:
+            client = await self._client()
             await self._limiter.acquire()
             policy = retry_policy(self._max_attempts, self._backoff_base)
+            self.requests += 1
             resp: httpx.Response = await policy(
                 self._get_raising_5xx, client, f"{self.BASE_URL}/vulns/{cve}"
             )
+        except httpx.HTTPStatusError as e:
+            self._breaker.record_failure()
+            limited = e.response.status_code == 429
+            logger.debug(f"OSV.dev lookup failed for {cve}: HTTP {e.response.status_code}")
+            return (IntelStatus.RATE_LIMITED if limited else IntelStatus.NETWORK_ERROR), None
         except httpx.HTTPError as e:
             self._breaker.record_failure()
             logger.debug(f"OSV.dev lookup failed for {cve}: {e}")
-            return False, None
+            return IntelStatus.NETWORK_ERROR, None
 
         if resp.status_code == 404:
             self._breaker.record_success()
-            return True, None
+            return IntelStatus.ABSENT, None
         if not resp.is_success:
             self._breaker.record_failure()
             logger.debug(f"OSV.dev answered {resp.status_code} for {cve}")
-            return False, None
+            return IntelStatus.INVALID_RESPONSE, None
         try:
             data = resp.json()
         except ValueError as e:
             self._breaker.record_failure()
             logger.debug(f"OSV.dev response for {cve} was not valid JSON: {e}")
-            return False, None
+            return IntelStatus.INVALID_RESPONSE, None
+        if not isinstance(data, dict):
+            self._breaker.record_failure()
+            return IntelStatus.INVALID_RESPONSE, None
         self._breaker.record_success()
-        return True, _parse_osv_record(data)
+        return IntelStatus.FOUND, _parse_osv_record(data)
 
-    async def _from_cache(self, cve: str) -> OSVEnrichment | None:
+    async def _from_cache(self, cve: str) -> tuple[IntelStatus, OSVEnrichment | None] | None:
         if self._cache is None:
             return None
         try:
             data = await self._cache.get(self._CACHE_PREFIX + cve)
+            if data is None:
+                absent = await self._cache.get(self._ABSENT_PREFIX + cve)
+                if isinstance(absent, dict) and absent.get("absent") is True:
+                    return IntelStatus.ABSENT, None
+                return None
         except Exception as e:  # pragma: no cover - an unreadable cache is a miss
             logger.debug(f"Could not read the cached OSV record for {cve}: {e}")
             return None
@@ -231,7 +297,7 @@ class OSVClient:
         ranges = data.get("affected_ranges")
         if not isinstance(aliases, list) or not isinstance(ranges, list):
             return None
-        return OSVEnrichment(
+        return IntelStatus.FOUND, OSVEnrichment(
             aliases=[str(a) for a in aliases], affected_ranges=[str(r) for r in ranges]
         )
 
@@ -245,3 +311,14 @@ class OSVClient:
             )
         except Exception as e:  # pragma: no cover - a cache that will not write is not fatal
             logger.debug(f"Could not cache the OSV record for {cve}: {e}")
+
+    async def _store_absent(self, cve: str) -> None:
+        """Remember a *confirmed* 404, briefly. Never called for a failure."""
+        if self._cache is None:
+            return
+        try:
+            await self._cache.set(
+                self._ABSENT_PREFIX + cve, {"absent": True}, ttl_seconds=self.ABSENT_TTL_SECONDS
+            )
+        except Exception as e:  # pragma: no cover - a cache that will not write is not fatal
+            logger.debug(f"Could not cache the OSV absence for {cve}: {e}")

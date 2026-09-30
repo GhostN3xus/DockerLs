@@ -55,6 +55,16 @@ def read_trivy_built_at(cache_dir: Path | None = None) -> tuple[datetime | None,
     return _read(base / "db" / "metadata.json", ("UpdatedAt", "updatedAt", "built"))
 
 
+def read_trivy_next_update(cache_dir: Path | None = None) -> tuple[datetime | None, str]:
+    """Quando o Trivy considera a base vencida (`NextUpdate`), ou `(None, motivo)`.
+
+    É a regra do próprio Trivy: antes dessa data ele não baixa a base de novo,
+    então perguntar ao registry antes dela não traz nada -- só custa ~1,7 s.
+    """
+    base = cache_dir or trivy_cache_dir()
+    return _read(base / "db" / "metadata.json", ("NextUpdate", "nextUpdate"))
+
+
 def read_grype_built_at(cache_dir: Path | None = None) -> tuple[datetime | None, str]:
     """A data da base do Grype, ou `(None, motivo)`.
 
