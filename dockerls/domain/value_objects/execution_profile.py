@@ -112,8 +112,7 @@ PROFILES: dict[ProfileName, ExecutionProfile] = {
     ProfileName.AUDIT: ExecutionProfile(
         name=ProfileName.AUDIT,
         summary=(
-            "every discovered tag is measured, finalists are cross-validated and "
-            "inspected, and the identity of each result must be confirmed"
+            "every discovered tag is measured, and the finalists are cross-validated and inspected"
         ),
         scan_budget=0,
         cross_validate=True,

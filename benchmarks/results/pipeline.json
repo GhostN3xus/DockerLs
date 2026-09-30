@@ -1,0 +1,186 @@
+{
+  "title": "DockerLs pipeline benchmark (SIMULATED registry and scanner)",
+  "environment": {
+    "date": "2026-09-30T15:08:10+00:00",
+    "dockerls": "1.0.16",
+    "git_commit": "0bd421c",
+    "git_dirty": "yes",
+    "python": "3.11.15",
+    "os": "Linux 6.18.44-fc-v50",
+    "machine": "x86_64",
+    "cpus": "4"
+  },
+  "parameters": {
+    "repeat": 7,
+    "scan_latency_s": 0.2,
+    "resolve_latency_s": 0.03,
+    "intel_latency_s": 0.05,
+    "slow_intel_latency_s": 1.0
+  },
+  "rows": [
+    {
+      "scenario": "recommend small (6 tags), cold cache",
+      "kind": "simulated",
+      "n": 7,
+      "median_s": 0.46835517799991067,
+      "p95_s": 0.47055553199970745,
+      "min_s": 0.4668343589983124,
+      "max_s": 0.47055553199970745,
+      "counters": {
+        "cache_hits": 0.0,
+        "dedup": 0.0,
+        "scans": 6.0
+      },
+      "note": ""
+    },
+    {
+      "scenario": "recommend small (6 tags), warm cache",
+      "kind": "simulated",
+      "n": 7,
+      "median_s": 0.033421662001273944,
+      "p95_s": 0.03978962499968475,
+      "min_s": 0.03290440899945679,
+      "max_s": 0.03978962499968475,
+      "counters": {
+        "cache_hits": 0.0,
+        "dedup": 0.0,
+        "scans": 0.0
+      },
+      "note": "second run over the same store: scans should be 0"
+    },
+    {
+      "scenario": "recommend large (36 tags), cold cache",
+      "kind": "simulated",
+      "n": 7,
+      "median_s": 2.0086789450015203,
+      "p95_s": 2.036645218000558,
+      "min_s": 2.006147543001134,
+      "max_s": 2.036645218000558,
+      "counters": {
+        "cache_hits": 0.0,
+        "dedup": 0.0,
+        "scans": 36.0
+      },
+      "note": ""
+    },
+    {
+      "scenario": "recommend large (36 tags), warm cache",
+      "kind": "simulated",
+      "n": 7,
+      "median_s": 0.16181329199935135,
+      "p95_s": 0.16758967899841082,
+      "min_s": 0.1606575089990656,
+      "max_s": 0.16758967899841082,
+      "counters": {
+        "cache_hits": 0.0,
+        "dedup": 0.0,
+        "scans": 0.0
+      },
+      "note": "second run over the same store: scans should be 0"
+    },
+    {
+      "scenario": "recommend 36 tags -> 6 distinct digests",
+      "kind": "simulated",
+      "n": 7,
+      "median_s": 0.595848979000948,
+      "p95_s": 0.5969468040002539,
+      "min_s": 0.5942530320007791,
+      "max_s": 0.5969468040002539,
+      "counters": {
+        "cache_hits": 0.0,
+        "dedup": 30.0,
+        "scans": 6.0
+      },
+      "note": "scans should equal the number of distinct digests, not of tags"
+    },
+    {
+      "scenario": "compare 2 images (limit 4)",
+      "kind": "simulated",
+      "n": 7,
+      "median_s": 0.23347773199930089,
+      "p95_s": 0.23372484699939378,
+      "min_s": 0.23284174800028268,
+      "max_s": 0.23372484699939378,
+      "counters": {
+        "concurrency": 2.0,
+        "scans": 2.0
+      },
+      "note": ""
+    },
+    {
+      "scenario": "compare 8 images (limit 4)",
+      "kind": "simulated",
+      "n": 7,
+      "median_s": 0.4673975159985275,
+      "p95_s": 0.4682718849999219,
+      "min_s": 0.46685510499992233,
+      "max_s": 0.4682718849999219,
+      "counters": {
+        "concurrency": 4.0,
+        "scans": 8.0
+      },
+      "note": ""
+    },
+    {
+      "scenario": "recommend 6 tags, intel healthy",
+      "kind": "simulated",
+      "n": 7,
+      "median_s": 0.5193571870004234,
+      "p95_s": 0.5727528520001215,
+      "min_s": 0.5177190199992765,
+      "max_s": 0.5727528520001215,
+      "counters": {
+        "cache_hits": 0.0,
+        "dedup": 0.0,
+        "kev_requests": 4.0,
+        "scans": 6.0
+      },
+      "note": ""
+    },
+    {
+      "scenario": "recommend 6 tags, intel slow",
+      "kind": "simulated",
+      "n": 7,
+      "median_s": 1.468995866000114,
+      "p95_s": 1.6790570989996922,
+      "min_s": 1.4683997040010581,
+      "max_s": 1.6790570989996922,
+      "counters": {
+        "cache_hits": 0.0,
+        "dedup": 0.0,
+        "kev_requests": 4.0,
+        "scans": 6.0
+      },
+      "note": ""
+    },
+    {
+      "scenario": "recommend 6 tags, intel unavailable",
+      "kind": "simulated",
+      "n": 7,
+      "median_s": 0.5184495440007595,
+      "p95_s": 0.53601386399896,
+      "min_s": 0.5173777359996166,
+      "max_s": 0.53601386399896,
+      "counters": {
+        "cache_hits": 0.0,
+        "dedup": 0.0,
+        "kev_requests": 4.0,
+        "scans": 6.0
+      },
+      "note": "the fake reports 'no answer'; telling absent / error / rate limited / invalid apart is covered by tests/unit/integrations/test_threat_intel_sharing.py, not timed here"
+    },
+    {
+      "scenario": "3 simultaneous recommend runs (6 tags, shared store)",
+      "kind": "simulated",
+      "n": 7,
+      "median_s": 0.4740613320009288,
+      "p95_s": 0.47680049299924576,
+      "min_s": 0.47198405800008914,
+      "max_s": 0.47680049299924576,
+      "counters": {
+        "scans": 18.0
+      },
+      "note": "separate runs have separate single-flights: without a warm store each may scan; the persisted store is what stops the *next* run from repeating them"
+    }
+  ]
+}

@@ -11,7 +11,10 @@ from loguru import logger
 from dockerls.domain.entities.scan_result import ScanErrorKind, ScanResult, ScanStatus
 from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.scanner import ScannerInterface
-from dockerls.infrastructure.toolchain.db_metadata import read_trivy_built_at
+from dockerls.infrastructure.toolchain.db_metadata import (
+    read_trivy_built_at,
+    read_trivy_next_update,
+)
 from dockerls.integrations.engine.batch import EngineBatchScanner
 from dockerls.integrations.scan_errors import classify_scanner_error
 from dockerls.integrations.scan_target import (
@@ -219,6 +222,12 @@ class TrivyScanner(ScannerInterface):
         `init error: DB error` em série. Quem chama precisa tratar o False.
         """
         base = self._cache_pool.base_dir
+        if await asyncio.to_thread(self._db_is_current, base):
+            # Same rule Trivy applies itself: before `NextUpdate` there is
+            # nothing to download, and asking the registry is a ~1.7 s round
+            # trip (measured) paid on every run, cache hits included.
+            logger.info(f"Trivy DB at {base} is current; not contacting the registry")
+            return await self._finish_refresh(base)
         for attempt in range(1, self.DB_DOWNLOAD_ATTEMPTS + 1):
             if on_attempt is not None:
                 on_attempt(attempt, self.DB_DOWNLOAD_ATTEMPTS)
@@ -247,6 +256,16 @@ class TrivyScanner(ScannerInterface):
             )
             await asyncio.sleep(wait)
 
+        return await self._finish_refresh(base)
+
+    def _db_is_current(self, base: Path) -> bool:
+        """The DB is on disk and Trivy itself would not replace it yet."""
+        if not (base / "db" / "trivy.db").is_file():
+            return False
+        next_update, _ = read_trivy_next_update(base)
+        return next_update is not None and next_update > datetime.now(tz=UTC)
+
+    async def _finish_refresh(self, base: Path) -> bool:
         self._skip_db_update = True
         isolated = await self._cache_pool.prepare()
         stats = self._cache_pool.stats

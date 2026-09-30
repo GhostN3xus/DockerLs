@@ -394,3 +394,63 @@ class TestTrivyScannerCacheIsolation:
         await again.prepare()
         assert again.stats.leased == 3
         await again.cleanup()
+
+
+class TestCurrentDatabaseIsNotRedownloaded:
+    """Before `NextUpdate` Trivy itself would not fetch anything; asking the
+    registry cost ~1.7 s on every run, cache hits included."""
+
+    @staticmethod
+    def _metadata(base, next_update):
+        (base / "db" / "metadata.json").write_text(
+            f'{{"Version":2,"NextUpdate":"{next_update}","UpdatedAt":"2026-01-01T00:00:00Z"}}'
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_current_db_spawns_nothing_and_enables_skip(self, tmp_path):
+        base = _seed_db(tmp_path / "trivy")
+        self._metadata(base, "2999-01-01T00:00:00Z")
+        scanner = TrivyScanner(cache_dir=base, workers=2)
+        spawn = AsyncMock(return_value=_FakeProc())
+        with patch("asyncio.create_subprocess_exec", spawn):
+            assert await scanner.refresh_db() is True
+
+        spawn.assert_not_called()
+        assert scanner._skip_db_update is True
+        assert scanner.cache_pool.isolated is True
+        await scanner.close()
+
+    @pytest.mark.asyncio
+    async def test_an_expired_db_is_refreshed(self, tmp_path):
+        base = _seed_db(tmp_path / "trivy")
+        self._metadata(base, "2020-01-01T00:00:00Z")
+        scanner = TrivyScanner(cache_dir=base, workers=1)
+        spawn = AsyncMock(return_value=_FakeProc())
+        with patch("asyncio.create_subprocess_exec", spawn):
+            assert await scanner.refresh_db() is True
+
+        assert spawn.await_count == 1
+        assert "--download-db-only" in list(spawn.call_args.args)
+        await scanner.close()
+
+    @pytest.mark.asyncio
+    async def test_unreadable_metadata_means_refresh_not_trust(self, tmp_path):
+        base = _seed_db(tmp_path / "trivy")  # metadata.json is "{}": no NextUpdate
+        scanner = TrivyScanner(cache_dir=base, workers=1)
+        spawn = AsyncMock(return_value=_FakeProc())
+        with patch("asyncio.create_subprocess_exec", spawn):
+            await scanner.refresh_db()
+        assert spawn.await_count == 1
+        await scanner.close()
+
+    @pytest.mark.asyncio
+    async def test_a_missing_db_file_is_never_current(self, tmp_path):
+        base = tmp_path / "trivy"
+        (base / "db").mkdir(parents=True)
+        self._metadata(base, "2999-01-01T00:00:00Z")  # metadata without trivy.db
+        scanner = TrivyScanner(cache_dir=base, workers=1)
+        spawn = AsyncMock(return_value=_FakeProc())
+        with patch("asyncio.create_subprocess_exec", spawn):
+            await scanner.refresh_db()
+        assert spawn.await_count == 1
+        await scanner.close()

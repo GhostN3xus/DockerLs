@@ -1,0 +1,153 @@
+{
+  "title": "DockerLs end-to-end timings (REAL CLI, real Trivy, real registries)",
+  "environment": {
+    "date": "2026-09-30T15:10:58+00:00",
+    "dockerls": "1.0.16",
+    "git_commit": "0bd421c",
+    "git_dirty": "yes",
+    "python": "3.11.15",
+    "os": "Linux 6.18.44-fc-v50",
+    "machine": "x86_64",
+    "cpus": "4",
+    "trivy": "Version: dev",
+    "grype": "Application:         grype",
+    "image": "mirror.gcr.io/library/alpine:3.20",
+    "network": "real, unthrottled by this script"
+  },
+  "parameters": {
+    "repeat": 3,
+    "engine": "both"
+  },
+  "rows": [
+    {
+      "scenario": "[python] analyze amd64, store cold",
+      "kind": "real",
+      "n": 3,
+      "median_s": 6.115822619000028,
+      "p95_s": 6.224763265001457,
+      "min_s": 6.005298387999574,
+      "max_s": 6.224763265001457,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['scan']"
+    },
+    {
+      "scenario": "[python] analyze amd64, store warm",
+      "kind": "real",
+      "n": 3,
+      "median_s": 3.494072776000394,
+      "p95_s": 3.975580958998762,
+      "min_s": 3.335882997000226,
+      "max_s": 3.975580958998762,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['cache']"
+    },
+    {
+      "scenario": "[python] analyze arm64, store cold",
+      "kind": "real",
+      "n": 3,
+      "median_s": 6.503997607000201,
+      "p95_s": 6.9828315770009795,
+      "min_s": 6.4778368580009555,
+      "max_s": 6.9828315770009795,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['scan']"
+    },
+    {
+      "scenario": "[python] compare 2 images, store cold",
+      "kind": "real",
+      "n": 3,
+      "median_s": 8.307948404000854,
+      "p95_s": 8.33706742999857,
+      "min_s": 7.606128830999296,
+      "max_s": 8.33706742999857,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin n/a"
+    },
+    {
+      "scenario": "[python] compare 2 images, store warm",
+      "kind": "real",
+      "n": 3,
+      "median_s": 4.559721884001192,
+      "p95_s": 4.622523136000382,
+      "min_s": 4.541728096999577,
+      "max_s": 4.622523136000382,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin n/a"
+    },
+    {
+      "scenario": "[go] analyze amd64, store cold",
+      "kind": "real",
+      "n": 3,
+      "median_s": 6.1012276010005735,
+      "p95_s": 6.159190840999145,
+      "min_s": 5.89464470799976,
+      "max_s": 6.159190840999145,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['scan']"
+    },
+    {
+      "scenario": "[go] analyze amd64, store warm",
+      "kind": "real",
+      "n": 3,
+      "median_s": 3.5486227269993833,
+      "p95_s": 3.6849361090007733,
+      "min_s": 3.3843233269999473,
+      "max_s": 3.6849361090007733,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['cache']"
+    },
+    {
+      "scenario": "[go] analyze arm64, store cold",
+      "kind": "real",
+      "n": 3,
+      "median_s": 6.4905667700004415,
+      "p95_s": 6.511423371999626,
+      "min_s": 5.714152069000193,
+      "max_s": 6.511423371999626,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin ['scan']"
+    },
+    {
+      "scenario": "[go] compare 2 images, store cold",
+      "kind": "real",
+      "n": 3,
+      "median_s": 7.518131363000066,
+      "p95_s": 7.764741607999895,
+      "min_s": 7.464692635001484,
+      "max_s": 7.764741607999895,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin n/a"
+    },
+    {
+      "scenario": "[go] compare 2 images, store warm",
+      "kind": "real",
+      "n": 3,
+      "median_s": 4.7630672119994415,
+      "p95_s": 4.768057069000861,
+      "min_s": 4.436373764001473,
+      "max_s": 4.768057069000861,
+      "counters": {
+        "exit": 0.0
+      },
+      "note": "exit codes [0]; origin n/a"
+    }
+  ]
+}
