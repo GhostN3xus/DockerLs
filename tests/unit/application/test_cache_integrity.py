@@ -93,7 +93,9 @@ class _Cache(CacheStoreInterface):
 
 def _resolver(**manifests: str) -> FakeRegistryResolver:
     resolver = FakeRegistryResolver()
-    resolver.publish("node", "22-alpine", digest_of("1"), **(manifests or {"linux_amd64": MANIFEST}))
+    resolver.publish(
+        "node", "22-alpine", digest_of("1"), **(manifests or {"linux_amd64": MANIFEST})
+    )
     return resolver
 
 
@@ -286,7 +288,9 @@ class TestCanonicalCacheIdentity:
 
         cache = await _primed()
         resolver = _resolver(linux_amd64=MANIFEST, linux_arm64=digest_of("c"))
-        use_case, scanner = _use_case(cache, resolver=resolver, platform=Platform.parse("linux/arm64"))
+        use_case, scanner = _use_case(
+            cache, resolver=resolver, platform=Platform.parse("linux/arm64")
+        )
 
         await use_case.execute("node")
 
@@ -471,7 +475,10 @@ class TestCacheIsKeyedByDigestNotTag:
     async def test_all_unconfirmed_images_are_ineligible_for_the_security_cache(self):
         cache = _Cache()
         resolver = FakeRegistryResolver()  # knows nothing: every tag is unconfirmed
-        tags = [DockerImage(name="node", tag="22-alpine"), DockerImage(name="node", tag="20-alpine")]
+        tags = [
+            DockerImage(name="node", tag="22-alpine"),
+            DockerImage(name="node", tag="20-alpine"),
+        ]
         use_case, scanner = _use_case(cache, resolver=resolver, repo=_Repo(tags))
 
         await use_case.execute("node")

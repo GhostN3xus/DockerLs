@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 from loguru import logger
 
+from dockerls.integrations.threat_intel.status import IntelStatus
 from dockerls.utils.rate_limit import CircuitBreaker, CircuitOpenError, RateLimiter
 from dockerls.utils.retry import (
     DEFAULT_BACKOFF_BASE,
@@ -59,6 +60,11 @@ class ThreatIntelClient:
     CACHE_TTL_SECONDS = 24 * 60 * 60
     _KEV_CACHE_KEY = "threat-intel:kev:v1"
     _EPSS_CACHE_PREFIX = "threat-intel:epss:v1:"
+    #: FIRST answered and has no score for this CVE. Remembered for an hour
+    #: only: new CVEs are scored within a day, so a longer memory would
+    #: keep reporting "not scored" for something FIRST has since scored.
+    _EPSS_ABSENT_PREFIX = "threat-intel:epss-absent:v1:"
+    EPSS_ABSENT_TTL_SECONDS = 3600
 
     def __init__(
         self,
@@ -100,6 +106,43 @@ class ThreatIntelClient:
         # multi-megabyte KEV catalogue -- a self-inflicted burst against
         # cisa.gov that the memo was written to prevent.
         self._kev_lock = asyncio.Lock()
+        # One client, and so one connection pool, for the whole run: KEV and
+        # every EPSS batch used to open (and tear down) their own.
+        self._http: httpx.AsyncClient | None = None
+        self._http_lock = asyncio.Lock()
+        # CVE -> a future for its EPSS lookup while one is in flight. Several
+        # candidates share most of their CRITICAL/HIGH CVEs, and enriching them
+        # concurrently used to send the same CVE to FIRST.org once per
+        # candidate; now the first asker fetches it and the rest wait.
+        self._epss_pending: dict[str, asyncio.Future[IntelStatus]] = {}
+        self._epss_status: dict[str, IntelStatus] = {}
+        # Scores learned this run, so a CVE asked for again is never re-asked
+        # even when there is no persistent cache behind the client.
+        self._epss_scores: dict[str, float] = {}
+        #: Requests sent, and lookups answered without one, for the run's
+        #: instrumentation.
+        self.requests: dict[str, int] = {"kev": 0, "epss": 0}
+        self.cache_hits = 0
+        self.joined = 0
+
+    async def close(self) -> None:
+        """Release the shared connection pool."""
+        client, self._http = self._http, None
+        if client is not None:
+            await client.aclose()
+
+    async def _client(self) -> httpx.AsyncClient:
+        if self._http is None:
+            async with self._http_lock:
+                if self._http is None:
+                    self._http = httpx.AsyncClient(timeout=self._timeout)
+        return self._http
+
+    def epss_status_of(self, cve_id: str) -> IntelStatus | None:
+        """What the EPSS lookup of `cve_id` established this run, or None if it
+        was never asked. `ABSENT` means FIRST answered and has no score --
+        which is not the same as the feed being down."""
+        return self._epss_status.get(cve_id.upper())
 
     async def _load_kev(self) -> set[str]:
         if self._kev_ids is not None:
@@ -172,37 +215,38 @@ class ThreatIntelClient:
             return set()
         try:
             await self._kev_limiter.acquire()
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                policy = retry_policy(self._max_attempts, self._backoff_base)
-                resp: httpx.Response = await policy(self._get_raising, client, self.KEV_URL)
-                data = resp.json()
-                if not isinstance(data, dict):
-                    raise ValueError(f"KEV payload was {type(data).__name__}, not an object")
-                entries = data.get("vulnerabilities", [])
-                if not isinstance(entries, list):
-                    raise ValueError(f"KEV payload 'vulnerabilities' was {type(entries).__name__}")
-                ids = {
-                    str(v.get("cveID", "")).upper()
-                    for v in entries
-                    if isinstance(v, dict) and v.get("cveID")
-                }
-                # A short catalogue is not a successful lookup either. The
-                # real feed carries thousands of entries, so a handful means
-                # a proxy error page, a truncated transfer or a captive
-                # portal parsed as JSON. Accepting it would mark every CVE
-                # not in that handful as `kev_status = FALSE` -- an
-                # affirmative "not known to be exploited" derived from a
-                # response that was never the catalogue.
-                self._kev_available = len(ids) >= self._min_kev_entries
-                self._kev_breaker.record_success()
-                if ids and not self._kev_available:
-                    logger.warning(
-                        f"CISA KEV answered with only {len(ids)} entries, far below the "
-                        f"{self._min_kev_entries} a real catalogue carries; treating "
-                        f"exploitation status as UNKNOWN rather than trusting it"
-                    )
-                    return set()
-                return ids
+            client = await self._client()
+            policy = retry_policy(self._max_attempts, self._backoff_base)
+            self.requests["kev"] += 1
+            resp: httpx.Response = await policy(self._get_raising, client, self.KEV_URL)
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise ValueError(f"KEV payload was {type(data).__name__}, not an object")
+            entries = data.get("vulnerabilities", [])
+            if not isinstance(entries, list):
+                raise ValueError(f"KEV payload 'vulnerabilities' was {type(entries).__name__}")
+            ids = {
+                str(v.get("cveID", "")).upper()
+                for v in entries
+                if isinstance(v, dict) and v.get("cveID")
+            }
+            # A short catalogue is not a successful lookup either. The
+            # real feed carries thousands of entries, so a handful means
+            # a proxy error page, a truncated transfer or a captive
+            # portal parsed as JSON. Accepting it would mark every CVE
+            # not in that handful as `kev_status = FALSE` -- an
+            # affirmative "not known to be exploited" derived from a
+            # response that was never the catalogue.
+            self._kev_available = len(ids) >= self._min_kev_entries
+            self._kev_breaker.record_success()
+            if ids and not self._kev_available:
+                logger.warning(
+                    f"CISA KEV answered with only {len(ids)} entries, far below the "
+                    f"{self._min_kev_entries} a real catalogue carries; treating "
+                    f"exploitation status as UNKNOWN rather than trusting it"
+                )
+                return set()
+            return ids
         except (httpx.HTTPError, ValueError) as e:
             self._kev_breaker.record_failure()
             logger.warning(
@@ -241,27 +285,88 @@ class ThreatIntelClient:
 
         wanted = sorted({cve.upper() for cve in cve_ids})
         scores: dict[str, float] = {}
-        if self._cache is not None:
-            cached = await asyncio.gather(*[self._epss_from_cache(cve) for cve in wanted])
-            for cve, hit in zip(wanted, cached, strict=True):
-                if hit is not None:
-                    scores[cve] = hit[0]
-                    self._percentiles[cve] = hit[1]
-        missing = [cve for cve in wanted if cve not in scores]
+        for cve in wanted:
+            if cve in self._epss_scores:
+                scores[cve] = self._epss_scores[cve]
+        remaining = [cve for cve in wanted if cve not in scores]
+        if self._cache is not None and remaining:
+            cached = await asyncio.gather(*[self._epss_from_cache(cve) for cve in remaining])
+            for cve, hit in zip(remaining, cached, strict=True):
+                if hit is None:
+                    continue
+                self.cache_hits += 1
+                if hit == "absent":
+                    self._epss_status[cve] = IntelStatus.ABSENT
+                    continue
+                scores[cve] = hit[0]
+                self._epss_scores[cve] = hit[0]
+                self._percentiles[cve] = hit[1]
+                self._epss_status[cve] = IntelStatus.FOUND
+        missing = [
+            cve
+            for cve in wanted
+            if cve not in scores and self._epss_status.get(cve) is not IntelStatus.ABSENT
+        ]
         if cached_hit := bool(scores):
             self._epss_available = True
 
-        if missing:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                for start in range(0, len(missing), self.EPSS_BATCH_SIZE):
-                    batch = missing[start : start + self.EPSS_BATCH_SIZE]
+        # Split what is left into what this call must fetch and what another
+        # call is already fetching: the second group is simply awaited.
+        loop = asyncio.get_running_loop()
+        owned: list[str] = []
+        joined: dict[str, asyncio.Future[IntelStatus]] = {}
+        for cve in missing:
+            pending = self._epss_pending.get(cve)
+            if pending is not None:
+                joined[cve] = pending
+                continue
+            self._epss_pending[cve] = loop.create_future()
+            owned.append(cve)
+
+        try:
+            if owned:
+                client = await self._client()
+                for start in range(0, len(owned), self.EPSS_BATCH_SIZE):
+                    batch = owned[start : start + self.EPSS_BATCH_SIZE]
                     # Um lote que falha não pode descartar os que já vieram: o
                     # sinal parcial ainda é melhor que nenhum.
-                    batch_scores = await self._epss_batch(client, batch)
-                    if batch_scores:
+                    batch_scores, failure = await self._epss_batch(client, batch)
+                    # An answer proves the feed is alive only if it carried at
+                    # least one usable score: an empty or unusable 200 is what
+                    # a broken proxy also produces, and neither availability
+                    # nor an "absent" verdict may rest on it.
+                    sane = failure is None and bool(batch_scores)
+                    if sane:
                         self._epss_available = True
                     scores.update(batch_scores)
+                    self._epss_scores.update(batch_scores)
                     await self._store_epss_cache(batch_scores)
+                    if sane:
+                        await self._store_epss_absent([c for c in batch if c not in batch_scores])
+                    for cve in batch:
+                        if cve in batch_scores:
+                            status = IntelStatus.FOUND
+                        elif failure is not None:
+                            status = failure
+                        elif sane:
+                            # The feed answered *and* was plausible, without
+                            # this CVE: a finding, not a failure.
+                            status = IntelStatus.ABSENT
+                        else:
+                            status = IntelStatus.INVALID_RESPONSE
+                        self._epss_status[cve] = status
+                        self._resolve_pending(cve, status)
+        finally:
+            for cve in owned:
+                # Anything not resolved above (a cancellation, an unexpected
+                # error) must still release its waiters, as a failure.
+                self._resolve_pending(cve, IntelStatus.NETWORK_ERROR)
+
+        for cve, future in joined.items():
+            self.joined += 1
+            await future
+            if cve in self._epss_scores:
+                scores[cve] = self._epss_scores[cve]
         if self._epss_available is None and not cached_hit:
             # Every batch came back empty and nothing was cached: either the
             # service is down or it knows none of these CVEs. Neither
@@ -269,11 +374,19 @@ class ThreatIntelClient:
             self._epss_available = False
         return scores
 
-    async def _epss_from_cache(self, cve: str) -> tuple[float, float] | None:
+    def _resolve_pending(self, cve: str, status: IntelStatus) -> None:
+        future = self._epss_pending.pop(cve, None)
+        if future is not None and not future.done():
+            future.set_result(status)
+
+    async def _epss_from_cache(self, cve: str) -> tuple[float, float] | Literal["absent"] | None:
         if self._cache is None:
             return None
         try:
             data = await self._cache.get(self._EPSS_CACHE_PREFIX + cve)
+            if data is None:
+                absent = await self._cache.get(self._EPSS_ABSENT_PREFIX + cve)
+                return "absent" if isinstance(absent, dict) and absent.get("absent") else None
         except Exception as e:  # pragma: no cover - an unreadable cache is a miss
             logger.debug(f"Could not read the cached EPSS score for {cve}: {e}")
             return None
@@ -300,20 +413,41 @@ class ThreatIntelClient:
             except Exception as e:  # pragma: no cover - a cache that will not write is not fatal
                 logger.debug(f"Could not cache the EPSS score for {cve}: {e}")
 
+    async def _store_epss_absent(self, cves: list[str]) -> None:
+        """Remember CVEs a *successful* EPSS answer did not contain. Never
+        called for a failed batch: an outage is not an absence."""
+        if self._cache is None:
+            return
+        for cve in cves:
+            try:
+                await self._cache.set(
+                    self._EPSS_ABSENT_PREFIX + cve,
+                    {"absent": True},
+                    ttl_seconds=self.EPSS_ABSENT_TTL_SECONDS,
+                )
+            except Exception as e:  # pragma: no cover - a cache that will not write is not fatal
+                logger.debug(f"Could not cache the EPSS absence for {cve}: {e}")
+
     def percentile_of(self, cve_id: str) -> float:
         """EPSS percentile for `cve_id`, or 0.0 when the source did not
         provide one. Only meaningful when `epss_available` is True."""
         return self._percentiles.get(cve_id.upper(), 0.0)
 
-    async def _epss_batch(self, client: httpx.AsyncClient, batch: list[str]) -> dict[str, float]:
+    async def _epss_batch(
+        self, client: httpx.AsyncClient, batch: list[str]
+    ) -> tuple[dict[str, float], IntelStatus | None]:
+        """One EPSS request: `(scores, None)` when FIRST answered, and
+        `({}, why)` when it did not, so a failure is never read as "these
+        CVEs have no score"."""
         try:
             self._epss_breaker.check("FIRST EPSS")
         except CircuitOpenError as e:
             logger.debug(str(e))
-            return {}
+            return {}, IntelStatus.UNAVAILABLE
         try:
             await self._epss_limiter.acquire()
             policy = retry_policy(self._max_attempts, self._backoff_base)
+            self.requests["epss"] += 1
             resp: httpx.Response = await policy(
                 self._get_raising,
                 client,
@@ -342,8 +476,17 @@ class ThreatIntelClient:
                 if percentile is not None:
                     self._percentiles[cve] = percentile
             self._epss_breaker.record_success()
-            return scores
-        except (httpx.HTTPError, ValueError, KeyError, TypeError) as e:
+            return scores, None
+        except httpx.HTTPStatusError as e:
+            self._epss_breaker.record_failure()
+            logger.debug(f"EPSS lookup failed for {len(batch)} CVEs: HTTP {e.response.status_code}")
+            limited = e.response.status_code == 429
+            return {}, IntelStatus.RATE_LIMITED if limited else IntelStatus.NETWORK_ERROR
+        except httpx.HTTPError as e:
             self._epss_breaker.record_failure()
             logger.debug(f"EPSS lookup unavailable for {len(batch)} CVEs, continuing without: {e}")
-            return {}
+            return {}, IntelStatus.NETWORK_ERROR
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            self._epss_breaker.record_failure()
+            logger.debug(f"EPSS answered with something unusable for {len(batch)} CVEs: {e}")
+            return {}, IntelStatus.INVALID_RESPONSE

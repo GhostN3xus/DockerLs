@@ -567,9 +567,7 @@ class TestDeadline:
 
     async def test_a_scan_is_not_started_when_the_rest_of_the_budget_cannot_hold_it(self):
         cache, resolver, scanner = _world()
-        service = _service(
-            scanner, resolver, cache, deadline=Deadline(2.0), min_scan_seconds=30.0
-        )
+        service = _service(scanner, resolver, cache, deadline=Deadline(2.0), min_scan_seconds=30.0)
 
         result = await service.measure(_image())
 
@@ -584,7 +582,11 @@ class TestDeadline:
         resolver.publish("app", "fast", digest_of("f"), linux_amd64=fast)
         scanner.findings[fast] = 1
         service = _service(
-            scanner, resolver, cache, deadline=Deadline(0.3), min_scan_seconds=0.05,
+            scanner,
+            resolver,
+            cache,
+            deadline=Deadline(0.3),
+            min_scan_seconds=0.05,
             max_concurrency=2,
         )
         scanner.latency = 0.0

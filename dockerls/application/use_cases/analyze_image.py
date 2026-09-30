@@ -195,7 +195,13 @@ class AnalyzeImageUseCase:
         once per image: closing there would leave the second comparison
         talking to a client that had already been shut down.
         """
-        await close_quietly(self._scanner, self._hardening, *sources_of(self._repository))
+        await close_quietly(
+            self._scanner,
+            self._hardening,
+            self._threat_intel,
+            self._osv,
+            *sources_of(self._repository),
+        )
 
     def _parse_reference(self, reference: str) -> tuple[str, str]:
         """Repositório e tag, sem confundir a porta do registry com uma tag.

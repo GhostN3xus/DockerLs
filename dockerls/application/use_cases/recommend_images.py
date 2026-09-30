@@ -679,7 +679,11 @@ class RecommendImagesUseCase:
 
     async def _close_scanners(self) -> None:
         secondary = self._cross_validator.scanner if self._cross_validator else None
-        await close_quietly(self._scanner, secondary, self._hardening)
+        # The intel clients keep one connection pool for the run; they are
+        # closed here, after the last enrichment, and never earlier.
+        await close_quietly(
+            self._scanner, secondary, self._hardening, self._threat_intel, self._osv
+        )
 
     async def _close_repositories(self) -> None:
         """Release the HTTP connection pools the image sources hold.
@@ -910,6 +914,18 @@ async def _enrich_with_threat_intel(
         return scan
 
     timestamp = datetime.now(tz=UTC).isoformat()
+    # Only feeds that answered are named: a source that was down is absent
+    # from the list, which is how "not consulted" stays visible.
+    sources = [
+        name
+        for name, answered in (
+            ("kev", kev_available),
+            ("epss", epss_available),
+            ("exploitdb", exploitdb_available),
+            ("osv", bool(osv_data)),
+        )
+        if answered
+    ]
     notable = set(notable_ids)
     updated = []
     for v in scan.vulnerabilities:
@@ -929,6 +945,7 @@ async def _enrich_with_threat_intel(
                     "epss_known": epss_available and score is not None,
                     "epss_percentile": threat_intel.percentile_of(key),
                     "threat_intel_timestamp": timestamp,
+                    "threat_intel_sources": sources,
                     **_exploitdb_fields(exploits.get(key), available=exploitdb_available),
                     **(
                         {

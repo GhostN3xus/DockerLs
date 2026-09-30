@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from dockerls.application.services.single_flight import SingleFlight
+from dockerls.utils.single_flight import SingleFlight
 
 
 async def test_concurrent_callers_share_one_run():

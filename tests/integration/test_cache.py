@@ -1,7 +1,6 @@
 import pytest
 
 from dockerls.cache.sqlite_cache import SQLiteCache
-from dockerls.domain.entities.image import DockerImage
 
 
 @pytest.fixture
@@ -101,7 +100,9 @@ class TestCacheValidationMiss:
         cache = SQLiteCache(tmp_path / "cache.db")
         store = MeasurementStore(cache)
         identity = ImageIdentity("docker.io", "library/node", "sha256:" + "a" * 64, "linux/amd64")
-        fingerprint = ScannerFingerprint(name="trivy", version="0.60", db_revision="r1", options="o")
+        fingerprint = ScannerFingerprint(
+            name="trivy", version="0.60", db_revision="r1", options="o"
+        )
         key = store._scan_key(identity, fingerprint)  # noqa: SLF001 - the key under test
         await cache.set(key, {"totally": "wrong-shape"})
 

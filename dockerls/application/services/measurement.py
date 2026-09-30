@@ -42,7 +42,6 @@ from dockerls.application.services.measurement_store import (
     MissReason,
     ScannerFingerprint,
 )
-from dockerls.application.services.single_flight import SingleFlight
 from dockerls.domain.entities.scan_result import ScanErrorKind, ScanResult, ScanStatus
 from dockerls.domain.value_objects.measured_identity import (
     IdentityStatus,
@@ -51,6 +50,7 @@ from dockerls.domain.value_objects.measured_identity import (
 )
 from dockerls.domain.value_objects.platform import DEFAULT_PLATFORM, Platform
 from dockerls.utils.deadline import Deadline, DeadlineExceededError, run_within
+from dockerls.utils.single_flight import SingleFlight
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
