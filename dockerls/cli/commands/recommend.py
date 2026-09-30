@@ -130,7 +130,10 @@ def recommend(
         FailOn.NONE, "--fail-on", help="Exit non-zero if the top result has vulns at/above severity"
     ),
     output_format: str = typer.Option(
-        OutputFormat.TABLE.value, "--format", "-f", help="Output format: table or json"
+        OutputFormat.TABLE.value,
+        "--format",
+        "-f",
+        help="Output format: table, json, summary (CI document) or ndjson (progressive events)",
     ),
     no_color: bool = typer.Option(False, "--no-color", help="Disable colored output"),
     no_progress: bool = typer.Option(False, "--no-progress", help="Disable the progress display"),

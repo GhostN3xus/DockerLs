@@ -74,7 +74,10 @@ FAIL_ON_THRESHOLDS = ("critical", "high", "medium", "low")
 def analyze(
     image: str = typer.Argument(help="Full image reference (e.g., node:22-alpine)"),
     output_format: str = typer.Option(
-        "table", "--format", "-f", help="Output format: table, json or sarif"
+        "table",
+        "--format",
+        "-f",
+        help="Output format: table, json, sarif, summary (CI document) or ndjson",
     ),
     output: str = typer.Option(
         "", "--output", "-o", help="Write the report (or, with --fix, the patch) to a file"
