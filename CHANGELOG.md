@@ -7,6 +7,11 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Ignore-rule YAML now uses the same bounded loader as remote catalogue data:
+  oversized files, recursive aliases and exponential alias expansion fail
+  closed instead of consuming unbounded memory or recursion depth.
+
 ### Added
 - `--platform os/arch[/variant]` on `analyze`, `compare`, `recommend`, `advisor`
   and `alternatives`. The requested, resolved and measured references are kept
@@ -65,6 +70,8 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
   of Typer's 2 (which is a verdict code here).
 
 ### Fixed
+- Recursive YAML aliases are detected while measuring expansion, preventing a
+  self-referential node graph from recursing indefinitely before validation.
 - End-of-life lookups for `alpine`, `httpd`, `kafka` and `cassandra` always
   returned no data: endoflife.date now answers those slugs with a 301 to
   `alpine-linux`, `apache-http-server`, `apache-kafka` and `apache-cassandra`,

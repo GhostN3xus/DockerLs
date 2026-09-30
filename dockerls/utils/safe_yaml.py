@@ -110,7 +110,7 @@ def safe_load_yaml(raw: str | bytes, *, origin: str = "<yaml>") -> Any:
     return data
 
 
-def _expanded_size(node: yaml.Node, memo: dict[int, int]) -> int:
+def _expanded_size(node: yaml.Node, memo: dict[int, int], active: set[int] | None = None) -> int:
     """How many nodes `node` would become once every alias is expanded.
 
     The composed graph shares anchored nodes, so each one is measured once
@@ -123,12 +123,25 @@ def _expanded_size(node: yaml.Node, memo: dict[int, int]) -> int:
     true size is a 400-million-digit intermediate nobody needs to compute in
     order to know it is too big.
     """
-    cached = memo.get(id(node))
+    active = active if active is not None else set()
+    node_id = id(node)
+    cached = memo.get(node_id)
     if cached is not None:
         return cached
 
+    # YAML permits recursive aliases (for example ``&a [*a]``). Such a
+    # document has no finite expanded form, and waiting until construction
+    # or the later depth walk would leave this traversal recursing forever.
+    # Treat a back-edge as larger than the configured expansion budget so
+    # the caller rejects it through the same fail-closed path as any other
+    # alias-expansion bomb.
+    if node_id in active:
+        return MAX_EXPANDED_NODES + 1
+    active.add(node_id)
+
     if isinstance(node, yaml.ScalarNode):
-        memo[id(node)] = 1
+        active.remove(node_id)
+        memo[node_id] = 1
         return 1
 
     total = 1
@@ -139,12 +152,13 @@ def _expanded_size(node: yaml.Node, memo: dict[int, int]) -> int:
         children = [child for pair in node.value for child in pair]
 
     for child in children:
-        total += _expanded_size(child, memo)
+        total += _expanded_size(child, memo, active)
         if total > MAX_EXPANDED_NODES:
             total = MAX_EXPANDED_NODES + 1
             break
 
-    memo[id(node)] = total
+    active.remove(node_id)
+    memo[node_id] = total
     return total
 
 
