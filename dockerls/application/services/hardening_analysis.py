@@ -28,6 +28,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from loguru import logger
+from pydantic import ValidationError
 
 from dockerls.domain.entities.declared_metadata import (
     DEBUG_TOOL_PACKAGES,
@@ -35,9 +36,12 @@ from dockerls.domain.entities.declared_metadata import (
     SHELL_PACKAGES,
 )
 from dockerls.domain.entities.image_facts import EvidenceSource, HardeningFacts
+from dockerls.domain.value_objects.measured_identity import IdentityStatus, ResolvedIdentity
+from dockerls.domain.value_objects.platform import DEFAULT_PLATFORM, Platform
 from dockerls.domain.value_objects.tristate import Tristate
 
 if TYPE_CHECKING:
+    from dockerls.application.services.measurement_store import MeasurementStore
     from dockerls.domain.entities.image import DockerImage
     from dockerls.domain.entities.scan_result import ScanResult
     from dockerls.integrations.registry.inspector import RegistryInspector
@@ -46,8 +50,35 @@ if TYPE_CHECKING:
 class HardeningAnalyzer:
     """Produces the digest and merged facts for one candidate."""
 
-    def __init__(self, inspector: RegistryInspector | None = None):
+    def __init__(
+        self,
+        inspector: RegistryInspector | None = None,
+        store: MeasurementStore | None = None,
+    ):
         self._inspector = inspector
+        # Config facts of a *confirmed* manifest digest are content-addressed
+        # and therefore safe to keep for a long time (the OCI layer of the
+        # shared store); nothing else the inspector says is persisted.
+        self._store = store
+
+    async def resolve_identity(
+        self, name: str, tag: str, digest: str = "", platform: Platform | None = None
+    ) -> ResolvedIdentity:
+        """Pin a tag (or a user-supplied digest) to one platform manifest.
+
+        Without an inspector there is nobody to ask, and the honest answer is
+        an unconfirmed identity carrying that reason.
+        """
+        wanted = platform or DEFAULT_PLATFORM
+        if self._inspector is None:
+            return ResolvedIdentity(
+                name=name,
+                tag=tag,
+                platform=wanted,
+                status=IdentityStatus.DIGEST_ONLY if digest else IdentityStatus.UNRESOLVED,
+                limitation="registry inspection is disabled, so the identity was not confirmed",
+            )
+        return await self._inspector.resolve_identity(name, tag, digest, wanted)
 
     async def resolve_digest(self, image: DockerImage) -> str:
         """The image's manifest digest, or "" when it cannot be resolved.
@@ -79,18 +110,43 @@ class HardeningAnalyzer:
         """
         digest, facts = "", HardeningFacts()
         if self._inspector is not None:
-            try:
-                digest, facts = await self._inspector.inspect(image)
-            except Exception as e:
-                # Inspection is enrichment. A registry that will not answer
-                # must cost the candidate its *facts*, never its analysis.
-                logger.warning(f"Could not inspect {image.full_reference}: {e}")
+            cached = await self._cached_facts(image)
+            if cached is not None:
+                digest, facts = image.digest, cached
+            else:
+                try:
+                    digest, facts = await self._inspector.inspect(image)
+                except Exception as e:
+                    # Inspection is enrichment. A registry that will not answer
+                    # must cost the candidate its *facts*, never its analysis.
+                    logger.warning(f"Could not inspect {image.full_reference}: {e}")
+                else:
+                    await self._store_facts(image, facts)
 
         if scan is not None:
             facts = _merge_scanner_evidence(facts, scan)
         if image.declared is not None:
             facts = _merge_declared(facts, image)
         return digest, facts
+
+    async def _cached_facts(self, image: DockerImage) -> HardeningFacts | None:
+        """Verified config facts for a confirmed digest, when already known."""
+        if self._store is None or not image.identity_confirmed:
+            return None
+        raw = await self._store.get_facts(image.digest, image.platform)
+        if raw is None:
+            return None
+        try:
+            facts = HardeningFacts.model_validate(raw)
+        except ValidationError:
+            return None
+        # A row that does not claim to be verified is not evidence.
+        return facts if facts.config_verified else None
+
+    async def _store_facts(self, image: DockerImage, facts: HardeningFacts) -> None:
+        if self._store is None or not image.identity_confirmed or not facts.config_verified:
+            return
+        await self._store.put_facts(image.digest, image.platform, facts.model_dump(mode="json"))
 
 
 def _merge_scanner_evidence(facts: HardeningFacts, scan: ScanResult) -> HardeningFacts:

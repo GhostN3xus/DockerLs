@@ -34,6 +34,8 @@ _CAUSES: dict[ScanErrorKind, str] = {
     ScanErrorKind.SCANNER_MISSING: "no scanner executable was found",
     ScanErrorKind.INVALID_OUTPUT: "the scanner produced output that could not be parsed",
     ScanErrorKind.BLOCKED_BY_POLICY: "the network policy refused this host",
+    ScanErrorKind.PLATFORM_UNAVAILABLE: "no manifest for the requested platform",
+    ScanErrorKind.DEADLINE_EXCEEDED: "the time budget ended before this scan could finish",
 }
 
 #: Quanto do stderr cru sobrevive quando não há causa classificada. O

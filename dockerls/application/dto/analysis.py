@@ -36,6 +36,37 @@ class DimensionReport(BaseModel):
     undetermined: list[str] = Field(default_factory=list)
 
 
+class MeasurementProvenance(BaseModel):
+    """Where a result came from and how far it can be trusted.
+
+    `requested`, `resolved` and `measured` are three different references and
+    are never merged: the first is what was typed, the second the immutable
+    reference the registry confirmed (empty when it could not), the third what
+    the scanner was actually handed.
+    """
+
+    #: `scan` (measured now), `cache` (reused from an earlier measurement) or
+    #: `shared` (another task in this run measured the same identity).
+    origin: str = "unknown"
+    measured_at: str = ""
+    scanner: str = ""
+    scanner_version: str = ""
+    #: When the vulnerability database was built; "" = could not be determined.
+    db_revision: str = ""
+    requested_reference: str = ""
+    resolved_reference: str = ""
+    measured_reference: str = ""
+    platform: str = ""
+    index_digest: str = ""
+    manifest_digest: str = ""
+    #: CONFIRMED / DIGEST_ONLY / UNRESOLVED / PLATFORM_MISMATCH / "" (never resolved).
+    identity_status: str = ""
+    #: Why the identity is not confirmed; also why a result was not stored.
+    limitation: str = ""
+    #: Why a cached measurement was *not* reused (e.g. DB_REVISION_CHANGED).
+    cache_note: str = ""
+
+
 class ImageAnalysis(BaseModel):
     image: DockerImage
     scan: ScanResult
@@ -115,6 +146,8 @@ class ImageAnalysis(BaseModel):
     # too: the same bytes can gain a CVE between two scans as the scanner's
     # database learns about it.
     vuln_trend_note: str = ""
+    #: Identity, scanner and freshness of the measurement behind this analysis.
+    provenance: MeasurementProvenance = Field(default_factory=MeasurementProvenance)
 
     @property
     def pinned_reference(self) -> str:

@@ -49,8 +49,8 @@ class FallbackScanner(ScannerInterface):
     async def is_available(self) -> bool:
         return await self._primary.is_available() or await self._secondary.is_available()
 
-    async def scan(self, image_reference: str) -> ScanResult:
-        result = await self._primary.scan(image_reference)
+    async def scan(self, image_reference: str, platform: str | None = None) -> ScanResult:
+        result = await _scan(self._primary, image_reference, platform)
         if result.is_verified or not result.error_kind.is_scanner_fault:
             return result
 
@@ -63,7 +63,7 @@ class FallbackScanner(ScannerInterface):
             logger.info("No secondary scanner available; keeping the primary result")
             return result
 
-        fallback = await self._secondary.scan(image_reference)
+        fallback = await _scan(self._secondary, image_reference, platform)
         if not fallback.is_verified:
             # Nenhum dos dois conseguiu: devolve o resultado do primário, que
             # é o que descreve a falha da ferramenta que deveria ter medido.
@@ -75,6 +75,19 @@ class FallbackScanner(ScannerInterface):
         self.fallback_successes += 1
         logger.info(f"{fallback.scanner} recovered {image_reference} after {result.scanner} failed")
         return fallback
+
+    async def version(self) -> str:
+        """Both tools' versions: a result may have come from either."""
+        parts = [await _describe(s, "version") for s in (self._primary, self._secondary)]
+        return "+".join(parts)
+
+    async def db_revision(self) -> str:
+        """Both databases' revisions; "" only when neither could be read."""
+        parts = [await _describe(s, "db_revision") for s in (self._primary, self._secondary)]
+        return "" if not any(parts) else "+".join(p or "unknown" for p in parts)
+
+    def options(self) -> str:
+        return "+".join(_options_of(s) for s in (self._primary, self._secondary))
 
     async def refresh_db(self) -> bool:
         """Prepara os dois bancos, em paralelo.
@@ -96,6 +109,27 @@ class FallbackScanner(ScannerInterface):
             close = getattr(scanner, "close", None)
             if callable(close):
                 await close()
+
+
+async def _scan(scanner: ScannerInterface, reference: str, platform: str | None) -> ScanResult:
+    """Pass `platform` only when there is one, so a scanner written before the
+    parameter existed keeps working for the default case."""
+    if platform is None:
+        return await scanner.scan(reference)
+    return await scanner.scan(reference, platform=platform)
+
+
+def _options_of(scanner: ScannerInterface) -> str:
+    method = getattr(scanner, "options", None)
+    return str(method()) if callable(method) else type(scanner).__name__
+
+
+async def _describe(scanner: ScannerInterface, attribute: str) -> str:
+    method = getattr(scanner, attribute, None)
+    if not callable(method):
+        return ""
+    value = await method()
+    return value if isinstance(value, str) else ""
 
 
 async def _refresh(scanner: ScannerInterface) -> bool:

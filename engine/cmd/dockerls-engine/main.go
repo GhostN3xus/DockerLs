@@ -124,6 +124,9 @@ func readRequest(in io.Reader) (protocol.Request, error) {
 	if req.ScannerPath == "" {
 		return req, errors.New("scanner_path is required: the engine does not resolve PATH itself")
 	}
+	if !scan.ValidPlatform(req.Platform) {
+		return req, errors.New("platform must be os/architecture[/variant] in lowercase")
+	}
 	if req.TimeoutSeconds <= 0 {
 		return req, errors.New("timeout_seconds must be positive")
 	}

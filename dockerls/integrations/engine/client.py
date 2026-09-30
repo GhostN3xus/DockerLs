@@ -94,6 +94,7 @@ class EngineClient:
         skip_db_update: bool,
         raw_dir: Path | None,
         env: Mapping[str, str] | None = None,
+        platform: str = "",
     ) -> None:
         self._engine_path = engine_path
         self._scanner = scanner
@@ -101,6 +102,9 @@ class EngineClient:
         self._timeout_seconds = timeout_seconds
         self._skip_db_update = skip_db_update
         self._raw_dir = raw_dir
+        # `os/arch[/variant]` de todo o lote, ou "". Já validada por quem
+        # constrói o cliente; a engine a valida de novo.
+        self._platform = platform
         # Somado ao ambiente herdado pela engine, nunca no lugar dele: o
         # Grype desliga a atualização automática da base por variável, e um
         # scanner sem PATH e sem HOME não roda.
@@ -130,6 +134,7 @@ class EngineClient:
             "workers": workers,
             "timeout_seconds": self._timeout_seconds,
             "skip_db_update": self._skip_db_update,
+            "platform": self._platform,
             "max_output_bytes": MAX_OUTPUT_BYTES,
             "cache_dirs": [str(d) for d in cache_dirs],
             "raw_dir": str(self._raw_dir) if self._raw_dir else "",

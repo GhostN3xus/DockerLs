@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -11,16 +12,21 @@ from loguru import logger
 from dockerls.domain.entities.scan_result import ScanErrorKind, ScanResult, ScanStatus
 from dockerls.domain.entities.vulnerability import Severity, Vulnerability
 from dockerls.domain.interfaces.scanner import ScannerInterface
+from dockerls.infrastructure.toolchain.db_metadata import read_grype_built_at
 from dockerls.integrations.engine.batch import EngineBatchScanner
 from dockerls.integrations.scan_errors import classify_scanner_error
-from dockerls.integrations.scan_target import blocked_scan_result, blocked_target_reason
+from dockerls.integrations.scan_target import (
+    blocked_scan_result,
+    blocked_target_reason,
+    invalid_reference_scan_result,
+)
 from dockerls.utils.executables import ExecutableNotFoundError, resolve_executable
 from dockerls.utils.subprocess_runner import (
     VERSION_TIMEOUT_SECONDS,
     OutputTooLargeError,
     run_capture,
 )
-from dockerls.utils.validation import sanitize_image_name
+from dockerls.utils.validation import sanitize_image_name, sanitize_platform
 
 if TYPE_CHECKING:
     from dockerls.infrastructure.evidence import EvidenceStore
@@ -121,6 +127,19 @@ class GrypeScanner(ScannerInterface):
         # schedule and would churn the cache key for no reason.
         return stdout.decode(errors="replace").strip().splitlines()[0].strip()
 
+    #: What a cached Grype measurement is a measurement *of*; see the Trivy
+    #: counterpart.
+    SCAN_OPTIONS = "grype;output=json;scope=squashed"
+
+    def options(self) -> str:
+        """The options that affect what a scan finds, as one stable string."""
+        return self.SCAN_OPTIONS
+
+    async def db_revision(self) -> str:
+        """When Grype's vulnerability database was built, or "" if unreadable."""
+        built, _ = await asyncio.to_thread(read_grype_built_at)
+        return built.isoformat() if built is not None else ""
+
     def _scan_env(self) -> dict[str, str] | None:
         """Environment for a scan invocation.
 
@@ -157,17 +176,21 @@ class GrypeScanner(ScannerInterface):
         logger.info("Grype DB ready; per-scan auto-update disabled")
         return True
 
-    async def scan(self, image_reference: str) -> ScanResult:
+    async def scan(self, image_reference: str, platform: str | None = None) -> ScanResult:
         safe_ref = sanitize_image_name(image_reference)
+        try:
+            platform_args = sanitize_platform(platform)
+        except ValueError as e:
+            return invalid_reference_scan_result(safe_ref, "grype", str(e))
         blocked = blocked_target_reason(safe_ref, self._guard)
         if blocked:
             return blocked_scan_result(safe_ref, "grype", blocked)
-        logger.info(f"Scanning {safe_ref} with Grype")
+        logger.info(f"Scanning {safe_ref} with Grype" + (f" ({platform})" if platform else ""))
         timestamp = datetime.now(tz=UTC).isoformat()
 
         try:
             returncode, stdout, stderr = await run_capture(
-                [resolve_executable("grype"), safe_ref, "-o", "json", "--quiet"],
+                [resolve_executable("grype"), safe_ref, "-o", "json", "--quiet", *platform_args],
                 timeout=self._timeout,
                 env=self._scan_env(),
             )
@@ -197,6 +220,7 @@ class GrypeScanner(ScannerInterface):
             raw = stdout.decode()
             data = json.loads(raw)
             result = self._parse_results(safe_ref, data)
+            result.platform = platform_args[1] if platform_args else ""
             if self._evidence is not None:
                 result.evidence_path = await self._evidence.record_scan(safe_ref, "grype", raw)
             return result

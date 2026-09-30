@@ -47,6 +47,21 @@ def _reject_option_lookalike(name: str) -> None:
             )
 
 
+def sanitize_platform(platform: str | None) -> list[str]:
+    """`["--platform", "os/arch[/variant]"]` for a scanner, or `[]`.
+
+    The value is parsed with the same strict rule the CLI uses and re-rendered,
+    so nothing the caller typed reaches argv except lowercase alphanumerics and
+    `._-/`. Raises `ValueError` for anything else: a malformed platform is a
+    refused scan, not a scan of the host's platform.
+    """
+    if platform is None or not platform.strip():
+        return []
+    from dockerls.domain.value_objects.platform import Platform
+
+    return ["--platform", str(Platform.parse(platform))]
+
+
 _MAX_THRESHOLD = 10000
 
 # Each worker holds a slot on an asyncio.Semaphore; 0 would deadlock the

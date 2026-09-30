@@ -62,6 +62,10 @@ def test_the_table_covers_every_cause_the_classifier_can_return() -> None:
         ScanErrorKind.INVALID_OUTPUT.value,
         ScanErrorKind.SCANNER_MISSING.value,
         ScanErrorKind.BLOCKED_BY_POLICY.value,
+        # Decided by the orchestration before/around the scan, never read
+        # out of a scanner's stderr.
+        ScanErrorKind.PLATFORM_UNAVAILABLE.value,
+        ScanErrorKind.DEADLINE_EXCEEDED.value,
     }
     expected = {kind.value for kind in ScanErrorKind} - not_from_stderr
     assert expected - covered == set()

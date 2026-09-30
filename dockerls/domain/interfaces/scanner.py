@@ -9,7 +9,14 @@ if TYPE_CHECKING:
 
 class ScannerInterface(ABC):
     @abstractmethod
-    async def scan(self, image_reference: str) -> ScanResult: ...
+    async def scan(self, image_reference: str, platform: str | None = None) -> ScanResult:
+        """Measure `image_reference`.
+
+        `platform` is `os/architecture[/variant]`. When given it is passed to
+        the tool so a multi-arch reference is measured for *that* platform; a
+        scanner that cannot honour it must fail rather than measure the host's
+        platform and let the result be filed under another one.
+        """
 
     @abstractmethod
     async def is_available(self) -> bool: ...

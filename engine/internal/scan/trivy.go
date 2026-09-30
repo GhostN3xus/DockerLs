@@ -38,6 +38,7 @@ type Scanner struct {
 	maxOutputBytes int64
 	rawDir         string
 	env            map[string]string
+	platform       string
 }
 
 // NewScanner monta o scanner a partir da requisição já validada.
@@ -50,7 +51,19 @@ func NewScanner(req protocol.Request, maxOutputBytes int64) *Scanner {
 		maxOutputBytes: maxOutputBytes,
 		rawDir:         req.RawDir,
 		env:            req.Env,
+		platform:       req.Platform,
 	}
+}
+
+// platformPattern é a mesma regra estrita do lado Python: minúsculas,
+// dígitos e `._-`, em duas ou três partes. Segunda tranca -- a CLI já
+// validou, e o que não passou por ela morre aqui em vez de virar argv.
+var platformPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,31}/[a-z0-9][a-z0-9_.-]{0,31}(/[a-z0-9][a-z0-9_.-]{0,31})?$`)
+
+// ValidPlatform diz se `p` pode ir para o argv de um scanner. Vazio é válido:
+// significa "sem --platform".
+func ValidPlatform(p string) bool {
+	return p == "" || platformPattern.MatchString(p)
 }
 
 // argv monta a linha de comando do scanner escolhido.
@@ -59,7 +72,11 @@ func (s *Scanner) argv(reference, cacheDir string) []string {
 		// O Grype não tem `--cache-dir`: a base dele mora num diretório
 		// único, e o que desliga a atualização automática são variáveis de
 		// ambiente, não flags.
-		return []string{s.path, reference, "-o", "json", "--quiet"}
+		argv := []string{s.path, reference, "-o", "json", "--quiet"}
+		if s.platform != "" {
+			argv = append(argv, "--platform", s.platform)
+		}
+		return argv
 	}
 
 	argv := []string{
@@ -68,6 +85,9 @@ func (s *Scanner) argv(reference, cacheDir string) []string {
 		"--format", "json",
 		"--severity", "CRITICAL,HIGH,MEDIUM,LOW",
 		"--quiet",
+	}
+	if s.platform != "" {
+		argv = append(argv, "--platform", s.platform)
 	}
 	if cacheDir != "" {
 		argv = append(argv, "--cache-dir", cacheDir)
@@ -98,6 +118,12 @@ func (s *Scanner) parse(reference string, raw []byte, timestamp string) (protoco
 // verificado em vez de limpo.
 func (s *Scanner) Scan(ctx context.Context, reference, cacheDir string) protocol.Result {
 	timestamp := nowISO()
+
+	if !ValidPlatform(s.platform) {
+		return failure(s.name, reference, timestamp, protocol.StatusError,
+			protocol.KindInvalidOutput,
+			"platform rejected by the engine: not os/architecture[/variant]")
+	}
 
 	if !referencePattern.MatchString(reference) {
 		return failure(s.name, reference, timestamp, protocol.StatusError,
