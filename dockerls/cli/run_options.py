@@ -48,9 +48,15 @@ def _fail(message: str) -> typer.Exit:
     return typer.Exit(EXIT_ERROR)
 
 
-def parse_time_budget(value: float | None) -> float | None:
-    if value is None:
+def parse_time_budget(raw: str | float | None) -> float | None:
+    """Seconds from the command line. Taken as text and parsed here, because
+    Typer's own "not a valid float" exits 2 -- a verdict code in this CLI."""
+    if raw is None:
         return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as e:
+        raise _fail(f"--time-budget must be a number of seconds, not {str(raw)[:40]!r}") from e
     if not math.isfinite(value) or value <= 0:
         raise _fail("--time-budget must be a positive number of seconds")
     if value > MAX_TIME_BUDGET_SECONDS:
@@ -61,7 +67,7 @@ def parse_time_budget(value: float | None) -> float | None:
 def parse_run_options(
     *,
     platform: str | None = None,
-    time_budget: float | None = None,
+    time_budget: str | float | None = None,
     profile: str | None = None,
     runtime_version: str | None = None,
     distro: str | None = None,

@@ -170,7 +170,7 @@ def recommend(
         "--platform",
         help="os/architecture, with an optional /variant, e.g. linux/arm64 (default: linux/amd64)",
     ),
-    time_budget: float | None = typer.Option(
+    time_budget: str | None = typer.Option(
         None,
         "--time-budget",
         help=(
