@@ -44,6 +44,7 @@ immutable evidence.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -83,6 +84,7 @@ FACTS_TTL_SECONDS = 7 * 24 * 3600
 INTEL_MAX_AGE_SECONDS = 6 * 3600
 
 _MAX_DIAGNOSTICS = 50
+_CANONICAL = re.compile(r"^sha256:[a-f0-9]{64}$")
 
 
 class MissReason(StrEnum):
@@ -112,10 +114,22 @@ class ScannerFingerprint:
     #: When the vulnerability database in use was built. "" = unknown.
     db_revision: str = ""
     options: str = ""
+    #: `(tool, version, database revision)` for each tool behind this scanner.
+    #: A fallback scanner is two tools, and a result came from exactly one of
+    #: them: provenance must report *that* tool's version and database, not a
+    #: composite that no single measurement was made with.
+    components: tuple[tuple[str, str, str], ...] = ()
 
     @property
     def revision_known(self) -> bool:
         return bool(self.db_revision)
+
+    def component(self, tool: str) -> tuple[str, str] | None:
+        """`(version, database revision)` of the tool named `tool`, if known."""
+        for name, version, revision in self.components:
+            if name == tool:
+                return version, revision
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,6 +337,72 @@ class MeasurementStore:
         return True
 
     # ---- layer 2: registry metadata ---------------------------------------
+
+    #: A digest names fixed bytes, so what it maps to for a platform never
+    #: changes; the TTL only bounds how long unused rows linger.
+    MAPPING_TTL_SECONDS = 30 * 24 * 3600
+
+    @staticmethod
+    def _mapping_key(host: str, repository: str, digest: str, platform: str) -> str:
+        return f"m:oci:map:v{SCHEMA_VERSION}:{host}/{repository}@{digest}|{platform}"
+
+    async def get_mapping(
+        self, host: str, repository: str, digest: str, platform: str
+    ) -> tuple[str, str] | None:
+        """`(index digest, manifest digest)` verified earlier for `digest`.
+
+        Untrusted on the way back: the row must say it is for exactly this
+        digest and platform, and both digests it carries must be canonical --
+        anything else is a miss.
+        """
+        if self._cache is None:
+            return None
+        try:
+            raw = await self._cache.get(self._mapping_key(host, repository, digest, platform))
+        except Exception:
+            return None
+        if not isinstance(raw, dict) or raw.get("schema_version") != SCHEMA_VERSION:
+            return None
+        if raw.get("top_digest") != digest or raw.get("platform") != platform:
+            return None
+        index_digest = raw.get("index_digest", "")
+        manifest_digest = raw.get("manifest_digest", "")
+        if not isinstance(manifest_digest, str) or not _CANONICAL.fullmatch(manifest_digest):
+            return None
+        if not isinstance(index_digest, str) or (
+            index_digest and not _CANONICAL.fullmatch(index_digest)
+        ):
+            return None
+        return index_digest, manifest_digest
+
+    async def put_mapping(
+        self,
+        host: str,
+        repository: str,
+        digest: str,
+        platform: str,
+        *,
+        index_digest: str,
+        manifest_digest: str,
+    ) -> None:
+        if self._cache is None:
+            return
+        body = {
+            "schema_version": SCHEMA_VERSION,
+            "top_digest": digest,
+            "platform": platform,
+            "index_digest": index_digest,
+            "manifest_digest": manifest_digest,
+        }
+        try:
+            await self._cache.set(
+                self._mapping_key(host, repository, digest, platform),
+                body,
+                ttl_seconds=self.MAPPING_TTL_SECONDS,
+            )
+        except Exception as e:
+            self.writes_failed += 1
+            self._note(f"could not remember the mapping of {digest[:19]}: {e}")
 
     @staticmethod
     def _facts_key(digest: str, platform: str) -> str:

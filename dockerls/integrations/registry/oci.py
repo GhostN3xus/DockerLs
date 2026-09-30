@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -165,6 +167,10 @@ class OCIRegistryClient:
         self._backoff_base = backoff_base
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
+        # repository -> (bearer token, monotonic expiry). Anonymous tokens are
+        # scoped to one repository and short-lived; reusing one turns three
+        # requests per manifest into one.
+        self._tokens: dict[str, tuple[str, float]] = {}
         self._listings: dict[str, dict[str, Any] | None] = {}
         self._listing_locks: dict[str, asyncio.Lock] = {}
         # Repositories whose cached listing is known-complete (fetched
@@ -328,6 +334,39 @@ class OCIRegistryClient:
             return cached, True
         return None, False
 
+    @dataclass(frozen=True)
+    class Result:
+        """What one request established: the response, or *why there is none*.
+
+        `status` is the HTTP status when the registry answered at all;
+        `reason` says what a caller should tell the user when it did not. The
+        distinction that matters most in practice is `rate_limited`: Docker
+        Hub throttles anonymous manifest pulls, and "the registry throttled
+        us" must not read as "the tag does not exist".
+        """
+
+        response: httpx.Response | None
+        status: int | None = None
+        reason: str = ""
+
+        @property
+        def rate_limited(self) -> bool:
+            return self.status == 429
+
+    #: How long an anonymous bearer token is reused. Registry tokens live for
+    #: minutes; this is shorter than the shortest common lifetime, so a cached
+    #: token is never used past the point a registry would refuse it.
+    TOKEN_REUSE_SECONDS = 240.0
+
+    @staticmethod
+    def _repository_of(path: str) -> str:
+        """The repository scope a token is issued for: `library/alpine` for
+        `library/alpine/manifests/latest`."""
+        for marker in ("/manifests/", "/blobs/", "/tags/"):
+            if marker in path:
+                return path.split(marker, 1)[0]
+        return path
+
     async def get(
         self,
         path: str,
@@ -336,42 +375,69 @@ class OCIRegistryClient:
         head: bool = False,
         max_bytes: int = MAX_BLOB_BYTES,
     ) -> httpx.Response | None:
+        """`get_result(...).response`: the response, or None on any failure."""
+        return (await self.get_result(path, accept=accept, head=head, max_bytes=max_bytes)).response
+
+    async def get_result(
+        self,
+        path: str,
+        *,
+        accept: str = "",
+        head: bool = False,
+        max_bytes: int = MAX_BLOB_BYTES,
+    ) -> Result:
         """One authenticated request against `/v2/<path>` on this registry.
 
-        Performs the same anonymous token dance `_fetch_tags` uses, and
-        bounds the response body: a manifest or config blob is a few
-        kilobytes, and a registry answering with megabytes is either broken
-        or hostile. Returns None on any failure, including an oversized
-        body -- callers treat that as "could not determine", never as an
-        empty result.
+        Performs the same anonymous token dance `_fetch_tags` uses -- once per
+        repository, then reusing the token for a few minutes instead of paying
+        a 401, a token request and a retry for every manifest -- and bounds the
+        response body: a manifest or config blob is a few kilobytes, and a
+        registry answering with megabytes is either broken or hostile. A
+        failure of any kind (including an oversized body) yields no response
+        and a reason -- callers treat that as "could not determine", never as
+        an empty result.
         """
         url = f"https://{self._host}/v2/{path}"
         headers = {"Accept": accept} if accept else {}
         method = "HEAD" if head else "GET"
+        repository = self._repository_of(path)
         try:
             client = await self._get_client()
-            resp = await self._request(client, method, url, headers)
+            cached = self._tokens.get(repository)
+            fresh = cached is not None and cached[1] > time.monotonic()
+            sent = (
+                {**headers, "Authorization": f"Bearer {cached[0]}"} if fresh and cached else headers
+            )
+            resp = await self._request(client, method, url, sent)
             if resp.status_code == 401:
                 token = await self._token(client, resp.headers.get("WWW-Authenticate", ""))
                 if not token:
                     logger.info(f"No anonymous token available for {self._host}/{path}")
-                    return None
+                    return self.Result(None, 401, "the registry requires authentication")
+                self._tokens[repository] = (token, time.monotonic() + self.TOKEN_REUSE_SECONDS)
                 resp = await self._request(
                     client, method, url, {**headers, "Authorization": f"Bearer {token}"}
                 )
         except (httpx.HTTPError, ValueError, CircuitOpenError) as e:
             logger.warning(f"Registry request failed for {self._host}/{path}: {e}")
-            return None
+            return self.Result(None, None, "the registry could not be reached")
 
         if not resp.is_success:
             logger.info(f"Registry answered {resp.status_code} for {self._host}/{path}")
-            return None
+            if resp.status_code == 429:
+                return self.Result(
+                    None,
+                    429,
+                    "the registry is rate limiting pulls (HTTP 429); wait, or authenticate "
+                    "with `dockerls login` for a higher limit",
+                )
+            return self.Result(None, resp.status_code, f"the registry answered {resp.status_code}")
         if not head and len(resp.content) > max_bytes:
             logger.warning(
                 f"Registry response for {self._host}/{path} exceeded {max_bytes} bytes; discarded"
             )
-            return None
-        return resp
+            return self.Result(None, resp.status_code, "the registry response was too large")
+        return self.Result(resp, resp.status_code)
 
     @staticmethod
     def _next_page_url(resp: httpx.Response, base_url: str) -> str | None:

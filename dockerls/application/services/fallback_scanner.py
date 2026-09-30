@@ -86,6 +86,16 @@ class FallbackScanner(ScannerInterface):
         parts = [await _describe(s, "db_revision") for s in (self._primary, self._secondary)]
         return "" if not any(parts) else "+".join(p or "unknown" for p in parts)
 
+    async def components(self) -> dict[str, tuple[str, str]]:
+        """Each tool's own version and database revision: a result came from
+        exactly one of them, and provenance names that one."""
+        merged: dict[str, tuple[str, str]] = {}
+        for scanner in (self._primary, self._secondary):
+            method = getattr(scanner, "components", None)
+            if callable(method):
+                merged.update(await method())
+        return merged
+
     def options(self) -> str:
         return "+".join(_options_of(s) for s in (self._primary, self._secondary))
 

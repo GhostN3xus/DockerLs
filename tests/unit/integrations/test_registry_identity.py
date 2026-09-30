@@ -61,7 +61,10 @@ class FakeRegistry:
         self.tags: dict[str, bytes] = {}
         self.by_digest: dict[str, bytes] = {}
         self.requests: list[str] = []
-        self.header_override: str | None = None
+        self.calls: list[tuple[str, str]] = []  # (method, path)
+        self.header_override: str | None = None  # what a GET claims its digest is
+        self.head_digest_override: str | None = None  # what a HEAD claims
+        self.status_override: int | None = None
         self.online = True
 
     def publish(self, tag: str, document: dict) -> str:
@@ -74,22 +77,28 @@ class FakeRegistry:
     def transport(self) -> httpx.MockTransport:
         def handler(request: httpx.Request) -> httpx.Response:
             self.requests.append(request.url.path)
+            self.calls.append((request.method, request.url.path))
             if not self.online:
                 return httpx.Response(500)
+            if self.status_override is not None:
+                return httpx.Response(self.status_override)
             if "/manifests/" not in request.url.path:
                 return httpx.Response(404)
             reference = request.url.path.rsplit("/", 1)[-1]
             payload = self.tags.get(reference) or self.by_digest.get(reference)
             if payload is None:
                 return httpx.Response(404)
+            if request.method == "HEAD":
+                digest = self.head_digest_override or _digest(payload)
+                return httpx.Response(200, headers={"Docker-Content-Digest": digest})
             digest = self.header_override or _digest(payload)
             return httpx.Response(200, content=payload, headers={"Docker-Content-Digest": digest})
 
         return httpx.MockTransport(handler)
 
 
-def _inspector(registry: FakeRegistry) -> RegistryInspector:
-    inspector = RegistryInspector(max_attempts=1, backoff_base=0.0)
+def _inspector(registry: FakeRegistry, store=None) -> RegistryInspector:
+    inspector = RegistryInspector(max_attempts=1, backoff_base=0.0, mapping_store=store)
     transport = registry.transport()
 
     async def client(host: str):
@@ -244,6 +253,16 @@ class TestIntegrity:
         assert not identity.confirmed
         assert "do not hash" in identity.limitation
 
+    async def test_a_head_that_names_a_digest_whose_bytes_are_not_served_is_refused(self):
+        registry = FakeRegistry()
+        registry.publish("22", STANDARD_INDEX)
+        registry.head_digest_override = "sha256:" + "e" * 64  # HEAD points somewhere else
+
+        identity = await _resolve(_inspector(registry))
+
+        assert not identity.confirmed
+        assert "did not return the manifest" in identity.limitation
+
     async def test_an_unreachable_registry_leaves_the_identity_unresolved(self):
         registry = FakeRegistry()
         registry.online = False
@@ -304,7 +323,7 @@ class TestResolvedOncePerRun:
         results = await asyncio.gather(*(_resolve(inspector) for _ in range(10)))
 
         assert len({r.manifest_digest for r in results}) == 1
-        assert len([p for p in registry.requests if "/manifests/" in p]) == 1
+        assert [m for m, p in registry.calls if "/manifests/" in p] == ["HEAD", "GET"]
 
 
 @pytest.mark.parametrize("platform", ["linux/amd64", "linux/arm64"])
@@ -348,3 +367,127 @@ async def test_inspect_reads_the_config_of_the_requested_platform(platform):
     )
 
     assert facts.user == f"user-{platform.split('/')[1]}"
+
+
+class TestRegistryPullQuotaIsSpentCarefully:
+    """Docker Hub throttles anonymous manifest GETs, not HEADs. Identity is
+    therefore asked with a HEAD, remembered by digest, and fetched only once."""
+
+    async def test_a_first_resolution_costs_one_head_and_one_get_by_digest(self):
+        registry = FakeRegistry()
+        index_digest = registry.publish("22", STANDARD_INDEX)
+
+        await _resolve(_inspector(registry))
+
+        manifest_calls = [
+            (m, p.rsplit("/", 1)[-1]) for m, p in registry.calls if "/manifests/" in p
+        ]
+        assert manifest_calls == [("HEAD", "22"), ("GET", index_digest)], (
+            "the GET must name the digest the HEAD returned, so a tag that moves in "
+            "between cannot change the bytes fetched"
+        )
+
+    async def test_a_remembered_digest_needs_no_get_at_all(self):
+        from dockerls.application.services.measurement_store import MeasurementStore
+        from tests.unit.application.measurement_fakes import InMemoryCache
+
+        registry = FakeRegistry()
+        registry.publish("22", STANDARD_INDEX)
+        store = MeasurementStore(InMemoryCache())
+        first = await _resolve(_inspector(registry, store))
+        registry.calls.clear()
+
+        second = await _resolve(_inspector(registry, store))  # a new run, same store
+
+        assert second.manifest_digest == first.manifest_digest == CHILD_AMD64
+        assert second.index_digest == first.index_digest
+        assert [m for m, _ in registry.calls] == ["HEAD"], "only the free request was made"
+
+    async def test_a_moved_tag_is_a_new_digest_and_is_fetched_afresh(self):
+        from dockerls.application.services.measurement_store import MeasurementStore
+        from tests.unit.application.measurement_fakes import InMemoryCache
+
+        registry = FakeRegistry()
+        registry.publish("22", STANDARD_INDEX)
+        store = MeasurementStore(InMemoryCache())
+        await _resolve(_inspector(registry, store))
+        moved = _index(("sha256:" + "9" * 64, "linux", "amd64", ""))
+        registry.publish("22", moved)
+        registry.calls.clear()
+
+        identity = await _resolve(_inspector(registry, store))
+
+        assert identity.manifest_digest == "sha256:" + "9" * 64
+        assert [m for m, _ in registry.calls] == ["HEAD", "GET"]
+
+    async def test_a_mapping_is_per_platform(self):
+        from dockerls.application.services.measurement_store import MeasurementStore
+        from tests.unit.application.measurement_fakes import InMemoryCache
+
+        registry = FakeRegistry()
+        registry.publish("22", STANDARD_INDEX)
+        store = MeasurementStore(InMemoryCache())
+        await _resolve(_inspector(registry, store), platform="linux/amd64")
+
+        arm = await _resolve(_inspector(registry, store), platform="linux/arm64")
+
+        assert arm.manifest_digest == CHILD_ARM64, "amd64's mapping must not answer for arm64"
+
+    async def test_a_tampered_mapping_row_is_a_miss_not_an_identity(self):
+        from dockerls.application.services.measurement_store import MeasurementStore
+        from tests.unit.application.measurement_fakes import InMemoryCache
+
+        registry = FakeRegistry()
+        registry.publish("22", STANDARD_INDEX)
+        cache = InMemoryCache()
+        store = MeasurementStore(cache)
+        await _resolve(_inspector(registry, store))
+        (key,) = [k for k in cache.rows if k.startswith("m:oci:map:")]
+        cache.rows[key]["manifest_digest"] = "sha256:not-a-digest"
+        registry.calls.clear()
+
+        identity = await _resolve(_inspector(registry, store))
+
+        assert identity.manifest_digest == CHILD_AMD64
+        assert "GET" in [m for m, _ in registry.calls]
+
+    async def test_rate_limiting_is_named_and_never_mistaken_for_a_missing_tag(self):
+        registry = FakeRegistry()
+        registry.publish("22", STANDARD_INDEX)
+        registry.status_override = 429
+
+        identity = await _resolve(_inspector(registry))
+
+        assert not identity.confirmed
+        assert "rate limiting" in identity.limitation
+        assert "HTTP 429" in identity.limitation
+
+    async def test_an_anonymous_token_is_reused_instead_of_fetched_for_every_manifest(self):
+        token_requests = 0
+        manifests = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal token_requests, manifests
+            if request.url.host == "auth.example":
+                token_requests += 1
+                return httpx.Response(200, json={"token": "T"})
+            if request.headers.get("Authorization") != "Bearer T":
+                return httpx.Response(
+                    401,
+                    headers={
+                        "WWW-Authenticate": 'Bearer realm="https://auth.example/token",service="r"'
+                    },
+                )
+            manifests += 1
+            return httpx.Response(
+                200, headers={"Docker-Content-Digest": CHILD_AMD64}, content=b"{}"
+            )
+
+        client = OCIRegistryClient("registry.example")
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))  # noqa: SLF001
+
+        for _ in range(5):
+            assert await client.get("team/app/manifests/1", head=True) is not None
+
+        assert token_requests == 1
+        assert manifests == 5

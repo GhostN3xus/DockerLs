@@ -140,6 +140,10 @@ class GrypeScanner(ScannerInterface):
         built, _ = await asyncio.to_thread(read_grype_built_at)
         return built.isoformat() if built is not None else ""
 
+    async def components(self) -> dict[str, tuple[str, str]]:
+        """This tool's own version and database revision, by name."""
+        return {"grype": (await self.version(), await self.db_revision())}
+
     def _scan_env(self) -> dict[str, str] | None:
         """Environment for a scan invocation.
 

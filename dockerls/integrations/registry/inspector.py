@@ -43,6 +43,7 @@ from dockerls.integrations.registry.oci import OCIRegistryClient
 from dockerls.utils.retry import DEFAULT_BACKOFF_BASE, DEFAULT_MAX_ATTEMPTS
 
 if TYPE_CHECKING:
+    from dockerls.application.services.measurement_store import MeasurementStore
     from dockerls.domain.entities.image import DockerImage
 
 #: Docker Hub's registry endpoint. Distinct from `hub.docker.com`, which is
@@ -85,8 +86,12 @@ class RegistryInspector:
         credentials: dict[str, tuple[str, str]] | None = None,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         backoff_base: float = DEFAULT_BACKOFF_BASE,
+        mapping_store: MeasurementStore | None = None,
     ):
         self._timeout = timeout
+        # Where verified digest -> platform-manifest mappings are remembered
+        # between runs. None means none are, and every new run re-verifies.
+        self._mapping_store = mapping_store
         self._max_attempts = max_attempts
         self._backoff_base = backoff_base
         # Where this inspector is permitted to send a request. A reference is
@@ -226,32 +231,72 @@ class RegistryInspector:
     async def _resolve_identity(
         self, base: ResolvedIdentity, host: str, repository: str, reference: str, *, digest: str
     ) -> ResolvedIdentity:
+        """HEAD, then the remembered mapping, then -- only if needed -- one GET.
+
+        Docker Hub throttles anonymous *manifest GETs*; HEAD requests are free.
+        So the tag is first asked with a HEAD, which names the digest it points
+        at right now. A digest is a content address, so what an index or
+        manifest with that digest maps to for a platform never changes: once
+        verified it is remembered (by digest, in the shared store), and a later
+        run pays a HEAD and nothing else. Only a digest never seen before costs
+        a GET -- and that GET is **by digest**, so the bytes fetched are exactly
+        the ones the HEAD named even if the tag moves in between.
+        """
         client = await self._client(host)
+        unconfirmed = IdentityStatus.DIGEST_ONLY if digest else IdentityStatus.UNRESOLVED
         if client is None:
             return _with(
                 base,
                 limitation=f"{host} was not contacted (refused by network policy or invalid host)",
-                status=IdentityStatus.DIGEST_ONLY if digest else IdentityStatus.UNRESOLVED,
+                status=unconfirmed,
                 manifest_digest="",
             )
-        resp = await client.get(f"{repository}/manifests/{reference}", accept=MANIFEST_ACCEPT)
+
+        top_digest = digest
+        if not top_digest:
+            head = await client.get_result(
+                f"{repository}/manifests/{reference}", accept=MANIFEST_ACCEPT, head=True
+            )
+            if head.response is None:
+                return _with(
+                    base,
+                    limitation=f"no digest for {reference}: {head.reason}",
+                    status=unconfirmed,
+                )
+            top_digest = _clean_digest(head.response.headers.get("Docker-Content-Digest", ""))
+            if not top_digest:
+                return _with(
+                    base,
+                    limitation=f"the registry did not state a digest for {reference}",
+                    status=unconfirmed,
+                )
+
+        remembered = await self._remembered(host, repository, top_digest, base.platform)
+        if remembered is not None:
+            return remembered_identity(base, *remembered)
+
+        got = await client.get_result(
+            f"{repository}/manifests/{top_digest}", accept=MANIFEST_ACCEPT
+        )
+        resp = got.response
         if resp is None:
             return _with(
                 base,
-                limitation=f"the registry did not return a manifest for {reference}",
-                status=IdentityStatus.DIGEST_ONLY if digest else IdentityStatus.UNRESOLVED,
+                limitation=f"the registry did not return the manifest {top_digest[:19]}...: "
+                f"{got.reason}",
+                status=unconfirmed,
             )
 
         # Content addressing, checked: the digest is the hash of the bytes we
         # were served, not merely a header the far end chose to send.
         computed = f"sha256:{hashlib.sha256(resp.content).hexdigest()}"
         header = _clean_digest(resp.headers.get("Docker-Content-Digest", ""))
-        if (digest and computed != digest) or (header and header != computed):
+        if computed != top_digest or (header and header != computed):
             return _with(
                 base,
                 limitation=(
                     "the manifest bytes served do not hash to the digest that named them "
-                    f"(expected {digest or header}, computed {computed})"
+                    f"(expected {top_digest}, computed {computed})"
                 ),
             )
         try:
@@ -264,13 +309,45 @@ class RegistryInspector:
         wanted = base.platform
         manifests = manifest.get("manifests")
         if isinstance(manifests, list):
-            return self._identity_from_index(base, computed, manifests)
-
-        if not isinstance(manifest.get("config"), dict):
+            identity = self._identity_from_index(base, computed, manifests)
+        elif not isinstance(manifest.get("config"), dict):
             return _with(base, limitation="the manifest declares no config (unsupported schema)")
-        return await self._identity_from_manifest(
-            base, client, host, repository, computed, manifest, wanted
-        )
+        else:
+            identity = await self._identity_from_manifest(
+                base, client, host, repository, computed, manifest, wanted
+            )
+        if identity.confirmed:
+            await self._remember(host, repository, top_digest, identity)
+        return identity
+
+    async def _remembered(
+        self, host: str, repository: str, digest: str, platform: Platform
+    ) -> tuple[str, str] | None:
+        """`(index digest, manifest digest)` verified earlier for this digest."""
+        if self._mapping_store is None:
+            return None
+        try:
+            return await self._mapping_store.get_mapping(host, repository, digest, str(platform))
+        except Exception as e:  # a cache that misbehaves is a miss
+            logger.debug(f"Could not read the remembered mapping for {digest[:19]}: {e}")
+            return None
+
+    async def _remember(
+        self, host: str, repository: str, digest: str, identity: ResolvedIdentity
+    ) -> None:
+        if self._mapping_store is None:
+            return
+        try:
+            await self._mapping_store.put_mapping(
+                host,
+                repository,
+                digest,
+                str(identity.platform),
+                index_digest=identity.index_digest,
+                manifest_digest=identity.manifest_digest,
+            )
+        except Exception as e:
+            logger.debug(f"Could not remember the mapping for {digest[:19]}: {e}")
 
     @staticmethod
     def _identity_from_index(
@@ -474,6 +551,18 @@ class RegistryInspector:
         if isinstance(layers, list):
             config["__layers"] = layers
         return config
+
+
+def remembered_identity(
+    base: ResolvedIdentity, index_digest: str, manifest_digest: str
+) -> ResolvedIdentity:
+    """A CONFIRMED identity rebuilt from a mapping verified on an earlier run."""
+    return _with(
+        base,
+        status=IdentityStatus.CONFIRMED,
+        index_digest=index_digest,
+        manifest_digest=manifest_digest,
+    )
 
 
 def _with(identity: ResolvedIdentity, **changes: Any) -> ResolvedIdentity:

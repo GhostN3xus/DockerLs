@@ -608,6 +608,7 @@ def build_hardening_analyzer(store: MeasurementStore | None = None) -> Hardening
             credentials=build_registry_credentials(),
             max_attempts=s.retry_max_attempts,
             backoff_base=s.retry_backoff_base,
+            mapping_store=store,
         )
         if s.inspect_image_config
         else None

@@ -290,6 +290,7 @@ class MeasurementService:
             version=version or "unknown-version",
             db_revision=revision,
             options=options,
+            components=await _components(self._scanner),
         )
         return self._fingerprint
 
@@ -458,7 +459,12 @@ class MeasurementService:
                     identity=identity,
                     refs=refs,
                     provenance=self._provenance(
-                        identity, refs, fingerprint, "cache", record.measured_at
+                        identity,
+                        refs,
+                        fingerprint,
+                        "cache",
+                        record.measured_at,
+                        produced_by=record.scan.scanner,
                     ),
                     from_cache=True,
                 )
@@ -473,7 +479,13 @@ class MeasurementService:
                 identity, fingerprint, scan, requested_reference=refs.requested, origin=origin
             )
         provenance = self._provenance(
-            identity, refs, fingerprint, origin, scan.scan_timestamp, note=note
+            identity,
+            refs,
+            fingerprint,
+            origin,
+            scan.scan_timestamp,
+            note=note,
+            produced_by=scan.scanner,
         )
         return Measurement(scan=scan, identity=identity, refs=refs, provenance=provenance)
 
@@ -573,7 +585,12 @@ class MeasurementService:
                         identity=identity,
                         refs=refs,
                         provenance=self._provenance(
-                            identity, refs, fingerprint, "cache", record.measured_at
+                            identity,
+                            refs,
+                            fingerprint,
+                            "cache",
+                            record.measured_at,
+                            produced_by=record.scan.scanner,
                         ),
                         from_cache=True,
                     )
@@ -623,7 +640,12 @@ class MeasurementService:
                     identity=identity,
                     refs=refs,
                     provenance=self._provenance(
-                        identity, refs, fingerprint, "scan", scan.scan_timestamp
+                        identity,
+                        refs,
+                        fingerprint,
+                        "scan",
+                        scan.scan_timestamp,
+                        produced_by=scan.scanner,
                     ),
                 )
         return handled
@@ -675,13 +697,17 @@ class MeasurementService:
         measured_at: str,
         *,
         note: str = "",
+        produced_by: str = "",
     ) -> MeasurementProvenance:
+        # The tool that actually produced the scan, when it is known: its own
+        # version and database revision, never the composite of a fallback pair.
+        used = fingerprint.component(produced_by) if produced_by else None
         return MeasurementProvenance(
             origin=origin,
             measured_at=measured_at or datetime.now(tz=UTC).isoformat(),
-            scanner=fingerprint.name,
-            scanner_version=fingerprint.version,
-            db_revision=fingerprint.db_revision,
+            scanner=produced_by if used else fingerprint.name,
+            scanner_version=used[0] if used else fingerprint.version,
+            db_revision=used[1] if used else fingerprint.db_revision,
             requested_reference=refs.requested,
             resolved_reference=refs.resolved,
             measured_reference=refs.measured,
@@ -730,6 +756,28 @@ class MeasurementService:
             refs=refs,
             provenance=self._provenance(identity, refs, fingerprint, "scan", ""),
         )
+
+
+async def _components(scanner: object) -> tuple[tuple[str, str, str], ...]:
+    """`(tool, version, revision)` per tool behind `scanner`, or () when it
+    cannot say -- in which case provenance falls back to the composite."""
+    method: Any = getattr(scanner, "components", None)
+    if not callable(method):
+        return ()
+    try:
+        value = method()
+        if inspect.isawaitable(value):
+            value = await value
+    except Exception as e:
+        logger.debug(f"Could not read components from {type(scanner).__name__}: {e}")
+        return ()
+    if not isinstance(value, dict):
+        return ()
+    return tuple(
+        (str(name), str(pair[0]), str(pair[1]))
+        for name, pair in sorted(value.items())
+        if isinstance(pair, tuple) and len(pair) == 2
+    )
 
 
 async def _text(scanner: object, attribute: str) -> str:

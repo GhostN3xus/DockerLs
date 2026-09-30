@@ -150,6 +150,10 @@ class TrivyScanner(ScannerInterface):
         built, _ = await asyncio.to_thread(read_trivy_built_at, self._cache_pool.base_dir)
         return built.isoformat() if built is not None else ""
 
+    async def components(self) -> dict[str, tuple[str, str]]:
+        """This tool's own version and database revision, by name."""
+        return {"trivy": (await self.version(), await self.db_revision())}
+
     def _cache_args(self, cache_dir: Path) -> list[str]:
         return ["--cache-dir", str(cache_dir)]
 
