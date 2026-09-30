@@ -440,3 +440,72 @@ class TestStopWhenEndsPaginationEarly:
 class TestHost:
     def test_exposes_the_host_it_was_built_with(self):
         assert OCIRegistryClient("cgr.dev").host == "cgr.dev"
+
+
+class TestCredentialsGoOnlyToTheRegistrysOwnAuthHost:
+    """The token realm is named by whoever answered the 401: the user's
+    password must not follow it to an arbitrary host or over plain http."""
+
+    @staticmethod
+    async def _token_request(host: str, realm: str) -> httpx.Request:
+        seen: list[httpx.Request] = []
+
+        def handler(request):
+            seen.append(request)
+            if request.url.path == "/token":
+                return httpx.Response(200, json={"token": "t"})
+            if "Authorization" not in request.headers:
+                return httpx.Response(401, headers={"WWW-Authenticate": f'Bearer realm="{realm}"'})
+            return httpx.Response(200, json={"tags": []})
+
+        with _use_handler(handler):
+            client = OCIRegistryClient(host, username="user", password="hunter2-secret")
+            await client.list_tags("team/app")
+        return next(r for r in seen if r.url.path == "/token")
+
+    @pytest.mark.asyncio
+    async def test_a_foreign_https_realm_gets_an_anonymous_request(self):
+        request = await self._token_request(
+            "registry.example.com", "https://evil.example.net/token"
+        )
+        assert "Authorization" not in request.headers
+        assert "hunter2" not in str(request.url)
+
+    @pytest.mark.asyncio
+    async def test_a_plain_http_realm_never_receives_credentials(self):
+        request = await self._token_request(
+            "registry.example.com", "http://registry.example.com/token"
+        )
+        assert "Authorization" not in request.headers
+
+    @pytest.mark.asyncio
+    async def test_a_lookalike_suffix_is_not_the_registrys_subdomain(self):
+        request = await self._token_request("example.com", "https://badexample.com/token")
+        assert "Authorization" not in request.headers
+
+    @pytest.mark.asyncio
+    async def test_a_subdomain_of_the_registry_is_accepted(self):
+        request = await self._token_request("example.com", "https://auth.example.com/token")
+        assert request.headers["Authorization"].startswith("Basic ")
+
+    @pytest.mark.asyncio
+    async def test_docker_hub_delegates_to_its_known_token_service(self):
+        request = await self._token_request("registry-1.docker.io", "https://auth.docker.io/token")
+        assert request.headers["Authorization"].startswith("Basic ")
+
+    @pytest.mark.asyncio
+    async def test_docker_hub_does_not_delegate_to_anything_else(self):
+        request = await self._token_request(
+            "registry-1.docker.io", "https://auth.docker.io.evil.io/token"
+        )
+        assert "Authorization" not in request.headers
+
+    def test_policy_function_directly(self):
+        from dockerls.integrations.registry.oci import credentials_allowed
+
+        assert credentials_allowed("ghcr.io", "https://ghcr.io/token")
+        assert credentials_allowed("localhost:5000", "http://localhost:5000/token")
+        assert not credentials_allowed("ghcr.io", "http://ghcr.io/token")
+        assert not credentials_allowed("ghcr.io", "https://ghcr.io.evil.io/token")
+        assert not credentials_allowed("ghcr.io", "file:///etc/passwd")
+        assert not credentials_allowed("ghcr.io", "not a url")

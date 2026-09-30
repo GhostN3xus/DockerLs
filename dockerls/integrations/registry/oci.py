@@ -109,6 +109,48 @@ def is_fetchable_realm(realm: str) -> bool:
     return url.scheme in ("http", "https") and bool(url.host)
 
 
+#: Token services that legitimately live on another host than the registry
+#: they serve. Everything else must be on the registry's own host or below it.
+_AUTH_HOSTS: dict[str, frozenset[str]] = {
+    "registry-1.docker.io": frozenset({"auth.docker.io"}),
+    "index.docker.io": frozenset({"auth.docker.io"}),
+    "docker.io": frozenset({"auth.docker.io"}),
+}
+
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def credentials_allowed(registry_host: str, realm: str) -> bool:
+    """Whether the registry's credentials may be sent to `realm`.
+
+    The realm is chosen by whoever answered the 401. Sending the user's
+    password to it unconditionally hands that password to any host a
+    registry -- or a machine in the middle of a plain-http hop -- names. The
+    credentials go only over https (plain http only to a local registry) and
+    only to the registry's own host, a subdomain of it, or the token service
+    that registry is known to delegate to. An anonymous token request is
+    still made otherwise: it discloses nothing.
+    """
+    try:
+        url = httpx.URL(realm)
+    except (httpx.InvalidURL, ValueError, TypeError, UnicodeError):
+        return False
+    realm_host = (url.host or "").lower().rstrip(".")
+    host = (
+        registry_host.lower().rsplit(":", 1)[0]
+        if registry_host.count(":") == 1
+        else (registry_host.lower())
+    )
+    host = host.rstrip(".")
+    if url.scheme != "https" and not (url.scheme == "http" and realm_host in _LOCAL_HOSTS):
+        return False
+    return (
+        realm_host == host
+        or realm_host.endswith(f".{host}")
+        or realm_host in _AUTH_HOSTS.get(host, frozenset())
+    )
+
+
 class OCIRegistryClient:
     """Minimal OCI Distribution v2 client for listing tags.
 
@@ -257,6 +299,12 @@ class OCIRegistryClient:
             logger.warning(f"Refusing token realm advertised by {self._host}: {realm!r}")
             return ""
         auth = (self._username, self._password) if self._username and self._password else None
+        if auth is not None and not credentials_allowed(self._host, realm):
+            logger.warning(
+                f"Token realm {httpx.URL(realm).host!r} is not {self._host}'s own "
+                "authorisation host: requesting the token without credentials"
+            )
+            auth = None
         resp = await client.get(realm, params=params, auth=auth)
         resp.raise_for_status()
         data = resp.json()
