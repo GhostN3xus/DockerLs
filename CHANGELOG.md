@@ -7,7 +7,17 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Ignore-rule YAML now uses the same bounded loader as remote catalogue data:
+  oversized files, recursive aliases and exponential alias expansion fail
+  closed instead of consuming unbounded memory or recursion depth.
+
 ### Added
+- Real benchmarks now cover `analyze`, `search` and `recommend`, reporting
+  startup, network/API, scanner, cache and total wall time for cold and warm
+  runs. `search --format json` exposes the same version-independent timing
+  data used by the benchmark.
+- Python 3.14 is part of the declared and CI-tested compatibility matrix.
 - `--platform os/arch[/variant]` on `analyze`, `compare`, `recommend`, `advisor`
   and `alternatives`. The requested, resolved and measured references are kept
   apart; scans run on `name@digest` of the **platform manifest** (the index
@@ -65,6 +75,13 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
   of Typer's 2 (which is a verdict code here).
 
 ### Fixed
+- The health-command success test now isolates both GET and HEAD probes, so
+  the GitHub pipeline no longer depends on live Exploit-DB connectivity.
+- `analyze --ci` now emits provider-native, redacted annotations on policy or
+  scanner failure; this also connects the previously unreachable CI adapter
+  to the application path covered by the dead-code pipeline gate.
+- Recursive YAML aliases are detected while measuring expansion, preventing a
+  self-referential node graph from recursing indefinitely before validation.
 - End-of-life lookups for `alpine`, `httpd`, `kafka` and `cassandra` always
   returned no data: endoflife.date now answers those slugs with a 301 to
   `alpine-linux`, `apache-http-server`, `apache-kafka` and `apache-cassandra`,

@@ -132,6 +132,16 @@ class TestStructuredOutput:
         assert "Gate failed" not in result.stdout
         assert "Gate failed" in result.stderr
 
+    def test_ci_gate_failure_emits_a_github_annotation(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setenv("GITHUB_TOKEN", "must-not-appear")
+
+        result = _run(_analysis(critical=1), "--ci", "--fail-on", "critical")
+
+        assert json.loads(result.stdout)["query"] == "node:22-alpine"
+        assert "::error::DockerLs policy rejected node:22-alpine" in result.stderr
+        assert "must-not-appear" not in result.stderr
+
     def test_ci_scanner_failure_is_a_machine_readable_unverified_result(self):
         result = _run(_analysis(verified=False), "--ci")
 

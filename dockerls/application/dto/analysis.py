@@ -160,6 +160,9 @@ class ImageAnalysis(BaseModel):
     completeness: str = "COMPLETE"
     #: Steps this analysis did not finish, so their absence is stated.
     pending_checks: list[str] = Field(default_factory=list)
+    #: Work performed and stage timings. CLI runs populate this; direct use
+    #: case callers retain the empty default.
+    metrics: RunMetrics = Field(default_factory=lambda: RunMetrics())
 
     @property
     def pinned_reference(self) -> str:

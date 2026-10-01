@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from dockerls.utils.ignore_file import active_ignored_cve_ids, load_ignore_rules
+from dockerls.utils.safe_yaml import MAX_DOCUMENT_BYTES
 
 
 class TestLoadIgnoreRules:
@@ -36,6 +37,21 @@ class TestLoadIgnoreRules:
     def test_malformed_yaml_returns_empty(self, tmp_path):
         f = tmp_path / ".dockerls-ignore.yaml"
         f.write_text("ignores: [this is not: valid: yaml")
+        assert load_ignore_rules(f) == []
+
+    def test_alias_expansion_bomb_returns_empty(self, tmp_path):
+        f = tmp_path / ".dockerls-ignore.yaml"
+        bomb = "a: &a [x,x,x,x,x,x,x,x,x]\n"
+        for letter, previous in zip("bcdefghi", "abcdefgh", strict=True):
+            bomb += f"{letter}: &{letter} [{', '.join([f'*{previous}'] * 9)}]\n"
+        f.write_text(bomb)
+
+        assert load_ignore_rules(f) == []
+
+    def test_oversized_file_returns_empty(self, tmp_path):
+        f = tmp_path / ".dockerls-ignore.yaml"
+        f.write_bytes(b"#" * (MAX_DOCUMENT_BYTES + 1))
+
         assert load_ignore_rules(f) == []
 
     def test_active_ignored_cve_ids_normalizes_case(self, tmp_path):

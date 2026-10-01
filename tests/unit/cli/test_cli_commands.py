@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -56,6 +57,21 @@ class TestSearchCommand:
         assert result.exit_code == 0
         assert "22-alpine" in result.stdout
 
+    def test_search_json_includes_stage_timings(self):
+        repo = AsyncMock()
+        repo.search_tags = AsyncMock(return_value=[DockerImage(name="node", tag="22-alpine")])
+        with patch(
+            "dockerls.cli.commands.search.build_search_use_case",
+            AsyncMock(return_value=SearchImagesUseCase(repo)),
+        ):
+            result = runner.invoke(app, ["search", "node", "--format", "json"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["query"] == "node"
+        assert payload["tags"][0]["tag"] == "22-alpine"
+        assert payload["metrics"]["timings"]["stages"]["startup"]["calls"] == 1
+
     def test_search_no_tags_exits_one(self):
         repo = AsyncMock()
         repo.search_tags = AsyncMock(return_value=[])
@@ -101,6 +117,20 @@ class TestAnalyzeCommand:
             result = runner.invoke(app, ["analyze", "node:22-alpine"])
         assert result.exit_code == 0
         assert "CVE-2024-0001" in result.stdout
+
+    def test_analyze_json_includes_stage_timings(self):
+        use_case = AsyncMock()
+        use_case.execute = AsyncMock(return_value=_analysis())
+        with patch(
+            "dockerls.cli.commands.analyze.build_analyze_use_case",
+            AsyncMock(return_value=use_case),
+        ):
+            result = runner.invoke(app, ["analyze", "node:22-alpine", "--format", "json"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        timings = payload["recommendations"][0]["metrics"]["timings"]
+        assert timings["stages"]["startup"]["calls"] == 1
 
     def test_cve_id_is_never_truncated_in_a_narrow_terminal(self):
         """The CVE ID is the primary key of a finding.
@@ -299,7 +329,10 @@ class TestDoctorCommand:
 class TestHealthCommand:
     def test_health_reports_status(self):
         ok_resp = httpx.Response(200, request=httpx.Request("GET", "https://x"))
-        with patch("httpx.AsyncClient.get", AsyncMock(return_value=ok_resp)):
+        with (
+            patch("httpx.AsyncClient.get", AsyncMock(return_value=ok_resp)),
+            patch("httpx.AsyncClient.head", AsyncMock(return_value=ok_resp)),
+        ):
             result = runner.invoke(app, ["health"])
         assert result.exit_code == 0
         assert "Docker Hub API" in result.stdout

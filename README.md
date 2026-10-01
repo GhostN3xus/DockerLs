@@ -2,12 +2,12 @@
 
 [![CI](https://github.com/Ivomsantiago/DockerLs/actions/workflows/ci.yml/badge.svg)](https://github.com/Ivomsantiago/DockerLs/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/Ivomsantiago/DockerLs/actions/workflows/codeql.yml/badge.svg)](https://github.com/Ivomsantiago/DockerLs/actions/workflows/codeql.yml)
-[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue)](https://www.python.org/)
 [![Version](https://img.shields.io/badge/version-1.0.16-blue)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**DockerLs ajuda você a escolher a imagem Docker mais segura para produção —
-e a provar por quê.**
+**DockerLs não apenas encontra vulnerabilidades; ele ajuda a escolher e validar
+a imagem Docker mais segura para substituir a atual.**
 
 Em vez de você pesquisar tag por tag no Docker Hub e adivinhar qual é mais
 confiável, o DockerLs escaneia várias de uma vez (Trivy e/ou Grype), compara

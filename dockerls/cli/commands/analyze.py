@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -53,6 +54,7 @@ from dockerls.domain.entities.vulnerability import PackageOrigin, Vulnerability
 from dockerls.exit_codes import EXIT_ERROR, EXIT_OK, EXIT_POLICY, exit_code_for_completeness
 from dockerls.exporters.factory import ExporterFactory
 from dockerls.infrastructure.run_store import RunStore, scope_of
+from dockerls.integrations.ci import detect_connector
 from dockerls.utils.deadline import Deadline
 
 if TYPE_CHECKING:
@@ -229,6 +231,7 @@ async def _analyze(
         result, completeness=result.completeness, pending_checks=result.pending_checks
     )
     instrumentation.mark_first_result()
+    result.metrics.timings = instrumentation.to_dict()
 
     if not result.scan.is_verified:
         # Sem scan não há veredito. Sair 0 aqui deixaria um portão de CI
@@ -240,6 +243,8 @@ async def _analyze(
         # arquivo de log e em `--format json`.
         out_of_time = result.completeness == "NO_RESULT"
         code = exit_code_for_completeness(EXIT_ERROR, result.completeness)
+        if ci_mode:
+            _emit_ci_issue("error", f"DockerLs could not verify {result.image.full_reference}")
         if output_format == "ndjson":
             events.emit(
                 RUN_FINISHED,
@@ -268,6 +273,8 @@ async def _analyze(
     code = exit_code_for_completeness(
         fail_code, result.completeness, violation=fail_code == EXIT_POLICY
     )
+    if ci_mode and code != EXIT_OK:
+        _emit_ci_issue("error", f"DockerLs policy rejected {result.image.full_reference}")
     saved = _save_analysis_run(result, summary, options, run_id)
     previous_diff = _diff_against_previous(saved, diff)
 
@@ -308,6 +315,11 @@ def _emit_summary(summary: DecisionSummary, code: int, run_id: str) -> None:
     """The versioned CI verdict, alone on stdout."""
     ci = build_ci_summary(summary, command="analyze", exit_code=code, run_id=run_id)
     sys.stdout.write(json.dumps(ci.model_dump(by_alias=True), indent=2, default=str) + "\n")
+
+
+def _emit_ci_issue(level: str, message: str) -> None:
+    """Write a provider-native annotation without corrupting JSON stdout."""
+    print(detect_connector(os.environ).emit_issue(level, message), file=sys.stderr)
 
 
 def _save_analysis_run(
