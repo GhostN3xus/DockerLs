@@ -699,6 +699,7 @@ async def build_search_use_case(
     sources: Sequence[str] | None = None,
     *,
     all_sources: bool = False,
+    instrumentation: RunInstrumentation | None = None,
 ) -> SearchImagesUseCase:
     """`search` goes through its use case like every other command, so the
     CLI never reaches past the application layer into a repository.
@@ -708,5 +709,10 @@ async def build_search_use_case(
     `--all-sources` widen it to the same catalogues `recommend` searches.
     """
     if sources is None and not all_sources:
-        return SearchImagesUseCase(repository=await build_repository())
-    return SearchImagesUseCase(repository=await build_sources(sources, all_sources=all_sources))
+        return SearchImagesUseCase(
+            repository=await build_repository(), instrumentation=instrumentation
+        )
+    return SearchImagesUseCase(
+        repository=await build_sources(sources, all_sources=all_sources),
+        instrumentation=instrumentation,
+    )

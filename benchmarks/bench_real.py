@@ -16,11 +16,12 @@ Three cache states are separated, because "cold" means different things:
                          machine that has run Trivy before.
 * `store warm`        -- the same store again: the measurement is reused.
 
-The default target is a small public image on a mirror that is not
-rate-limited for anonymous pulls. `--include-hub` adds a `recommend` run
-against Docker Hub, which throttles anonymous manifest requests: when it does,
-the run is reported as it ended (identity unconfirmed), not retried until it
-looks good.
+The default analyze target is a small public image on a mirror. Search and
+recommend default to `nginx` on Docker Hub so the three commands in the
+project's performance goal are always measured. Docker Hub can throttle
+anonymous requests: when it does, the run is reported as it ended (identity
+unconfirmed), not retried until it looks good. `--repository` selects another
+repository; `--include-hub` retains the additional historical Alpine scenario.
 """
 
 from __future__ import annotations
@@ -93,12 +94,16 @@ def run_cli(args: list[str], env: dict[str, str], timeout: float) -> tuple[float
     return time.perf_counter() - started, done.returncode, done.stdout, done.stderr
 
 
-def origin_of(stdout: str) -> str:
-    """`scan` / `cache` / `shared` from a `--format summary` document, if present."""
+def _document(stdout: str) -> object:
     try:
-        doc = json.loads(stdout)
+        return json.loads(stdout)
     except ValueError:
-        return ""
+        return {}
+
+
+def origin_of(stdout: str) -> str:
+    """`scan` / `cache` / `shared` from a machine-readable document, if present."""
+    doc = _document(stdout)
     stack = [doc]
     while stack:
         node = stack.pop()
@@ -109,6 +114,57 @@ def origin_of(stdout: str) -> str:
         elif isinstance(node, list):
             stack.extend(node)
     return ""
+
+
+def timing_counters(stdout: str) -> dict[str, float]:
+    """Flatten the CLI instrumentation into comparable benchmark columns.
+
+    API stages can overlap, so ``api_s`` is an observed-work total rather
+    than a partition of wall time. ``network_s`` is the same set today; both
+    names are emitted so a future local API stage does not silently change
+    the meaning of historical data.
+    """
+    doc = _document(stdout)
+    if not isinstance(doc, dict):
+        return {}
+    stack: list[object] = [doc]
+    timings: dict[str, object] | None = None
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            metrics = node.get("metrics")
+            candidate = metrics.get("timings") if isinstance(metrics, dict) else None
+            if isinstance(candidate, dict) and candidate.get("stages"):
+                timings = candidate
+                break
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    if timings is None:
+        return {}
+    stages = timings.get("stages")
+    if not isinstance(stages, dict):
+        return {}
+
+    def total(names: tuple[str, ...]) -> float:
+        seconds = 0.0
+        for name in names:
+            stage = stages.get(name)
+            if isinstance(stage, dict) and isinstance(stage.get("seconds"), int | float):
+                seconds += float(stage["seconds"])
+        return seconds
+
+    api = total(("discovery", "identity_resolution", "enrichment", "inspection"))
+    counters = {
+        "startup_s": total(("startup",)),
+        "network_s": api,
+        "scanner_s": total(
+            ("database_preparation", "queue_wait", "scan_primary", "scan_secondary")
+        ),
+        "api_s": api,
+        "cache_s": total(("cache",)),
+    }
+    return counters if any(counters.values()) else {}
 
 
 def measure(
@@ -134,7 +190,7 @@ def measure(
         seconds, code, out, _ = run_cli(args, sandbox.env(engine), timeout)
         codes.append(code)
         origins.append(origin_of(out))
-        samples.append(Sample(seconds, {"exit": float(code)}))
+        samples.append(Sample(seconds, {"exit": float(code), **timing_counters(out)}))
     note = f"exit codes {sorted(set(codes))}; origin {sorted({o for o in origins if o}) or 'n/a'}"
     notes.append(f"{label}: {note}")
     return summarize(label, "real", samples, note)
@@ -150,6 +206,7 @@ def main() -> None:
     p.add_argument("--timeout", type=float, default=600)
     p.add_argument("--full-cold", action="store_true", help="also time a run that downloads the DB")
     p.add_argument("--include-hub", action="store_true", help="also time `recommend` on Docker Hub")
+    p.add_argument("--repository", default="nginx", help="repository used by search/recommend")
     p.add_argument("--engine", choices=["python", "go", "both"], default="python")
     p.add_argument("--json", default=None)
     args = p.parse_args()
@@ -162,6 +219,7 @@ def main() -> None:
         "trivy": _tool_version("trivy", "--version"),
         "grype": _tool_version("grype", "version"),
         "image": args.image,
+        "repository": args.repository,
         "network": "real, unthrottled by this script",
     }
     rows: list[Row] = []
@@ -170,8 +228,8 @@ def main() -> None:
     try:
         print("Preparing the Trivy DB (not timed)...", file=sys.stderr)
         run_cli(["analyze", args.image, "--format", "summary"], sandbox.env("python"), args.timeout)
-        analyze = ["analyze", args.image, "--platform", "linux/amd64", "--format", "summary"]
-        arm = ["analyze", args.image, "--platform", "linux/arm64", "--format", "summary"]
+        analyze = ["analyze", args.image, "--platform", "linux/amd64", "--format", "json"]
+        arm = ["analyze", args.image, "--platform", "linux/arm64", "--format", "json"]
         compare = ["compare", args.image, args.second_image, "--platform", "linux/amd64"]
         for engine in engines:
             common = {"sandbox": sandbox, "engine": engine, "timeout": args.timeout, "notes": notes}
@@ -226,6 +284,45 @@ def main() -> None:
                 measure(
                     tag + "compare 2 images, store warm",
                     compare,
+                    repeat=args.repeat,
+                    warm=True,
+                    **common,
+                )
+            )
+            search = ["search", args.repository, "--limit", "20", "--format", "json"]
+            rows.append(
+                measure(
+                    tag + f"search {args.repository}",
+                    search,
+                    repeat=args.repeat,
+                    warm=False,
+                    **common,
+                )
+            )
+            rec = [
+                "recommend",
+                args.repository,
+                "--limit",
+                "20",
+                "--budget",
+                "8",
+                "--format",
+                "json",
+                "--no-progress",
+            ]
+            rows.append(
+                measure(
+                    tag + f"recommend {args.repository}, store cold",
+                    rec,
+                    repeat=args.repeat,
+                    warm=False,
+                    **common,
+                )
+            )
+            rows.append(
+                measure(
+                    tag + f"recommend {args.repository}, store warm",
+                    rec,
                     repeat=args.repeat,
                     warm=True,
                     **common,

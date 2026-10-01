@@ -8,7 +8,7 @@ Três tipos de número, nunca misturados. Todos os scripts estão em `benchmarks
 | **Real** | `bench_real.py` | Tempo de parede da CLI instalada, com Trivy real e registry real | Só vale para esta máquina e esta rede (abaixo); varia com a carga do registry |
 | **Medição pontual** | (comandos citados abaixo) | Custos isolados de uma etapa | — |
 
-Rodar (na raiz do repositório): `python benchmarks/bench_pipeline.py --repeat 7`, `python benchmarks/bench_profiles.py --repeat 7`, `python benchmarks/bench_real.py --repeat 5 --engine both --full-cold` (este último exige `dockerls` e `trivy` no PATH).
+Rodar (na raiz do repositório): `python benchmarks/bench_pipeline.py --repeat 7`, `python benchmarks/bench_profiles.py --repeat 7`, `python benchmarks/bench_real.py --repeat 5 --engine both --full-cold` (este último exige `dockerls` e `trivy` no PATH). O benchmark real sempre mede `analyze`, `search` e `recommend`, em estados frios e quentes quando há cache. Cada linha separa tempo total, startup, rede/API, scanner e cache; etapas sobrepostas não devem ser somadas para tentar reconstruir o total.
 
 ## Ambiente das medições abaixo
 
@@ -74,5 +74,7 @@ O que a tabela mostra e o que não:
 
 - Cenários com **muitas tags reais** e **fontes lentas/indisponíveis/com rate limit reais** (só simulados; o Docker Hub deu 429 no ambiente).
 - Execuções simultâneas de **processos** com cache de Trivy compartilhado (a exclusão dos slots é testada com processos reais, o ganho de tempo não foi cronometrado).
-- Custo de CPU/memória por etapa em runs grandes; o `RunInstrumentation` registra etapas do `recommend`, mas não do `analyze`/`compare`.
-- Requisições ao Docker Hub/descoberta na instrumentação.
+- Custo de CPU/memória por etapa em runs grandes; `RunInstrumentation` registra tempo de parede, não consumo de recursos. `compare` ainda não publica tempos por etapa.
+- Contagem exata de requisições por fonte durante descoberta composta; o
+  tempo total de descoberta é medido, mas hoje conta como uma chamada lógica
+  ao registry no `search`.

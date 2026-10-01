@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
+from dockerls import cli as cli_package
+from dockerls.application.services.instrumentation import RunInstrumentation
 from dockerls.application.services.source_registry import UnknownSourceError
 from dockerls.cli.dependencies import build_search_use_case
 from dockerls.cli.image_names import reject_tagged_reference
@@ -36,15 +39,20 @@ def search(
     all_sources: bool = typer.Option(
         False, "--all-sources", help="Search every configured source, including opt-in ones"
     ),
+    output_format: str = typer.Option(
+        "table", "--format", "-f", help="Output format: table or json"
+    ),
 ) -> None:
     """Search for available tags of an image, on Docker Hub or any configured source."""
     limit = check_limit(limit)
+    if output_format not in ("table", "json"):
+        raise typer.BadParameter("--format must be 'table' or 'json'")
     error = reject_tagged_reference(image, "search")
     if error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(EXIT_ERROR)
     try:
-        asyncio.run(_search(image, limit, list(source) or None, all_sources))
+        asyncio.run(_search(image, limit, list(source) or None, all_sources, output_format))
     except UnknownSourceError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(EXIT_ERROR) from e
@@ -61,14 +69,31 @@ async def _search(
     limit: int,
     sources: list[str] | None = None,
     all_sources: bool = False,
+    output_format: str = "table",
 ) -> None:
-    use_case = await build_search_use_case(sources, all_sources=all_sources)
-    with scan_status(f"Searching tags for {image}..."):
+    instrumentation = RunInstrumentation()
+    instrumentation.add("startup", cli_package.startup_seconds())
+    use_case = await build_search_use_case(
+        sources, all_sources=all_sources, instrumentation=instrumentation
+    )
+    if output_format == "json":
         tags = await use_case.execute(image, limit=limit)
+    else:
+        with scan_status(f"Searching tags for {image}..."):
+            tags = await use_case.execute(image, limit=limit)
 
     if not tags:
         console.print(f"[red]No tags found for '{image}'[/red]")
         raise typer.Exit(EXIT_ERROR)
+
+    if output_format == "json":
+        payload = {
+            "query": image,
+            "tags": [tag.model_dump(mode="json") for tag in tags],
+            "metrics": {"timings": instrumentation.to_dict()},
+        }
+        console.print_json(json.dumps(payload, default=str))
+        return
 
     table = Table(title=f"Tags for {image}")
     table.add_column("Tag", style="cyan")
