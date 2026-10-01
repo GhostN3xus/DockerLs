@@ -74,7 +74,6 @@ e este projeto segue o [Versionamento Semântico](https://semver.org/spec/v2.0.0
 - `--time-budget` is parsed by DockerLs, so a malformed value exits 1 instead
   of Typer's 2 (which is a verdict code here).
 
-### Fixed
 - The health-command success test now isolates both GET and HEAD probes, so
   the GitHub pipeline no longer depends on live Exploit-DB connectivity.
 - `analyze --ci` now emits provider-native, redacted annotations on policy or
